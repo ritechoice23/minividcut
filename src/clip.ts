@@ -1,7 +1,7 @@
 import type { CaptionTrack } from './captions'
 
 export type Range = { start: number; end: number }
-export type Clip = Range & { id: number; title?: string; captions?: CaptionTrack }
+export type Clip = Range & { id: number; title?: string; titleManuallyEdited?: boolean; captions?: CaptionTrack }
 export const MIN_CLIP = 0.05
 export const MAX_CLIPS = 100
 

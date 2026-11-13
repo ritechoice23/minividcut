@@ -2,6 +2,7 @@ mod caption_overlay;
 mod caption_render;
 mod captions;
 mod export_batch;
+mod titles;
 mod video;
 
 pub fn run() {
@@ -11,11 +12,13 @@ pub fn run() {
         .manage(video::PreviewFiles::default())
         .manage(video::Exports::default())
         .manage(captions::CaptionEngine::default())
+        .manage(titles::TitleEngine::default())
         .manage(caption_overlay::CaptionOverlays::default())
         .invoke_handler(tauri::generate_handler![
             captions::caption_model,
             captions::generate_captions,
             captions::cancel_captions,
+            titles::generate_title,
             caption_overlay::prepare_caption_overlay,
             caption_overlay::discard_caption_overlays,
             video::open_video,
@@ -23,6 +26,7 @@ pub fn run() {
             video::clip_thumbnail,
             video::prepare_preview,
             video::export_clips,
+            video::cancel_export,
             video::open_export_folder
         ])
         .run(tauri::generate_context!())

@@ -5,10 +5,15 @@ use crate::{
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
 };
 use tauri::{ipc::Channel, AppHandle, Manager};
 use tauri_plugin_opener::OpenerExt;
@@ -22,17 +27,50 @@ const EXTENSIONS: &[&str] = &[
 type Result<T> = std::result::Result<T, String>;
 
 #[derive(Default)]
-pub struct PreviewFiles(Mutex<Vec<tempfile::TempDir>>);
+pub struct PreviewFiles(Mutex<PreviewState>);
+
+#[derive(Default)]
+struct PreviewState {
+    source: Option<PathBuf>,
+    frame_rate: f64,
+    request: u64,
+    folder: Option<tempfile::TempDir>,
+}
 
 #[derive(Default)]
 pub struct Exports {
-    batch: Mutex<()>,
+    batch: Mutex<Option<(String, Arc<AtomicBool>)>>,
+    encoders: EncoderCache,
     folder: Mutex<Option<PathBuf>>,
+}
+
+type EncoderCache = Mutex<HashMap<(Quality, Format), Vec<&'static [&'static str]>>>;
+
+const EXPORT_CANCELED: &str = "Export canceled.";
+
+struct ExportJob<'a>(&'a Mutex<Option<(String, Arc<AtomicBool>)>>);
+
+impl Drop for ExportJob<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.0.lock() {
+            *active = None;
+        }
+    }
+}
+
+fn check_export(cancel: &AtomicBool) -> Result<()> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(EXPORT_CANCELED.into());
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoInfo {
+    bytes: u64,
+    #[serde(skip)]
+    frame_rate: f64,
     path: PathBuf,
     name: String,
     duration: f64,
@@ -58,7 +96,7 @@ pub struct ExportClip {
     overlay: Option<Overlay>,
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Format {
     Portrait,
@@ -78,7 +116,7 @@ pub struct FramePosition {
     y: u8,
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Quality {
     Compact,
@@ -137,6 +175,18 @@ impl Quality {
                     "-c:v", "hevc_amf", "-quality", "quality", "-rc", "cqp", "-qp_i", "22",
                     "-qp_p", "24", "-tag:v", "hvc1",
                 ],
+                &[
+                    "-c:v",
+                    "hevc_mf",
+                    "-hw_encoding",
+                    "1",
+                    "-rate_control",
+                    "quality",
+                    "-quality",
+                    "80",
+                    "-tag:v",
+                    "hvc1",
+                ],
             ],
             Self::Compatible => &[
                 &[
@@ -163,33 +213,79 @@ impl Quality {
                     "-c:v", "h264_amf", "-quality", "quality", "-rc", "cqp", "-qp_i", "17",
                     "-qp_p", "19",
                 ],
+                &[
+                    "-c:v",
+                    "h264_mf",
+                    "-hw_encoding",
+                    "1",
+                    "-rate_control",
+                    "quality",
+                    "-quality",
+                    "85",
+                ],
             ],
-            Self::Lossless => &[],
+            Self::Lossless => &[&["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "lossless"]],
         }
     }
 }
 
-fn hardware_encoder(quality: Quality, format: Format) -> Option<&'static [&'static str]> {
+fn encoder_pixel_format(encoder: &str) -> &'static str {
+    if encoder.ends_with("_mf") {
+        "nv12"
+    } else {
+        "yuv420p"
+    }
+}
+
+fn available_hardware_encoders(quality: Quality, format: Format) -> Vec<&'static [&'static str]> {
     let size = match format {
-        Format::Portrait => "color=s=1080x1920:r=30",
-        Format::Landscape => "color=s=1920x1080:r=30",
+        Format::Portrait => "testsrc2=s=1080x1920:r=30",
+        Format::Landscape => "testsrc2=s=1920x1080:r=30",
     };
-    quality.hardware_candidates().iter().copied().find(|args| {
-        ffmpeg()
-            .args(["-f", "lavfi", "-i", size, "-frames:v", "1"])
-            .args(*args)
-            .args(["-pix_fmt", "yuv420p", "-f", "null", "-"])
-            .output()
-            .is_ok_and(|output| output.status.success())
-    })
+    quality
+        .hardware_candidates()
+        .iter()
+        .copied()
+        .filter(|args| {
+            ffmpeg()
+                .args(["-f", "lavfi", "-i", size, "-frames:v", "4"])
+                .args(*args)
+                .args([
+                    "-pix_fmt",
+                    encoder_pixel_format(args[1]),
+                    "-abort_on",
+                    "empty_output",
+                    "-f",
+                    "null",
+                    "-",
+                ])
+                .output()
+                .is_ok_and(|output| output.status.success())
+        })
+        .collect()
+}
+
+fn encode_with_fallback(
+    hardware: &[&'static [&'static str]],
+    software: &'static [&'static str],
+    mut encode: impl FnMut(&[&str]) -> Result<()>,
+) -> Result<&'static str> {
+    for &encoder in hardware {
+        if encode(encoder).is_ok() {
+            return Ok(encoder[1]);
+        }
+    }
+    encode(software)?;
+    Ok(software[1])
 }
 
 #[derive(Clone, Serialize)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum ClipExport {
     Encoding { fraction: f64 },
-    Saved { bytes: u64 },
+    Saved { bytes: u64, encoder: &'static str },
     Failed { error: String },
+    Canceled,
 }
 
 #[derive(Serialize)]
@@ -208,7 +304,16 @@ pub struct ExportOptions {
 }
 
 fn command(tool: &str) -> Command {
-    let mut command = Command::new(tool);
+    let executable = std::env::current_exe().expect("Could not locate the MiniVidCut executable");
+    let directory = executable
+        .parent()
+        .expect("Executable has a parent directory");
+    // Cargo runs the test executable from the profile's deps folder.
+    #[cfg(test)]
+    let directory = directory
+        .parent()
+        .expect("Cargo profile directory is missing");
+    let mut command = Command::new(directory.join(format!("{tool}.exe")));
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -220,7 +325,7 @@ fn command(tool: &str) -> Command {
 fn launch_error(tool: &str, error: std::io::Error) -> String {
     if error.kind() == std::io::ErrorKind::NotFound {
         return format!(
-            "{tool} is missing. Add FFmpeg 8.0 or later to PATH and reopen MiniVidCut."
+            "MiniVidCut could not find its bundled {tool}. Reinstall MiniVidCut and try again."
         );
     }
     format!("Could not start {tool}: {error}")
@@ -271,7 +376,7 @@ fn probe(path: PathBuf) -> Result<VideoInfo> {
                 "-select_streams",
                 "V:0",
                 "-show_entries",
-                "format=duration:stream=width,height,duration:stream_side_data=rotation",
+                "format=duration:stream=width,height,duration,avg_frame_rate:stream_side_data=rotation",
                 "-of",
                 "json",
             ])
@@ -305,7 +410,19 @@ fn probe(path: PathBuf) -> Result<VideoInfo> {
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
+    let frame_rate = stream["avg_frame_rate"]
+        .as_str()
+        .and_then(|rate| rate.split_once('/'))
+        .and_then(|(numerator, denominator)| {
+            Some(numerator.parse::<f64>().ok()? / denominator.parse::<f64>().ok()?)
+        })
+        .filter(|rate| rate.is_finite())
+        .unwrap_or_default();
     Ok(VideoInfo {
+        frame_rate,
+        bytes: std::fs::metadata(&path)
+            .map_err(|error| error.to_string())?
+            .len(),
         path,
         name,
         duration,
@@ -329,6 +446,12 @@ pub async fn open_video(app: AppHandle, path: PathBuf) -> Result<VideoInfo> {
         app.asset_protocol_scope()
             .allow_file(&video.path)
             .map_err(|error| error.to_string())?;
+        let previews = app.state::<PreviewFiles>();
+        let mut preview = previews.0.lock().map_err(|error| error.to_string())?;
+        preview.request += 1;
+        preview.source = Some(video.path.clone());
+        preview.frame_rate = video.frame_rate;
+        preview.folder = None;
         Ok(video)
     })
     .await
@@ -449,18 +572,88 @@ pub async fn thumbnails(path: PathBuf, duration: f64) -> Result<Vec<String>> {
 pub async fn prepare_preview(app: AppHandle, path: PathBuf) -> Result<PathBuf> {
     background(move || {
         let path = source(&path)?;
+        let previews = app.state::<PreviewFiles>();
+        let (request, frame_rate) = {
+            let mut state = previews.0.lock().map_err(|error| error.to_string())?;
+            if state.source.as_ref() != Some(&path) {
+                return Err("The source video changed.".into());
+            }
+            state.request += 1;
+            (state.request, state.frame_rate)
+        };
         let folder = tempfile::tempdir().map_err(|error| error.to_string())?;
         let preview = folder.path().join("preview.mp4");
+        let scale =
+            "scale=960:960:force_original_aspect_ratio=decrease:force_divisible_by=2:reset_sar=1";
+        let filter = if frame_rate > 30.0 {
+            format!("fps=30,{scale}")
+        } else {
+            scale.to_owned()
+        };
         let mut cmd = ffmpeg();
-        input(&mut cmd, &path).args(["-map", "0:V:0", "-map", "0:a:0?", "-sn", "-dn",
-            "-vf", "scale=960:960:force_original_aspect_ratio=decrease:force_divisible_by=2:reset_sar=1",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "25", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-movflags", "+faststart"]).arg(&preview);
-        output(&mut cmd, "ffmpeg", "Could not create a playable preview")?;
-        app.asset_protocol_scope().allow_file(&preview).map_err(|error| error.to_string())?;
-        app.state::<PreviewFiles>().0.lock().map_err(|error| error.to_string())?.push(folder);
+        input(&mut cmd, &path)
+            .args([
+                "-map",
+                "0:V:0",
+                "-map",
+                "0:a:0?",
+                "-sn",
+                "-dn",
+                "-vf",
+                &filter,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-crf",
+                "25",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-movflags",
+                "+faststart",
+            ])
+            .arg(&preview);
+        let log = tempfile::tempfile().map_err(|error| error.to_string())?;
+        let read_log = log.try_clone().map_err(|error| error.to_string())?;
+        let mut child = cmd
+            .stdout(Stdio::null())
+            .stderr(log)
+            .spawn()
+            .map_err(|error| launch_error("ffmpeg", error))?;
+        let status = loop {
+            let current = previews
+                .0
+                .lock()
+                .is_ok_and(|state| state.request == request);
+            if !current {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("The source video changed.".into());
+            }
+            if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+                break status;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        if !status.success() {
+            return Err(read_process_error(
+                "Could not create a playable preview",
+                read_log,
+            ));
+        }
+        let mut state = previews.0.lock().map_err(|error| error.to_string())?;
+        if state.request != request {
+            return Err("The source video changed.".into());
+        }
+        app.asset_protocol_scope()
+            .allow_file(&preview)
+            .map_err(|error| error.to_string())?;
+        state.folder = Some(folder);
         Ok(preview)
-    }).await
+    })
+    .await
 }
 
 fn validate_clips(clips: &mut [Clip], duration: f64) -> Result<()> {
@@ -511,6 +704,7 @@ struct CaptionLayers<'a> {
     overlay: Option<&'a Overlay>,
 }
 
+#[cfg(test)]
 fn encode_clip(
     path: &Path,
     clip: Clip,
@@ -527,6 +721,7 @@ fn encode_clip(
         quality.args(),
         destination,
         captions,
+        &AtomicBool::new(false),
         on_progress,
     )
 }
@@ -538,8 +733,10 @@ fn encode_with(
     encoder: &[&str],
     destination: &Path,
     captions: CaptionLayers<'_>,
+    cancel: &AtomicBool,
     on_progress: impl Fn(f64),
 ) -> Result<()> {
+    check_export(cancel)?;
     let mut cmd = ffmpeg();
     let duration = clip.end - clip.start;
     // Use a fixed relative filename so Windows drive letters and user paths
@@ -571,7 +768,7 @@ fn encode_with(
         filter
     };
     let log = tempfile::tempfile().map_err(|error| error.to_string())?;
-    let mut read_log = log.try_clone().map_err(|error| error.to_string())?;
+    let read_log = log.try_clone().map_err(|error| error.to_string())?;
     cmd.args([
         "-filter_threads",
         "1",
@@ -619,7 +816,7 @@ fn encode_with(
         "-threads:v",
         "2",
         "-pix_fmt",
-        "yuv420p",
+        encoder_pixel_format(encoder[1]),
         "-c:a",
         "aac",
         "-b:a",
@@ -640,24 +837,55 @@ fn encode_with(
         .spawn()
         .map_err(|error| launch_error("ffmpeg", error))?;
     let stdout = BufReader::new(child.stdout.take().expect("FFmpeg stdout was piped"));
-    for line in stdout.lines().map_while(std::result::Result::ok) {
-        if let Some(time) = line
-            .strip_prefix("out_time_us=")
-            .and_then(|value| value.parse::<f64>().ok())
-        {
-            on_progress((time / 1_000_000.0 / duration).clamp(0.0, 0.99));
+    let status = std::thread::scope(|scope| {
+        let (send, receive) = std::sync::mpsc::channel();
+        scope.spawn(move || {
+            for line in stdout.lines().map_while(std::result::Result::ok) {
+                if let Some(time) = line
+                    .strip_prefix("out_time_us=")
+                    .and_then(|value| value.parse::<f64>().ok())
+                {
+                    let _ = send.send(time);
+                }
+            }
+        });
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                let _ = child.kill();
+                break;
+            }
+            match receive.recv_timeout(Duration::from_millis(100)) {
+                Ok(time) => on_progress((time / 1_000_000.0 / duration).clamp(0.0, 0.99)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if let Ok(Some(status)) = child.try_wait() {
+                        return Ok(status);
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    if let Ok(Some(status)) = child.try_wait() {
+                        return Ok(status);
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            }
         }
-    }
-    let status = child.wait().map_err(|error| error.to_string())?;
+        child.wait()
+    })
+    .map_err(|error| error.to_string())?;
+    check_export(cancel)?;
     if !status.success() {
-        use std::io::{Read, Seek};
-        let mut details = Vec::new();
-        let _ = read_log
-            .rewind()
-            .and_then(|()| read_log.take(32_768).read_to_end(&mut details));
-        return Err(process_error("Export failed", &details));
+        return Err(read_process_error("Export failed", read_log));
     }
     Ok(())
+}
+
+fn read_process_error(context: &str, mut log: std::fs::File) -> String {
+    use std::io::{Read, Seek};
+    let mut details = Vec::new();
+    let _ = log
+        .rewind()
+        .and_then(|()| log.take(32_768).read_to_end(&mut details));
+    process_error(context, &details)
 }
 
 fn save_clip(clip: tempfile::NamedTempFile, folder: &Path, name: &str) -> Result<PathBuf> {
@@ -732,6 +960,9 @@ fn encode_batch(
     folder: &Path,
     clips: &[ExportClip],
     options: ExportOptions,
+    encoders: &EncoderCache,
+    cancel: &AtomicBool,
+    workers: usize,
     mut progress: impl FnMut(Progress),
 ) -> Result<Vec<ClipExport>> {
     let filter = filter(options.format, options.framing, options.position)?;
@@ -742,13 +973,22 @@ fn encode_batch(
         .chars()
         .take(60)
         .collect();
-    let cpus = std::thread::available_parallelism().map_or(1, usize::from);
-    let hardware = hardware_encoder(options.quality, options.format);
+    let hardware = if cancel.load(Ordering::Relaxed) {
+        Vec::new()
+    } else {
+        encoders
+            .lock()
+            .map_err(|error| error.to_string())?
+            .entry((options.quality, options.format))
+            .or_insert_with(|| available_hardware_encoders(options.quality, options.format))
+            .clone()
+    };
     let mut results = vec![None; clips.len()];
     export_batch::run(
         clips.len(),
-        export_batch::worker_count(clips.len(), cpus),
-        |index, report| -> Result<u64> {
+        workers,
+        |index, report| -> Result<(u64, &'static str)> {
+            check_export(cancel)?;
             let clip = &clips[index];
             let output = tempfile::Builder::new()
                 .prefix(".minividcut-")
@@ -759,7 +999,8 @@ fn encode_batch(
                 legacy: clip.captions.as_ref().map(|track| (track, options.format)),
                 overlay: clip.overlay.as_ref(),
             };
-            let accelerated = hardware.is_some_and(|args| {
+            let furthest = std::cell::Cell::new(0.0_f64);
+            let encoder = encode_with_fallback(&hardware, options.quality.args(), |args| {
                 encode_with(
                     path,
                     clip.range,
@@ -767,39 +1008,36 @@ fn encode_batch(
                     args,
                     output.path(),
                     captions,
-                    report,
+                    cancel,
+                    |fraction| {
+                        if fraction > furthest.get() {
+                            furthest.set(fraction);
+                            report(fraction);
+                        }
+                    },
                 )
-                .is_ok()
-            });
-            if !accelerated {
-                encode_clip(
-                    path,
-                    clip.range,
-                    &filter,
-                    options.quality,
-                    output.path(),
-                    captions,
-                    report,
-                )?;
-            }
+            })?;
             let bytes = output
                 .as_file()
                 .metadata()
                 .map_err(|error| error.to_string())?
                 .len();
+            check_export(cancel)?;
             save_clip(
                 output,
                 folder,
                 &export_name(clip.title.as_deref(), &stem, index),
             )?;
-            Ok(bytes)
+            Ok((bytes, encoder))
         },
         |index, event| {
             let state = match event {
+                Update::Encoding(_) if cancel.load(Ordering::Relaxed) => return,
                 Update::Encoding(fraction) => ClipExport::Encoding { fraction },
                 Update::Finished(result) => {
                     let state = match result {
-                        Ok(bytes) => ClipExport::Saved { bytes },
+                        Ok((bytes, encoder)) => ClipExport::Saved { bytes, encoder },
+                        Err(error) if error == EXPORT_CANCELED => ClipExport::Canceled,
                         Err(error) => ClipExport::Failed { error },
                     };
                     results[index] = Some(state.clone());
@@ -822,14 +1060,21 @@ pub async fn export_clips(
     folder: PathBuf,
     mut clips: Vec<ExportClip>,
     options: ExportOptions,
-    progress: Channel<Progress>,
+    progress: Channel<Option<Progress>>,
+    job_id: String,
 ) -> Result<Vec<ClipExport>> {
     background(move || {
         let exports = app.state::<Exports>();
-        let _batch = exports
-            .batch
-            .try_lock()
-            .map_err(|_| "An export is already running.")?;
+        let cancel = Arc::new(AtomicBool::new(false));
+        {
+            let mut active = exports.batch.lock().map_err(|error| error.to_string())?;
+            if active.is_some() {
+                return Err("An export is already running.".into());
+            }
+            *active = Some((job_id, cancel.clone()));
+        }
+        let _job = ExportJob(&exports.batch);
+        let _ = progress.send(None);
         let video = probe(source(&path)?)?;
         let mut ranges: Vec<_> = clips.iter().map(|clip| clip.range).collect();
         validate_clips(&mut ranges, video.duration)?;
@@ -872,9 +1117,20 @@ pub async fn export_clips(
                 return Err("Captioned exports require an FFmpeg build with libass.".into());
             }
         }
-        let results = encode_batch(&video.path, &folder, &clips, options, |event| {
-            let _ = progress.send(event);
-        })?;
+        let cpus = std::thread::available_parallelism().map_or(1, usize::from);
+        let workers = export_batch::worker_count(clips.len(), cpus);
+        let results = encode_batch(
+            &video.path,
+            &folder,
+            &clips,
+            options,
+            &exports.encoders,
+            &cancel,
+            workers,
+            |event| {
+                let _ = progress.send(Some(event));
+            },
+        )?;
         if results
             .iter()
             .any(|state| matches!(state, ClipExport::Saved { .. }))
@@ -884,6 +1140,16 @@ pub async fn export_clips(
         Ok(results)
     })
     .await
+}
+
+#[tauri::command]
+pub fn cancel_export(app: AppHandle, job_id: String) -> Result<()> {
+    let exports = app.state::<Exports>();
+    let active = exports.batch.lock().map_err(|error| error.to_string())?;
+    if let Some((_, cancel)) = active.as_ref().filter(|(id, _)| *id == job_id) {
+        cancel.store(true, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -903,6 +1169,29 @@ pub fn open_export_folder(app: AppHandle) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launches_bundled_media_tools_by_absolute_path() {
+        let executable = std::env::current_exe().unwrap();
+        let profile_dir = executable.parent().unwrap().parent().unwrap();
+        for tool in ["ffmpeg", "ffprobe"] {
+            let mut cmd = command(tool);
+            assert_eq!(
+                Path::new(cmd.get_program()),
+                profile_dir.join(format!("{tool}.exe"))
+            );
+
+            let version = output(
+                cmd.arg("-version").env("PATH", ""),
+                tool,
+                "Version check failed",
+            )
+            .unwrap();
+            assert!(
+                String::from_utf8_lossy(&version.stdout).starts_with(&format!("{tool} version "))
+            );
+        }
+    }
 
     #[test]
     fn validates_ranges_and_clamps_container_rounding() {
@@ -1271,6 +1560,9 @@ mod tests {
                 position: FramePosition { x: 50, y: 50 },
                 quality: Quality::Compact,
             },
+            &EncoderCache::default(),
+            &AtomicBool::new(false),
+            2,
             |event| {
                 if matches!(event.state, ClipExport::Saved { .. }) {
                     assert!(!saved[event.index]);
@@ -1281,7 +1573,7 @@ mod tests {
         .unwrap();
         assert!(saved.into_iter().all(|value| value));
         for (index, result) in results.into_iter().enumerate() {
-            let ClipExport::Saved { bytes } = result else {
+            let ClipExport::Saved { bytes, encoder } = result else {
                 panic!("clip {} failed", index + 1)
             };
             let filename = if index == 0 {
@@ -1292,6 +1584,14 @@ mod tests {
             let path = folder.path().join(filename);
             assert_eq!(std::fs::metadata(&path).unwrap().len(), bytes);
             assert!(bytes > 0);
+            eprintln!("Compact clip {} encoder: {encoder}", index + 1);
+            assert!(
+                Quality::Compact
+                    .hardware_candidates()
+                    .iter()
+                    .any(|args| args[1] == encoder)
+                    || encoder == Quality::Compact.args()[1]
+            );
         }
         let encoded = output(
             command("ffprobe")
@@ -1315,6 +1615,155 @@ mod tests {
         let later = thumbnail_at(&source, 1.0).unwrap();
         assert!(first.starts_with("data:image/jpeg;base64,"));
         assert_ne!(first, later);
+    }
+
+    #[test]
+    fn cancellation_keeps_finished_clips_and_cleans_up_temporary_outputs() {
+        let folder = tempfile::tempdir().unwrap();
+        let source = folder.path().join("source.mp4");
+        output(
+            ffmpeg()
+                .args([
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=320x180:rate=24",
+                    "-t",
+                    "2",
+                    "-c:v",
+                    "libx264",
+                ])
+                .arg(&source),
+            "ffmpeg",
+            "Could not make a test source",
+        )
+        .unwrap();
+        let clips: Vec<_> = (0..3)
+            .map(|index| ExportClip {
+                range: Clip {
+                    start: 0.0,
+                    end: 2.0,
+                },
+                title: Some(format!("Clip {index}")),
+                captions: None,
+                overlay_id: None,
+                overlay: None,
+            })
+            .collect();
+        let cancel = AtomicBool::new(false);
+        let cache = EncoderCache::new(HashMap::from([(
+            (Quality::Compatible, Format::Landscape),
+            Vec::new(),
+        )]));
+        let results = encode_batch(
+            &source,
+            folder.path(),
+            &clips,
+            ExportOptions {
+                format: Format::Landscape,
+                framing: Framing::Fit,
+                position: FramePosition { x: 50, y: 50 },
+                quality: Quality::Compatible,
+            },
+            &cache,
+            &cancel,
+            1,
+            |event| {
+                if event.index == 0 && matches!(event.state, ClipExport::Saved { .. }) {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            },
+        )
+        .unwrap();
+        assert!(results
+            .iter()
+            .any(|state| matches!(state, ClipExport::Canceled)));
+        assert!(results
+            .iter()
+            .any(|state| matches!(state, ClipExport::Saved { .. })));
+        for (index, state) in results.iter().enumerate() {
+            assert_eq!(
+                folder.path().join(format!("Clip {index}.mp4")).exists(),
+                matches!(state, ClipExport::Saved { .. })
+            );
+        }
+        assert!(!std::fs::read_dir(folder.path()).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".minividcut-")));
+    }
+
+    #[test]
+    fn active_encode_observes_cancellation_and_releases_the_output() {
+        let folder = tempfile::tempdir().unwrap();
+        let source = folder.path().join("source.mp4");
+        output(
+            ffmpeg()
+                .args([
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=320x180:rate=24",
+                    "-t",
+                    "2",
+                    "-c:v",
+                    "libx264",
+                ])
+                .arg(&source),
+            "ffmpeg",
+            "Could not make a test source",
+        )
+        .unwrap();
+        let destination = tempfile::NamedTempFile::new_in(folder.path()).unwrap();
+        let path = destination.path().to_owned();
+        let cancel = AtomicBool::new(false);
+        let result = encode_with(
+            &source,
+            Clip {
+                start: 0.0,
+                end: 2.0,
+            },
+            "scale=1920:1080",
+            Quality::Compatible.args(),
+            &path,
+            CaptionLayers {
+                legacy: None,
+                overlay: None,
+            },
+            &cancel,
+            |_| cancel.store(true, Ordering::Relaxed),
+        );
+        assert_eq!(result.unwrap_err(), EXPORT_CANCELED);
+        destination.close().unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn tries_other_gpu_encoders_before_cpu_and_reports_the_successful_encoder() {
+        let hardware: &[&[&str]] = &[&["-c:v", "hevc_nvenc"], &["-c:v", "hevc_qsv"]];
+        let mut attempted = Vec::new();
+        let encoder = encode_with_fallback(hardware, Quality::Compact.args(), |args| {
+            attempted.push(args[1].to_owned());
+            if args[1] == "hevc_nvenc" {
+                Err("GPU encode failed".into())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+        assert_eq!(encoder, "hevc_qsv");
+        assert_eq!(attempted, ["hevc_nvenc", "hevc_qsv"]);
+
+        let encoder = encode_with_fallback(hardware, Quality::Compact.args(), |args| {
+            if args[1] == "libx265" {
+                Ok(())
+            } else {
+                Err("GPU encode failed".into())
+            }
+        })
+        .unwrap();
+        assert_eq!(encoder, "libx265");
     }
 
     #[test]
@@ -1368,5 +1817,38 @@ mod tests {
                 .stdout
         };
         assert_eq!(hash(&source, &filter), hash(&destination, "null"));
+        let results = encode_batch(
+            &source,
+            folder.path(),
+            &[ExportClip {
+                range: Clip {
+                    start: 0.0,
+                    end: 0.5,
+                },
+                title: Some("auto-lossless".into()),
+                captions: None,
+                overlay_id: None,
+                overlay: None,
+            }],
+            ExportOptions {
+                format: Format::Portrait,
+                framing: Framing::Fit,
+                position: FramePosition { x: 50, y: 50 },
+                quality: Quality::Lossless,
+            },
+            &EncoderCache::default(),
+            &AtomicBool::new(false),
+            1,
+            |_| {},
+        )
+        .unwrap();
+        let ClipExport::Saved { encoder, .. } = results[0] else {
+            panic!("automatic lossless export failed");
+        };
+        eprintln!("Lossless export encoder: {encoder}");
+        assert_eq!(
+            hash(&source, &filter),
+            hash(&folder.path().join("auto-lossless.mp4"), "null")
+        );
     }
 }

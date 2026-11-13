@@ -46,12 +46,12 @@ const STYLE_OPTIONS = {
 }
 
 export const CaptionEditor = memo(function CaptionEditor({
-  label, range, track, model, progress, status, format, editing, canApplyStyle, defaultStyle,
+  label, range, track, model, progress, status, format, editing, canGenerate, canApplyStyle, defaultStyle,
   onChange, onStyle, onApplyStyle, onGenerate, onCancel, onSeek, getTime,
 }: {
   label: string; range: Range; track?: CaptionTrack; model: CaptionModel | null; progress: CaptionProgress | null
   status: string; format: CaptionFormat; editing: boolean; onChange: (track: CaptionTrack) => void
-  canApplyStyle: boolean; defaultStyle?: CaptionStyle; onApplyStyle: (style: CaptionStyle) => boolean
+  canGenerate: boolean; canApplyStyle: boolean; defaultStyle?: CaptionStyle; onApplyStyle: (style: CaptionStyle) => boolean
   onStyle: (style: CaptionStyle) => void; onGenerate: () => void; onCancel: () => void
   onSeek: (time: number) => void; getTime: () => number
 }) {
@@ -89,7 +89,7 @@ export const CaptionEditor = memo(function CaptionEditor({
     </div>
     {progress ? <CaptionJobProgress progress={progress} onCancel={onCancel} /> : <>
     <div className="caption-actions">
-        <button className="button outline small" disabled={!model} onClick={onGenerate}>
+        <button className="button outline small" disabled={!model || !canGenerate} onClick={onGenerate}>
           {model?.installed ? cues.length ? 'Regenerate' : 'Generate captions'
             : model ? `Download & generate · ${Math.round(model.bytes / 1_000_000)} MB` : 'Generate captions'}
         </button>

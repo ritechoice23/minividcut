@@ -10,7 +10,7 @@ function png(canvas: HTMLCanvasElement) {
   }, 'image/png'))
 }
 
-export async function prepareCaptionOverlay(track: CaptionTrack, format: CaptionFormat, duration: number) {
+export async function prepareCaptionOverlay(track: CaptionTrack, format: CaptionFormat, duration: number, canceled: () => boolean) {
   const canvas = document.createElement('canvas')
   const context = canvas.getContext('2d')
   const sprite = document.createElement('canvas')
@@ -41,6 +41,7 @@ export async function prepareCaptionOverlay(track: CaptionTrack, format: Caption
   const durationMs = Math.round(duration * 1000)
   let cursor = 0
   for (const state of states) {
+    if (canceled()) return undefined
     const start = Math.max(cursor, Math.round(state.start * 1000))
     const end = Math.min(durationMs, Math.round(state.end * 1000))
     if (end <= start) continue

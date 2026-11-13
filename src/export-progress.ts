@@ -2,8 +2,9 @@ import type { Range } from './clip'
 
 export type ExportState =
   | { status: 'queued' }
+  | { status: 'canceled' }
   | { status: 'encoding'; fraction: number }
-  | { status: 'saved'; bytes: number }
+  | { status: 'saved'; bytes: number; encoder: string }
   | { status: 'failed'; error: string }
 
 export type ExportProgress = Exclude<ExportState, { status: 'queued' }> & { index: number }
@@ -11,6 +12,7 @@ export type ExportProgress = Exclude<ExportState, { status: 'queued' }> & { inde
 export function summarizeExport(ranges: readonly Range[], states: readonly ExportState[]) {
   let saved = 0
   let failed = 0
+  let canceled = 0
   let active = 0
   let bytes = 0
   let duration = 0
@@ -28,6 +30,9 @@ export function summarizeExport(ranges: readonly Range[], states: readonly Expor
         bytes += state.bytes
         processed += length
         break
+      case 'canceled':
+        canceled++
+        break
       case 'failed':
         failed++
         processed += length
@@ -36,7 +41,7 @@ export function summarizeExport(ranges: readonly Range[], states: readonly Expor
   })
   const finished = saved + failed === states.length
   const percent = finished ? 100 : Math.min(99, Math.floor(100 * processed / duration))
-  return { saved, failed, active, bytes, percent, total: states.length }
+  return { saved, failed, active, bytes, percent, total: states.length, canceled }
 }
 
 export function fileSize(bytes: number) {

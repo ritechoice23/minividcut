@@ -3,6 +3,7 @@ name = "minividcut"
 version = "0.4.2"
 description = "A lightweight local video cutter"
 edition = "2021"
+license = "MIT"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

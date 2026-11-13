@@ -13,6 +13,7 @@
       {
         "label": "main",
         "title": "MiniVidCut",
+        "decorations": false,
         "width": 1240,
         "height": 820,
         "minWidth": 820,
@@ -33,6 +34,15 @@
     "targets": [
       "nsis"
     ],
+    "externalBin": [
+      "binaries/ffmpeg",
+      "binaries/ffprobe"
+    ],
+    "resources": {
+      "../LICENSE": "licenses/MiniVidCut-LICENSE.txt",
+      "../docs/third-party-notices.txt": "licenses/third-party-notices.txt",
+      "binaries/ffmpeg-COPYING.txt": "licenses/ffmpeg-COPYING.txt"
+    },
     "icon": [
       "icons/icon.ico"
     ]

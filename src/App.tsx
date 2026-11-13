@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import { Channel, convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
@@ -6,19 +6,27 @@ import { confirm, open } from '@tauri-apps/plugin-dialog'
 import {
   ArrowDownToLine, ArrowUpRight, Check, ChevronDown, Clapperboard, Film, FolderOpen,
   Keyboard, LoaderCircle, Monitor, Move, Pause, Play, Plus, RotateCcw, Scissors, Smartphone,
-  Split, Volume2, VolumeX, X,
+  Split, Subtitles, Trash2, Volume2, VolumeX, X, ZoomIn, ZoomOut,
 } from 'lucide-react'
-import { MAX_CLIPS, moveBoundary, parseTime, splitRange, stamp, validRange } from './clip'
+import { cutRange, MAX_CLIPS, moveBoundary, parseTime, splitRange, stamp, validRange } from './clip'
 import type { Clip, Range } from './clip'
+import { MAX_TIMELINE_ZOOM, panTimeline, timelineTime, timelineWindow, zoomTimeline } from './timeline'
 import { CENTER, frameTravel, panPosition } from './framing'
 import type { FramePosition, Framing } from './framing'
 import { fileSize, summarizeExport } from './export-progress'
 import type { ExportProgress, ExportState } from './export-progress'
+import { CaptionEditor } from './CaptionEditor'
+import { CaptionPreview } from './CaptionPreview'
+import { prepareCaptionOverlay } from './caption-export'
+import type { CaptionModel, CaptionProgress } from './CaptionEditor'
+import { captionSlice, DEFAULT_CAPTION_STYLE, offsetCaption, restyleCaptionedClip } from './captions'
+import type { CaptionCue, CaptionStyle, CaptionTrack } from './captions'
 
 type VideoInfo = { path: string; name: string; duration: number; width: number; height: number }
 type Format = 'landscape' | 'portrait'
 type Quality = 'compact' | 'compatible' | 'lossless'
-type ExportBatch = { ranges: readonly Range[]; states: ExportState[]; running: boolean }
+type ExportSettings = { format: Format; framing: Framing; position: FramePosition; quality: Quality }
+type ExportBatch = { ranges: readonly Clip[]; states: ExportState[]; running: boolean; options: ExportSettings }
 
 const EXTENSIONS = ['mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v', 'mts', 'm2ts', 'wmv', 'mpg', 'mpeg', 'ts', '3gp']
 const FORMATS = {
@@ -78,11 +86,17 @@ export function App() {
   const [clips, setClips] = useState<Clip[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [time, setTime] = useState(0)
+  const [timelineZoom, setTimelineZoom] = useState(1)
+  const [timelineStart, setTimelineStart] = useState(0)
+  const timelinePanned = useRef(false)
+  const timelineDrag = useRef<{ x: number; start: number; width: number; moved: boolean } | null>(null)
+  const [grabbingTimeline, setGrabbingTimeline] = useState(false)
+  const timelineBody = useRef<HTMLDivElement>(null)
   const [playing, setPlaying] = useState(false)
   const [muted, setMuted] = useState(false)
-  const [format, setFormat] = useState<Format>('landscape')
-  const [quality, setQuality] = useState<Quality>('compact')
-  const [framing, setFraming] = useState<Framing>('fill')
+  const [draftFormat, setFormat] = useState<Format>('landscape')
+  const [draftQuality, setQuality] = useState<Quality>('compact')
+  const [draftFraming, setFraming] = useState<Framing>('fill')
   const [positions, setPositions] = useState({ landscape: CENTER, portrait: CENTER })
   const [previewAspect, setPreviewAspect] = useState(0)
   const [panning, setPanning] = useState(false)
@@ -94,12 +108,21 @@ export function App() {
   const [sections, setSections] = useState<Range[]>([])
   const [reviewIndex, setReviewIndex] = useState<number | null>(null)
   const [renaming, setRenaming] = useState<number | null>(null)
-  const cancelRename = useRef(false)
+  const renameClick = useRef<number | null>(null)
   const [clipFrames, setClipFrames] = useState<Record<number, string>>({})
+  const [captionsOpen, setCaptionsOpen] = useState(false)
+  const [captionModel, setCaptionModel] = useState<CaptionModel | null>(null)
+  const [captionProgress, setCaptionProgress] = useState<CaptionProgress | null>(null)
+  const [captionStatus, setCaptionStatus] = useState<{ key: string; text: string } | null>(null)
+  const [draftCaptions, setDraftCaptions] = useState<Record<string, CaptionTrack | undefined>>({})
+  const sharedCaptionStyle = useRef<CaptionStyle | null>(null)
+  const captionButton = useRef<HTMLButtonElement>(null)
+  const captionJob = useRef<{ key: string; cancelled: boolean } | null>(null)
   const frameCache = useRef(new Map<number, string>())
   const video = useRef<HTMLVideoElement>(null)
   const track = useRef<HTMLDivElement>(null)
   const trimDrag = useRef<{ range: Range; offset: number } | null>(null)
+  const playheadOffset = useRef(0)
   const frameDrag = useRef<{ x: number; y: number; travel: FramePosition; position: FramePosition } | null>(null)
   const playUntil = useRef<number | null>(null)
   const sourceRequest = useRef(0)
@@ -111,24 +134,81 @@ export function App() {
   const duration = source?.duration ?? 0
   const hasSource = Boolean(source)
   const busy = exportBatch?.running ?? false
+  const batchIndices = new Map(exportBatch?.ranges.map((clip, index) => [clip.id, index]))
+  const clipLocked = (id: number) => busy && batchIndices.has(id)
+  const selectedLocked = selectedId !== null && clipLocked(selectedId)
+  const lockedOptions = selectedLocked ? exportBatch?.options : undefined
+  const format = lockedOptions?.format ?? draftFormat
+  const framing = lockedOptions?.framing ?? draftFraming
+  const quality = lockedOptions?.quality ?? draftQuality
   const activeFormat = FORMATS[format]
-  const position = positions[format]
+  const position = lockedOptions?.position ?? positions[format]
+  const objectPosition = `${position.x}% ${position.y}%`
   const travel = previewAspect ? frameTravel(activeFormat.aspect, 1, previewAspect, framing) : { x: 0, y: 0 }
   const positionAxis = Math.abs(travel.x) > 0.001 ? 'x' : Math.abs(travel.y) > 0.001 ? 'y' : null
-  const canPosition = Boolean(positionAxis && hasSource && !loading && !busy && preview !== 'preparing' && preview !== 'unavailable')
-  const pct = (value: number) => duration ? 100 * value / duration : 0
+  const canPosition = Boolean(positionAxis && hasSource && !loading && !selectedLocked && preview !== 'preparing' && preview !== 'unavailable')
+  const visibleTime = timelineWindow(duration, timelineZoom, timelineStart)
+  const pct = (value: number) => visibleTime.span
+    ? Math.max(0, Math.min(100, 100 * (value - visibleTime.start) / visibleTime.span)) : 0
+  const inView = (value: number) => value >= visibleTime.start - 0.000001 && value <= visibleTime.end + 0.000001
+  const zoomTimelineTo = (zoom: number) => {
+    timelinePanned.current = false
+    setTimelineZoom(zoom)
+    setTimelineStart(zoomTimeline(duration, zoom, time))
+  }
+  const revealTimelineTime = (point: number) => {
+    timelinePanned.current = false
+    if (!inView(point)) setTimelineStart(zoomTimeline(duration, timelineZoom, point))
+  }
+
+  useEffect(() => {
+    if (timelinePanned.current) return
+    setTimelineStart(start => {
+      const visible = timelineWindow(duration, timelineZoom, start)
+      if (time >= visible.start - 0.000001 && time <= visible.end + 0.000001) return start
+      return zoomTimeline(duration, timelineZoom, time)
+    })
+  }, [duration, timelineZoom, time])
+
+  useEffect(() => {
+    const body = timelineBody.current
+    if (!body || timelineZoom === 1) return
+    const scrollTimeline = (event: WheelEvent) => {
+      if (event.ctrlKey || event.metaKey || (event.target instanceof Element && event.target.closest('input'))) return
+      const delta = event.deltaX || event.deltaY
+      if (!delta || !body.clientWidth) return
+      event.preventDefault()
+      timelinePanned.current = true
+      const pixels = event.deltaMode === 1 ? delta * 16 : event.deltaMode === 2 ? delta * body.clientWidth : delta
+      setTimelineStart(start => panTimeline(duration, timelineZoom, start, pixels / body.clientWidth))
+    }
+    body.addEventListener('wheel', scrollTimeline, { passive: false })
+    return () => body.removeEventListener('wheel', scrollTimeline)
+  }, [duration, timelineZoom])
+  const selectedClip = clips.find(clip => clip.id === selectedId)
+  const reviewed = reviewIndex === null ? undefined : sections[reviewIndex]
+  const captionKey = selectedClip ? `clip-${selectedClip.id}` : reviewed ? `section-${reviewed.start}-${reviewed.end}` : 'range'
+  const currentCaptions = selectedClip ? selectedClip.captions : draftCaptions[captionKey]
+  const activeCaptions = useMemo(() => captionSlice(currentCaptions, range), [currentCaptions, range])
+  const captionsRunning = captionProgress !== null
+  const hasDraftCaptions = Object.values(draftCaptions).some(track => track?.cues.length)
 
   const loadVideo = useCallback(async (path: string) => {
     if (exportLock.current || importLock.current) return
     importLock.current = true
     try {
-      if (clips.length && !await confirm('Opening a different video clears the clip list.', {
+      if ((clips.length || hasDraftCaptions) &&
+        !await confirm('Opening a different video clears the clips and captions for this video.', {
         title: 'Replace video?', kind: 'warning', okLabel: 'Replace video',
       })) return
       setLoading(true)
       setNotice('')
       const info = await invoke<VideoInfo>('open_video', { path })
       const request = ++sourceRequest.current
+      if (captionJob.current && !captionJob.current.cancelled) {
+        captionJob.current.cancelled = true
+        void invoke('cancel_captions').catch(() => {})
+      }
       if (video.current) {
         video.current.pause()
         if (video.current.readyState > 0) video.current.currentTime = 0
@@ -140,6 +220,9 @@ export function App() {
       setPositions({ landscape: CENTER, portrait: CENTER })
       setRange({ start: 0, end: info.duration })
       setTime(0)
+      timelinePanned.current = false
+      setTimelineZoom(1)
+      setTimelineStart(0)
       setPlaying(false)
       setClips([])
       setSections([])
@@ -148,6 +231,10 @@ export function App() {
       frameCache.current.clear()
       setClipFrames({})
       setSelectedId(null)
+      setCaptionsOpen(false)
+      setCaptionStatus(null)
+      setDraftCaptions({})
+      sharedCaptionStyle.current = null
       setFrames([])
       setExportBatch(null)
       setSplitOpen(false)
@@ -160,11 +247,11 @@ export function App() {
       importLock.current = false
       setLoading(false)
     }
-  }, [clips.length])
+  }, [clips.length, hasDraftCaptions])
 
   const clipStarts = [...new Set(clips.map(clip => clip.start))].join(',')
   useEffect(() => {
-    if (!source || !clipStarts || busy) return
+    if (!source || !clipStarts) return
     let cancelled = false
     const starts = clipStarts.split(',').map(Number)
     const cache = frameCache.current
@@ -181,7 +268,7 @@ export function App() {
     }
     void renderFrames(source.path)
     return () => { cancelled = true }
-  }, [source, clipStarts, busy])
+  }, [source, clipStarts])
 
   const chooseVideo = useCallback(async () => {
     if (fileDialog.current || exportLock.current || importLock.current) return
@@ -237,13 +324,97 @@ export function App() {
     }
   }
 
-  const seek = (position: number) => {
+  const seek = useCallback((position: number) => {
     if (!source) return
     const next = Math.min(duration, Math.max(0, position))
     const player = video.current
     if (player && player.readyState > 0) player.currentTime = Math.min(next, player.duration)
     setTime(next)
+  }, [source, duration])
+
+  const refreshCaptionModel = useCallback(async () => {
+    const info = await invoke<CaptionModel>('caption_model')
+    setCaptionModel(info)
+  }, [])
+
+  const openCaptions = () => {
+    setCaptionsOpen(true)
+    void refreshCaptionModel().catch(error => setCaptionStatus({ key: captionKey, text: message(error) }))
   }
+
+  const closeCaptions = useCallback(() => {
+    setCaptionsOpen(false)
+    captionButton.current?.focus()
+  }, [])
+
+  const saveCaptions = useCallback((track: CaptionTrack) => {
+    if (selectedId === null) setDraftCaptions(current => ({ ...current, [captionKey]: track }))
+    else setClips(items => items.map(clip => clip.id === selectedId ? { ...clip, captions: track } : clip))
+    setCaptionStatus(current => current?.key === captionKey ? null : current)
+  }, [selectedId, captionKey])
+
+  const saveCaptionStyle = useCallback((style: CaptionStyle) => {
+    if (currentCaptions) saveCaptions({ ...currentCaptions, style })
+  }, [currentCaptions, saveCaptions])
+
+  const applyCaptionStyle = useCallback((style: CaptionStyle) => {
+    if (exportLock.current || importLock.current || captionJob.current) return false
+    sharedCaptionStyle.current = style
+    setClips(items => items.map(clip => restyleCaptionedClip(clip, style)))
+    setDraftCaptions(items => Object.fromEntries(Object.entries(items).map(([key, track]) =>
+      [key, track && { ...track, style }])))
+    return true
+  }, [])
+
+  const generateCaptions = useCallback(async () => {
+    if (!source || !captionModel || captionJob.current || exportLock.current || importLock.current || !validRange(range, duration)) return
+    const job = { key: captionKey, cancelled: false }
+    captionJob.current = job
+    const request = sourceRequest.current
+    try {
+      if (activeCaptions?.cues.length && !await confirm('Generate a new transcript and replace the captions for this shot?', {
+        title: 'Regenerate captions?', okLabel: 'Regenerate',
+      })) return
+      if (request !== sourceRequest.current) return
+      setCaptionStatus(null)
+      setCaptionProgress({ stage: 'starting' })
+      const progress = new Channel<CaptionProgress>()
+      progress.onmessage = update => {
+        if (captionJob.current === job && !job.cancelled) setCaptionProgress(update)
+      }
+      const cues = await invoke<CaptionCue[]>('generate_captions', {
+        request: { path: source.path, range: { start: range.start, end: range.end }, allowDownload: !captionModel.installed },
+        progress,
+      })
+      if (job.cancelled || request !== sourceRequest.current) return
+      if (cues.length) saveCaptions({
+        style: activeCaptions?.style ?? sharedCaptionStyle.current ?? { ...DEFAULT_CAPTION_STYLE, mode: 'highlight', font: 'Segoe UI' },
+        cues: cues.map(cue => offsetCaption(cue, range.start)),
+      })
+      else setCaptionStatus({ key: captionKey, text: 'No speech detected in this shot.' })
+    } catch (error) {
+      if (!job.cancelled && request === sourceRequest.current) setCaptionStatus({ key: captionKey, text: message(error) })
+    } finally {
+      captionJob.current = null
+      setCaptionProgress(null)
+      void refreshCaptionModel().catch(() => {})
+    }
+  }, [source, captionModel, range, duration, captionKey, activeCaptions, refreshCaptionModel, saveCaptions])
+
+  const cancelCaptions = useCallback(() => {
+    const job = captionJob.current
+    if (!job) return
+    job.cancelled = true
+    setCaptionProgress({ stage: 'canceling' })
+    void invoke('cancel_captions').catch(() => {})
+  }, [])
+
+  const captionSeek = useCallback((position: number) => {
+    video.current?.pause()
+    seek(position)
+  }, [seek])
+
+  const captionPlayhead = useCallback(() => video.current?.currentTime ?? range.start, [range.start])
 
   const togglePlay = () => {
     const player = video.current
@@ -254,7 +425,7 @@ export function App() {
     }
     if (player.ended) seek(0)
     const from = player.currentTime
-    const saved = clips.find(clip => clip.id === selectedId)
+    const saved = selectedId === 0 ? exportBatch?.ranges.find(clip => clip.id === 0) : clips.find(clip => clip.id === selectedId)
     const reviewed = reviewIndex === null ? undefined : sections[reviewIndex]
     const previewed = saved ?? reviewed
     const playingSection = previewed?.start === range.start && previewed.end === range.end
@@ -263,6 +434,7 @@ export function App() {
   }
 
   const editBoundary = (side: keyof Range, value: number, original = range) => {
+    if (selectedLocked) return false
     const next = moveBoundary(original, side, value, duration)
     if (!next) {
       setNotice('Enter a time inside the video.')
@@ -306,18 +478,28 @@ export function App() {
   }
 
   const addClip = () => {
+    if (selectedLocked) return
     if (!validRange(range, duration)) return
+    if (captionJob.current?.key === captionKey) return
     if (selectedId !== null) {
-      setClips(items => items.map(clip => clip.id === selectedId ? { ...clip, start: range.start, end: range.end } : clip))
+      setClips(items => items.map(clip => clip.id === selectedId ? {
+        ...clip, start: range.start, end: range.end, captions: captionSlice(clip.captions, range),
+      } : clip))
       setSelectedId(null)
+      setCaptionsOpen(false)
       return
     }
     if (clips.length >= MAX_CLIPS) {
       setNotice(`A batch can contain up to ${MAX_CLIPS} clips.`)
       return
     }
-    const clip = { ...range, id: nextId.current++ }
+    const clip = { start: range.start, end: range.end, id: nextId.current++, captions: activeCaptions }
     setClips(items => [...items, clip])
+    if (activeCaptions) {
+      setDraftCaptions(current => ({ ...current, [captionKey]: undefined }))
+      setSelectedId(clip.id)
+      setReviewIndex(null)
+    }
     setNotice('')
   }
 
@@ -328,16 +510,23 @@ export function App() {
     setRange(section)
     setSelectedId(null)
     setReviewIndex(index)
+    revealTimelineTime(section.start)
     seek(section.start)
   }
 
   const splitParts = (parts: Range[] | null, selectLast = false) => {
+    if (selectedLocked) return
     setSplitOpen(false)
+    if (captionJob.current?.key === captionKey) return
     if (!parts || parts.length < 2) {
       setNotice(parts ? 'Choose an interval shorter than the trim range.' : 'Choose a longer interval to create at most 100 sections.')
       return
     }
     if (splitMode === 'mark') {
+      if (activeCaptions) setDraftCaptions(current => ({
+        ...current,
+        ...Object.fromEntries(parts.map(part => [`section-${part.start}-${part.end}`, captionSlice(activeCaptions, part)])),
+      }))
       setSections(parts)
       reviewSection(parts, 0)
       setNotice('')
@@ -350,7 +539,7 @@ export function App() {
     }
     const added = parts.map((part, index) => {
       const title = replaced < 0 ? undefined : clips[replaced].title
-      return { ...part, id: nextId.current++, title: title ? `${title} - Part ${index + 1}` : undefined }
+      return { ...part, id: nextId.current++, title: title ? `${title} - Part ${index + 1}` : undefined, captions: captionSlice(activeCaptions, part) }
     })
     setClips(replaced < 0 ? [...clips, ...added] : [...clips.slice(0, replaced), ...added, ...clips.slice(replaced + 1)])
     setSections([])
@@ -376,35 +565,88 @@ export function App() {
     setRange(clip)
     setSelectedId(clip.id)
     setReviewIndex(null)
+    revealTimelineTime(clip.start)
     seek(clip.start)
   }
 
+  const cutSection = () => {
+    if (selectedLocked || !validRange(range, duration) || captionJob.current?.key === captionKey) return
+    if (reviewed && reviewIndex !== null) {
+      const kept = cutRange(reviewed, range)
+      if (kept.length === 1 && kept[0] === reviewed) return
+      if (sections.length - 1 + kept.length > MAX_CLIPS) {
+        setNotice(`Keep at most ${MAX_CLIPS} marked sections.`)
+        return
+      }
+      const remaining = [...sections.slice(0, reviewIndex), ...kept, ...sections.slice(reviewIndex + 1)]
+      if (currentCaptions) setDraftCaptions(current => ({
+        ...current,
+        [captionKey]: undefined,
+        ...Object.fromEntries(kept.map(part => [`section-${part.start}-${part.end}`, captionSlice(currentCaptions, part)])),
+      }))
+      setSections(remaining)
+      if (remaining.length) reviewSection(remaining, Math.min(reviewIndex, remaining.length - 1))
+      else {
+        setReviewIndex(null)
+        setRange({ start: range.start, end: range.start })
+        video.current?.pause()
+      }
+      setNotice('')
+      return
+    }
+    if (!selectedClip && clips.length) return
+    const kept = cutRange(selectedClip ?? { start: 0, end: duration }, range)
+    if ((!selectedClip && !kept.length) || (selectedClip && kept[0] === selectedClip)) return
+    if (clips.length - Number(Boolean(selectedClip)) + kept.length > MAX_CLIPS) {
+      setNotice(`Keep at most ${MAX_CLIPS} clips.`)
+      return
+    }
+    const pieces = kept.map((part, index) => ({
+      ...part,
+      id: index === 0 && selectedClip ? selectedClip.id : nextId.current++,
+      title: index > 0 && selectedClip?.title ? `${selectedClip.title} - Part ${index + 1}` : selectedClip?.title,
+      captions: captionSlice(currentCaptions, part),
+    }))
+    setClips(items => selectedClip
+      ? items.flatMap(clip => clip.id === selectedClip.id ? pieces : [clip])
+      : pieces)
+    setCaptionsOpen(false)
+    if (pieces.length) selectClip(pieces[0])
+    else {
+      setSelectedId(null)
+      setRange({ start: range.start, end: range.start })
+      video.current?.pause()
+    }
+    setNotice('')
+  }
+
   const renameClip = (id: number, title: string) => {
+    if (clipLocked(id)) return
     const cleaned = title.trim()
     setClips(items => items.map(clip => clip.id === id && (clip.title ?? '') !== cleaned
       ? { ...clip, title: cleaned || undefined } : clip))
     setRenaming(null)
   }
 
-  const beginRename = (id: number) => {
-    cancelRename.current = false
-    setRenaming(id)
-  }
-
-  const exportVideos = async () => {
-    if (!source || exportLock.current || importLock.current || fileDialog.current) return
+  const exportVideos = async (only?: Clip) => {
+    if (!source || exportLock.current || importLock.current || fileDialog.current || captionJob.current) return
     if (!clips.length && sections.length) return
-    const batch = clips.length ? clips : [range]
+    const batch = only ? [only] : clips.length ? clips : [{ ...range, id: 0, captions: activeCaptions }]
+    const options = { format: draftFormat, framing: draftFraming, position: positions[draftFormat], quality: draftQuality }
     if (!batch.every(clip => validRange(clip, duration))) return
     exportLock.current = true
     setNotice('')
     const request = ++exportRequest.current
     let started = false
+    const overlays: string[] = []
     try {
       const folder = await open({ directory: true, title: 'Choose where to save your clips' })
       if (!folder) return
       started = true
-      setExportBatch({ ranges: batch, states: batch.map(() => ({ status: 'queued' })), running: true })
+      setCaptionsOpen(false)
+      setExportBatch({ ranges: batch, states: batch.map(() => ({ status: 'queued' })), running: true, options })
+      const hasCaptionArtwork = batch.some(clip => clip.captions?.cues.some(cue => cue.text.trim()))
+      if (hasCaptionArtwork) setNotice('Preparing caption artwork…')
       const channel = new Channel<ExportProgress>()
       channel.onmessage = ({ index, ...state }) => {
         if (request !== exportRequest.current) return
@@ -418,13 +660,19 @@ export function App() {
           return { ...current, states }
         })
       }
+      const prepared = []
+      for (const clip of batch) {
+        const captions = captionSlice(clip.captions, clip, true)
+        const captionOverlay = captions && await prepareCaptionOverlay(captions, options.format, clip.end - clip.start)
+        if (captionOverlay) overlays.push(captionOverlay)
+        prepared.push({ start: clip.start, end: clip.end, title: clip.title, captionOverlay })
+      }
+      if (hasCaptionArtwork) setNotice('')
       const states = await invoke<ExportState[]>('export_clips', {
-        path: source.path, folder, clips: batch.map(clip => ({
-          start: clip.start, end: clip.end, title: 'title' in clip ? clip.title : undefined,
-        })),
-        options: { format, framing, position, quality }, progress: channel,
+        path: source.path, folder, clips: prepared,
+        options, progress: channel,
       })
-      setExportBatch({ ranges: batch, states, running: false })
+      setExportBatch({ ranges: batch, states, running: false, options })
       const failure = states.find(state => state.status === 'failed')
       if (failure) setNotice(failure.error)
     } catch (error) {
@@ -437,6 +685,8 @@ export function App() {
           ? state : { status: 'failed', error: details }),
       }))
     } finally {
+      if (overlays.length) void invoke('discard_caption_overlays', { ids: overlays }).catch(() => {})
+      if (started) setSelectedId(current => current === 0 ? null : current)
       exportLock.current = false
     }
   }
@@ -445,6 +695,8 @@ export function App() {
     const shortcutsHandler = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase()
       if (event.key === 'Escape') {
+        if (captionsOpen && event.target instanceof Element && event.target.closest('#caption-editor') &&
+          !event.target.closest('input, select, textarea')) closeCaptions()
         setShortcuts(false)
         setSplitOpen(false)
         return
@@ -455,7 +707,7 @@ export function App() {
         return
       }
       const target = event.target instanceof Element ? event.target : null
-      if (event.ctrlKey || event.metaKey || event.altKey || shortcuts || !source || loading || busy ||
+      if (event.ctrlKey || event.metaKey || event.altKey || shortcuts || !source || loading ||
         target?.closest('input, select, textarea, [contenteditable]')) return
       if (key === 'i' || key === 'o') {
         editBoundary(key === 'i' ? 'start' : 'end', time)
@@ -473,10 +725,10 @@ export function App() {
     return () => window.removeEventListener('keydown', shortcutsHandler)
   })
 
-  const scrub = (event: ReactPointerEvent, edge?: keyof Range) => {
-    if (!track.current || !source || busy || loading) return
+  const scrub = (event: ReactPointerEvent, edge?: keyof Range, offset = 0) => {
+    if (!track.current || !source || loading || (edge && selectedLocked)) return
     const rect = track.current.getBoundingClientRect()
-    const pointer = (event.clientX - rect.left) / rect.width * duration
+    const pointer = timelineTime(visibleTime.start, visibleTime.span, (event.clientX - rect.left - offset) / rect.width)
     const drag = edge ? trimDrag.current : null
     const time = Math.max(0, Math.min(duration, pointer - (drag?.offset ?? 0)))
     if (edge && drag) editBoundary(edge, time, drag.range)
@@ -484,24 +736,74 @@ export function App() {
   }
 
   const startScrub = (event: ReactPointerEvent, edge?: keyof Range) => {
-    if (!source || !track.current || busy || loading || event.button !== 0) return
+    if (!source || !track.current || loading || (edge && selectedLocked) || event.button !== 0) return
     event.stopPropagation()
     event.currentTarget.setPointerCapture(event.pointerId)
     video.current?.pause()
     if (edge) {
       const rect = track.current.getBoundingClientRect()
-      trimDrag.current = { range, offset: (event.clientX - rect.left) / rect.width * duration - range[edge] }
+      const pointer = timelineTime(visibleTime.start, visibleTime.span, (event.clientX - rect.left) / rect.width)
+      trimDrag.current = { range, offset: pointer - range[edge] }
       seek(range[edge])
     } else scrub(event)
   }
 
-  const disabled = !hasSource || loading || busy
+  const startPlayheadDrag = (event: ReactPointerEvent) => {
+    if (!track.current || loading || event.button !== 0) return
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    video.current?.pause()
+    const rect = track.current.getBoundingClientRect()
+    playheadOffset.current = event.clientX - rect.left - pct(time) * rect.width / 100
+  }
+
+  const startTrackDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (timelineZoom === 1) {
+      startScrub(event)
+      return
+    }
+    if (!source || loading || event.button !== 0) return
+    timelineDrag.current = { x: event.clientX, start: visibleTime.start, width: event.currentTarget.clientWidth, moved: false }
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  const moveTrackDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
+    const drag = timelineDrag.current
+    if (!drag) {
+      scrub(event)
+      return
+    }
+    const delta = drag.x - event.clientX
+    if (!drag.moved && Math.abs(delta) < 4) return
+    drag.moved = true
+    setGrabbingTimeline(true)
+    timelinePanned.current = true
+    setTimelineStart(panTimeline(duration, timelineZoom, drag.start, delta / drag.width))
+  }
+
+  const finishTrackDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (timelineDrag.current && !timelineDrag.current.moved && event.currentTarget.hasPointerCapture(event.pointerId)) {
+      video.current?.pause()
+      scrub(event)
+    }
+  }
+
+  const disabled = !hasSource || loading
+  const trimDisabled = disabled || selectedLocked
+  const cutTarget = reviewed ?? selectedClip
+  const canCut = !trimDisabled && (cutTarget
+    ? range.start < cutTarget.end && range.end > cutTarget.start
+    : !clips.length && (range.start > 0 || range.end < duration))
   const canSaveRange = validRange(range, duration)
   const batchCount = clips.length || (hasSource && !sections.length ? 1 : 0)
   const summary = exportBatch && summarizeExport(exportBatch.ranges, exportBatch.states)
-  const showingSingleExport = clips.length === 0 && exportBatch?.ranges[0] === range
-  const displayedClips: Clip[] = showingSingleExport ? [{ ...range, id: 0 }] : clips
-  const exportMatchesList = showingSingleExport || exportBatch?.ranges === clips
+  const singleExport = busy ? exportBatch?.ranges.find(clip => clip.id === 0) : undefined
+  const displayedClips = singleExport ? [singleExport, ...clips] : clips
+  const editingCaptionJob = captionsRunning && captionJob.current?.key === captionKey
+  const captionLabel = selectedClip ? selectedClip.title || `Clip ${clips.indexOf(selectedClip) + 1}`
+    : reviewed ? `Section ${(reviewIndex ?? 0) + 1}` : 'Current range'
+  const showCaptionEditor = captionsOpen && !trimDisabled && canSaveRange
 
   return (
     <div className="app">
@@ -510,14 +812,14 @@ export function App() {
         <div className="top-actions">
           <button className="icon-button shortcuts-button" title="Keyboard shortcuts" aria-label="Keyboard shortcuts" onClick={() => setShortcuts(true)}><Keyboard size={19} /></button>
           <button className="button outline" onClick={() => void chooseVideo()} disabled={busy || loading}><FolderOpen size={16} /> Open video <Key>Ctrl O</Key></button>
-          <button className="button primary export" onClick={() => void exportVideos()} disabled={disabled || !batchCount || (!clips.length && !canSaveRange)}>
+          <button className="button primary export" onClick={() => void exportVideos()} disabled={disabled || busy || captionsRunning || renaming !== null || !batchCount || (!clips.length && !canSaveRange)}>
             {busy ? <LoaderCircle size={16} className="spin" /> : <ArrowDownToLine size={17} />}
             {busy ? `Exporting ${summary?.percent ?? 0}%` : batchCount ? `Export ${batchCount} ${batchCount === 1 ? 'clip' : 'clips'}` : 'Export'}
           </button>
         </div>
       </header>
 
-      <main className={`workspace ${sections.length ? 'reviewing' : ''}`}>
+      <main className={`workspace ${sections.length ? 'reviewing' : ''} ${timelineZoom > 1 ? 'timeline-zoomed' : ''}`}>
         <section className="viewer panel" aria-label="Video preview">
           <div className="panel-heading">
             <div className="source-line"><Film size={17} /><span title={source?.name}>{source?.name ?? 'Preview'}</span></div>
@@ -530,7 +832,7 @@ export function App() {
                   onPointerDown={startPan} onPointerMove={movePan} onLostPointerCapture={endPan}>
                   {preview !== 'preparing' && preview !== 'unavailable' && (
                     <video key={`${sourceRequest.current}:${previewPath}`} ref={video} className={framing} src={convertFileSrc(previewPath)} muted={muted}
-                      preload="auto" playsInline style={{ objectPosition: `${position.x}% ${position.y}%` }}
+                      preload="auto" playsInline style={{ objectPosition }}
                       onClick={canPosition ? undefined : togglePlay}
                       onLoadedMetadata={event => {
                         const { videoWidth, videoHeight } = event.currentTarget
@@ -549,6 +851,9 @@ export function App() {
                       onEnded={() => setPlaying(false)} onError={() => void useProxy()}
                     />
                   )}
+                  {activeCaptions && activeCaptions.cues.length > 0 && preview !== 'preparing' && preview !== 'unavailable' &&
+                    <CaptionPreview key={previewPath} track={activeCaptions} format={format} video={video} time={time}
+                      editable={showCaptionEditor && !editingCaptionJob} onStyle={saveCaptionStyle} />}
                 </div>
                 {(preview === 'preparing' || preview === 'unavailable') && <div className="stage-message">
                   {preview === 'preparing' && <LoaderCircle size={24} className="spin" />}
@@ -585,22 +890,27 @@ export function App() {
             <button className="icon-button mute" aria-label={muted ? 'Unmute' : 'Mute'} title={muted ? 'Unmute' : 'Mute'} disabled={!source} onClick={() => setMuted(!muted)}>
               {muted ? <VolumeX size={18} /> : <Volume2 size={18} />}
             </button>
+            {hasSource && <button ref={captionButton} className={`icon-button caption-toggle${activeCaptions?.cues.length ? ' has-captions' : ''}`}
+              title="Captions" aria-label="Captions" aria-expanded={showCaptionEditor} aria-controls={showCaptionEditor ? 'caption-editor' : undefined}
+              disabled={trimDisabled || !canSaveRange} onClick={captionsOpen ? closeCaptions : openCaptions}>
+              {captionsRunning ? <LoaderCircle size={17} className="spin" /> : <Subtitles size={18} />}
+            </button>}
           </div>
           <div className="output-bar">
             <div className="segmented format-options" role="group" aria-label="Output format">
               {(Object.keys(FORMATS) as Format[]).map(option => {
                 const { icon: Icon, label, ratio } = FORMATS[option]
-                return <button key={option} title={`${label} ${ratio}`} aria-pressed={option === format} disabled={busy}
+                return <button key={option} title={`${label} ${ratio}`} aria-pressed={option === format} disabled={selectedLocked}
                   onClick={() => setFormat(option)}><Icon size={14} /><span>{label}</span></button>
               })}
             </div>
             <div className="segmented" role="group" aria-label="Framing">
-              <button aria-pressed={framing === 'fill'} title="Crop to fill the frame" disabled={busy} onClick={() => setFraming('fill')}>Fill</button>
-              <button aria-pressed={framing === 'fit'} title="Keep the full image with black borders" disabled={busy} onClick={() => setFraming('fit')}>Fit</button>
+              <button aria-pressed={framing === 'fill'} title="Crop to fill the frame" disabled={selectedLocked} onClick={() => setFraming('fill')}>Fill</button>
+              <button aria-pressed={framing === 'fit'} title="Keep the full image with black borders" disabled={selectedLocked} onClick={() => setFraming('fit')}>Fit</button>
             </div>
             <label className="file-size">
-              <span>File size</span>
-              <select value={quality} disabled={busy} onChange={event => setQuality(event.target.value as Quality)}>
+              <span>Export quality</span>
+              <select value={quality} disabled={selectedLocked} onChange={event => setQuality(event.target.value as Quality)}>
                 <option value="compact">Compact (H.265)</option>
                 <option value="compatible">Compatible (H.264)</option>
                 <option value="lossless">Lossless video (large)</option>
@@ -609,10 +919,18 @@ export function App() {
           </div>
         </section>
 
-        <aside className="queue panel" aria-label="Clips">
+        {showCaptionEditor ? <CaptionEditor key={captionKey} label={captionLabel} range={range} track={activeCaptions}
+          model={captionModel} progress={captionProgress} status={captionStatus?.key === captionKey ? captionStatus.text : ''}
+          format={format} editing={editingCaptionJob} canApplyStyle={!busy && !captionsRunning}
+          defaultStyle={sharedCaptionStyle.current ?? undefined} onApplyStyle={applyCaptionStyle}
+          onChange={saveCaptions} onStyle={saveCaptionStyle} onGenerate={generateCaptions} onCancel={cancelCaptions}
+          onClose={closeCaptions} onSeek={captionSeek} getTime={captionPlayhead} /> : <aside className="queue panel" aria-label="Clips">
           <div className="panel-heading">
             <div className="source-line"><Clapperboard size={16} /><h2>Clips</h2><span className="count">{displayedClips.length}</span></div>
-            {displayedClips.length > 0 && <span className="queue-duration" title="Total clip duration">{stamp(displayedClips.reduce((total, clip) => total + clip.end - clip.start, 0), true)}</span>}
+            {selectedClip && !busy
+              ? <button className="button outline small" disabled={disabled || captionsRunning || renaming !== null}
+                onClick={() => void exportVideos(selectedClip)}><ArrowDownToLine size={13} /> Export selected</button>
+              : displayedClips.length > 0 && <span className="queue-duration" title="Total clip duration">{stamp(displayedClips.reduce((total, clip) => total + clip.end - clip.start, 0), true)}</span>}
           </div>
           {summary && <section className="export-summary" aria-label="Batch export">
             <div className="export-heading">
@@ -630,48 +948,78 @@ export function App() {
           </section>}
           {displayedClips.length === 0 ? <div className="empty-queue"><Scissors size={20} strokeWidth={1.5} /><span>No clips added</span><p>Add a trim range or split it into clips.</p></div> :
             <ol className="clip-list">{displayedClips.map((clip, index) => {
-              const state = exportMatchesList ? exportBatch?.states[index] : undefined
+              const batchIndex = batchIndices.get(clip.id)
+              const state = batchIndex === undefined ? undefined : exportBatch?.states[batchIndex]
+              const locked = clipLocked(clip.id)
+              const clipOptions = locked ? exportBatch?.options : undefined
+              const thumbPosition = clipOptions?.position ?? position
               const title = clip.title ?? `Clip ${String(index + 1).padStart(2, '0')}`
+              const editing = renaming === clip.id
               return <li key={clip.id} className={clip.id === selectedId ? 'selected' : ''}>
-                {renaming === clip.id ? <div className="clip-rename">
-                  <input autoFocus aria-label={`Rename ${title}`} maxLength={80} defaultValue={title}
+                {editing ? <form className="clip-rename" aria-label="Edit clip title" onSubmit={event => {
+                  event.preventDefault()
+                  const value = String(new FormData(event.currentTarget).get('title') ?? '')
+                  renameClip(clip.id, value === title && !clip.title ? '' : value)
+                }} onKeyDown={event => {
+                  if (event.key === 'Escape') {
+                    event.stopPropagation()
+                    setRenaming(null)
+                  }
+                }}>
+                  <input autoFocus name="title" aria-label={`Rename ${title}`} maxLength={80} defaultValue={title}
                     onFocus={event => event.currentTarget.select()}
-                    onBlur={event => {
-                      if (cancelRename.current) return
-                      renameClip(clip.id, event.target.value === title && !clip.title ? '' : event.target.value)
-                    }}
-                    onKeyDown={event => {
-                      if (event.key === 'Enter') event.currentTarget.blur()
-                      if (event.key === 'Escape') {
-                        cancelRename.current = true
-                        setRenaming(null)
-                      }
-                    }} />
-                </div> : <button className="clip-select" aria-pressed={clip.id === selectedId} disabled={disabled || showingSingleExport}
-                  title={showingSingleExport ? title : `${title} · Double-click to rename`}
-                  onClick={() => selectClip(clip)} onDoubleClick={() => beginRename(clip.id)}
+                  />
+                  <button type="submit" className="icon-button compact save-title" title="Save title" aria-label="Save title"><Check size={15} /></button>
+                  <button type="button" className="icon-button compact" title="Cancel rename" aria-label="Cancel rename" onClick={() => setRenaming(null)}><X size={14} /></button>
+                </form> : <button className="clip-select" aria-pressed={clip.id === selectedId} disabled={disabled}
+                  title={locked ? `${title} · Preview only during export` : `${title} · Double-click to rename`}
+                  onClick={event => {
+                    if (event.detail === 1) renameClick.current = clip.id
+                    selectClip(clip)
+                  }}
+                  onDoubleClick={() => {
+                    if (locked || renameClick.current !== clip.id) return
+                    renameClick.current = null
+                    setRenaming(clip.id)
+                  }}
                   onKeyDown={event => {
-                    if (event.key === 'F2') { event.preventDefault(); beginRename(clip.id) }
+                    if (event.key === 'F2' && !locked) {
+                      event.preventDefault()
+                      renameClick.current = null
+                      setRenaming(clip.id)
+                    }
                   }}>
-                  <span className="clip-icon">{clipFrames[clip.start] ? <img alt="" src={clipFrames[clip.start]} /> : <Film size={15} />}</span>
+                  <span className="clip-thumbnail" style={{ aspectRatio: FORMATS[clipOptions?.format ?? format].aspect }}>
+                    {clipFrames[clip.start]
+                      ? <img alt="" src={clipFrames[clip.start]} style={{ objectFit: (clipOptions?.framing ?? framing) === 'fill' ? 'cover' : 'contain', objectPosition: `${thumbPosition.x}% ${thumbPosition.y}%` }} />
+                      : <Film size={15} />}
+                  </span>
                   <span><strong>{title}</strong><small>{stamp(clip.start, true)} – {stamp(clip.end, true)}</small></span>
                 </button>}
                 {state && <ExportBadge state={state} />}
-                {!busy && !showingSingleExport && <button className="icon-button compact" aria-label={`Remove clip ${index + 1}`} title="Remove clip" disabled={disabled} onClick={() => {
+                {!locked && <button className="icon-button compact clip-remove" aria-label={`Remove clip ${index + 1}`} title="Remove clip" disabled={disabled || editing || captionJob.current?.key === `clip-${clip.id}`} style={{ visibility: editing ? 'hidden' : undefined }} onClick={() => {
                   setClips(items => items.filter(item => item.id !== clip.id))
                   if (selectedId === clip.id) setSelectedId(null)
-                }}><X size={15} /></button>}
+                }}><Trash2 size={14} /></button>}
                 {state?.status === 'encoding' && <div className="clip-meter" aria-hidden="true"><span style={{ width: `${state.fraction * 100}%` }} /></div>}
               </li>
             })}</ol>}
-        </aside>
+        </aside>}
 
         <section className="timeline panel" aria-label="Timeline">
           <div className="panel-heading timeline-heading">
             <div className="source-line"><Scissors size={17} /><span>Timeline</span></div>
+            <div className="timeline-zoom" role="group" aria-label="Timeline zoom">
+              <button className="icon-button compact" aria-label="Zoom out timeline" title="Zoom out"
+                disabled={disabled || timelineZoom === 1} onClick={() => zoomTimelineTo(timelineZoom / 2)}><ZoomOut size={16} /></button>
+              <button className="button outline small" aria-label="Fit entire timeline" title="Fit entire timeline"
+                disabled={disabled || timelineZoom === 1} onClick={() => zoomTimelineTo(1)}>Fit</button>
+              <button className="icon-button compact" aria-label="Zoom in timeline" title="Zoom in"
+                disabled={disabled || timelineZoom === MAX_TIMELINE_ZOOM} onClick={() => zoomTimelineTo(timelineZoom * 2)}><ZoomIn size={16} /></button>
+            </div>
             <div className="split">
-              <button className="button outline small" disabled={disabled || !canSaveRange} onClick={() => setSplitOpen(!splitOpen)} aria-expanded={splitOpen}><Split size={15} /> Split range <ChevronDown size={13} /></button>
-              {splitOpen && canSaveRange && !disabled && <div className="split-menu">
+              <button className="button outline small" disabled={trimDisabled || !canSaveRange || editingCaptionJob} onClick={() => setSplitOpen(!splitOpen)} aria-expanded={splitOpen}><Split size={15} /> Split range <ChevronDown size={13} /></button>
+              {splitOpen && canSaveRange && !trimDisabled && <div className="split-menu">
                 <div className="segmented split-mode" role="group" aria-label="Split behavior">
                   <button aria-pressed={splitMode === 'mark'} onClick={() => setSplitMode('mark')}>Mark only</button>
                   <button aria-pressed={splitMode === 'add'} onClick={() => setSplitMode('add')}>Split &amp; add</button>
@@ -681,20 +1029,26 @@ export function App() {
               </div>}
             </div>
           </div>
-          <div className="timeline-body">
-            <div className="ruler" aria-hidden="true">{[0, 1, 2, 3, 4, 5].map(step => <span key={step}>{duration ? stamp(duration * step / 5) : step === 0 ? '00:00:00' : ''}</span>)}</div>
-            <div className={`track ${hasSource ? 'loaded' : ''}`} ref={track} onPointerDown={event => startScrub(event)}
-              onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) scrub(event) }}>
+          <div className="timeline-body" ref={timelineBody}>
+            <div className="ruler" aria-hidden="true">{[0, 1, 2, 3, 4, 5].map(step => <span key={step}>{duration
+              ? stamp(timelineTime(visibleTime.start, visibleTime.span, step / 5), visibleTime.span < 5)
+              : step === 0 ? '00:00:00' : ''}</span>)}</div>
+            <div className={`track ${hasSource ? 'loaded' : ''} ${grabbingTimeline ? 'grabbing' : ''}`} ref={track}
+              onPointerDown={startTrackDrag} onPointerMove={moveTrackDrag} onPointerUp={finishTrackDrag}
+              onLostPointerCapture={() => { timelineDrag.current = null; setGrabbingTimeline(false) }}>
               {hasSource ? (
                 <>
-                  <div className="frames">{Array.from({ length: 10 }, (_, index) => frames[index] ? <img draggable={false} alt="" key={index} src={frames[index]} /> : <span key={index} />)}</div>
+                  <div className="filmstrip"><div className="frames" style={{
+                    width: `${timelineZoom * 100}%`, left: `${-100 * visibleTime.start / visibleTime.span}%`,
+                  }}>{Array.from({ length: 10 }, (_, index) => frames[index] ? <img draggable={false} alt="" key={index} src={frames[index]} /> : <span key={index} />)}</div></div>
                   <div className="range-shade" style={{ width: `${pct(range.start)}%` }} />
                   <div className="range-shade right" style={{ width: `${100 - pct(range.end)}%` }} />
-                  <div className="selection" style={{ left: `${pct(range.start)}%`, width: `${pct(range.end - range.start)}%` }} />
-                  {sections.slice(1).map(section => <div className="section-mark" key={section.start} style={{ left: `${pct(section.start)}%` }} />)}
-                  {(['start', 'end'] as const).map(edge => <button key={edge} className={`handle ${edge}`} disabled={disabled}
+                  <div className="selection" style={{ left: `${pct(range.start)}%`, width: `${pct(range.end) - pct(range.start)}%` }} />
+                  {[...new Set(sections.flatMap(section => [section.start, section.end]))].filter(point => point > 0 && point < duration && inView(point)).map(point =>
+                    <div className="section-mark" key={point} style={{ left: `${pct(point)}%` }} />)}
+                  {(['start', 'end'] as const).filter(edge => inView(range[edge])).map(edge => <button key={edge} className={`handle ${edge}`} disabled={trimDisabled}
                     aria-label={edge === 'start' ? 'Drag trim start' : 'Drag trim end'}
-                    data-tight={pct(range.end - range.start) < 5}
+                    data-tight={pct(range.end) - pct(range.start) < 5}
                     style={{ left: `clamp(0px, calc(${pct(range[edge])}% - ${edge === 'end' ? 11 : 0}px), calc(100% - 11px))` }}
                     onPointerDown={event => startScrub(event, edge)}
                     onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) scrub(event, edge) }}
@@ -706,25 +1060,43 @@ export function App() {
                       const value = Math.max(0, Math.min(duration, range[edge] + change))
                       if (editBoundary(edge, value)) seek(value)
                     }}><span /></button>)}
-                  <div className="playhead" style={{ left: `${pct(time)}%` }}><span /></div>
+                  {inView(time) && <div className="playhead" style={{ left: `${pct(time)}%` }}>
+                    <span className="playhead-grip" title="Drag to seek" aria-hidden="true"
+                      onPointerDown={startPlayheadDrag}
+                      onPointerMove={event => {
+                        if (event.currentTarget.hasPointerCapture(event.pointerId)) scrub(event, undefined, playheadOffset.current)
+                      }} />
+                  </div>}
                 </>
               ) : <span className="empty-track"><Film size={16} /> Open a video to start trimming</span>}
             </div>
             {clips.length > 0 && <div className="clip-strip" aria-label="Saved clip ranges">
-              {clips.map((clip, index) => <button key={clip.id} className={clip.id === selectedId ? 'selected' : ''}
+              {clips.map((clip, index) => clip.end > visibleTime.start && clip.start < visibleTime.end && <button key={clip.id} className={clip.id === selectedId ? 'selected' : ''}
                 title={`Clip ${index + 1} · ${stamp(clip.start, true)} – ${stamp(clip.end, true)}`}
                 aria-label={`Select clip ${index + 1} on timeline`} disabled={disabled}
-                style={{ left: `${pct(clip.start)}%`, width: `${pct(clip.end - clip.start)}%` }}
+                aria-pressed={clip.id === selectedId}
+                style={{ left: `${pct(clip.start)}%`, width: `${pct(clip.end) - pct(clip.start)}%` }}
                 onClick={() => selectClip(clip)} />)}
             </div>}
             {source && <input className="accessible-scrubber" aria-label="Playhead time" type="range" min={0} max={duration} step="any" value={time} onChange={event => seek(Number(event.target.value))} />}
           </div>
+          {timelineZoom > 1 && <div className="timeline-pan">
+            <input type="range" aria-label="Scroll timeline" title="Drag to scroll left or right"
+              min={0} max={visibleTime.maxStart} step="any" value={visibleTime.start}
+              aria-valuetext={stamp(visibleTime.start, true)}
+              onChange={event => {
+                timelinePanned.current = true
+                setTimelineStart(Number(event.target.value))
+              }} />
+          </div>}
           <div className="trim-bar" role="group" aria-label="Trim range">
-            <TimeField label="In" value={range.start} disabled={disabled} onChange={value => editBoundary('start', value)} onMark={() => editBoundary('start', time)} />
-            <TimeField label="Out" value={range.end} disabled={disabled} onChange={value => editBoundary('end', value)} onMark={() => editBoundary('end', time)} />
-            <button className="icon-button compact" title="Reset trim range" aria-label="Reset trim range" onClick={resetRange} disabled={disabled}><RotateCcw size={15} /></button>
+            <TimeField label="In" value={range.start} disabled={trimDisabled} onChange={value => editBoundary('start', value)} onMark={() => editBoundary('start', time)} />
+            <TimeField label="Out" value={range.end} disabled={trimDisabled} onChange={value => editBoundary('end', value)} onMark={() => editBoundary('end', time)} />
+            <button className="icon-button compact" title="Reset trim range" aria-label="Reset trim range" onClick={resetRange} disabled={trimDisabled}><RotateCcw size={15} /></button>
             {hasSource && <span className="range-duration" title={canSaveRange ? 'Trim range duration' : 'A clip must be at least 0.05 seconds long'}>{stamp(range.end - range.start, true)}</span>}
-            <button className="button add" disabled={disabled || !canSaveRange} onClick={addClip}>{selectedId === null ? <Plus size={16} /> : <Check size={16} />}{selectedId === null ? 'Add clip' : 'Update clip'}</button>
+            <button className="button outline small cut-section" disabled={!canCut || !canSaveRange || editingCaptionJob}
+              title="Remove the In–Out section and keep the remaining parts" onClick={cutSection}><Scissors size={14} /> Cut out</button>
+            {selectedLocked ? <button className="button add" onClick={resetRange}><Plus size={16} /> New clip</button> : <button className="button add" disabled={trimDisabled || !canSaveRange || editingCaptionJob} onClick={addClip}>{selectedId === null ? <Plus size={16} /> : <Check size={16} />}{selectedId === null ? 'Add clip' : 'Update clip'}</button>}
           </div>
           {sections.length > 0 && <div className="section-review" role="group" aria-label="Review marked sections">
             <button className="button outline small" disabled={disabled || reviewIndex === 0} onClick={() => reviewSection(sections, reviewIndex === null ? sections.length - 1 : reviewIndex - 1)}>Previous</button>

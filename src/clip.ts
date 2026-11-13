@@ -1,5 +1,5 @@
 export type Range = { start: number; end: number }
-export type Clip = Range & { id: number }
+export type Clip = Range & { id: number; title?: string }
 export const MIN_CLIP = 0.05
 export const MAX_CLIPS = 100
 

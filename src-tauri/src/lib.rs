@@ -1,3 +1,4 @@
+mod export_batch;
 mod video;
 
 pub fn run() {
@@ -5,7 +6,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(video::PreviewFiles::default())
-        .manage(video::ExportFolder::default())
+        .manage(video::Exports::default())
         .invoke_handler(tauri::generate_handler![
             video::open_video,
             video::thumbnails,

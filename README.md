@@ -6,17 +6,8 @@
 
 A lightweight Windows app for precise trimming and batch export. Built by [↗](https://github.com/ritechoice23) **Daramola Babatunde** (@ritechoice23).
 
-Open or drop a video, drag the trim handles, type exact In and Out times, or use the bracket buttons to set either marker at the playhead. If a marker crosses the other, the other marker moves just far enough to keep a usable range where the video has room. **Split range** divides the current range at the playhead or at a fixed interval. Choose **Mark only** to review sections and add them individually, or **Split & add** to queue the whole split.
-
-Clips show a thumbnail from their first frame. Double-click a clip or press **F2** to rename it. Custom titles become MP4 filenames, and unnamed clips use the original video name and clip number.
-
-Choose **Landscape** (1920 × 1080) or **Portrait** (1080 × 1920). **Fill** crops the image and **Fit** keeps the full picture with black borders as needed. Drag the picture or use the position slider to adjust the framing for the entire export batch. **Center** resets the position.
-
-Export saves a separate MP4 for each queued clip, or the active range when the list is empty. Up to five clips export at once depending on available CPU cores. The Clips panel shows progress for the whole batch and each clip, then displays saved file sizes. Existing output files are kept.
-
-Use **Captions** beside the playback controls to caption the current range, marked section, or selected clip. The first automatic transcription downloads the 740 MB Parakeet v3 model separately. After that, speech recognition works offline on your device. Edit text and timing, then choose **Phrase**, **Highlight**, or **Word by word**. Use **Caption all** in the Clips tab to generate captions for the clips that still need them, or click the captions icon on a clip to generate or edit its captions. Open **Style** to adjust appearance, stroke width and color, or **Word sync** to move the spoken-word highlight earlier or later. **Apply to all clips** copies the style to existing captions and sets the default for new captions on the current video. Drag the caption on the preview to move it or drag any edge or corner dot to resize it. Portrait and landscape keep their own placement. The exported MP4 uses the same caption artwork as the preview. [↗](https://github.com/anomalyco/hex) **Hex** · [↗](https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf) **Parakeet v3 model**
-
-**Compact** uses H.265 for smaller files at high visual quality. **Compatible** uses H.264 for broader playback support. **Lossless video** preserves the rendered video frames exactly and can produce much larger files. All modes encode the first audio track as AAC when present.
+Cut the best moments from any long video and reframe them for portrait or landscape.
+Add automatic captions on your device and export all your clips in one batch.
 
 ## Built with
 

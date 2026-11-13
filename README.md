@@ -14,6 +14,8 @@ Choose **Landscape** (1920 × 1080) or **Portrait** (1080 × 1920). **Fill** cro
 
 Export saves a separate MP4 for each queued clip, or the active range when the list is empty. Up to five clips export at once depending on available CPU cores. The Clips panel shows progress for the whole batch and each clip, then displays saved file sizes. Existing output files are kept.
 
+Use **Captions** beside the playback controls to caption the current range, marked section, or selected clip. The first automatic transcription downloads the 740 MB Parakeet v3 model separately. After that, speech recognition works offline on your device. Edit text and timing, then choose **Phrase**, **Highlight**, or **Word by word**. Open **Style** for font, finish, capitalization, size, and highlight color. **Apply to all clips** copies the style to existing captions and sets the default for new captions on the current video. Drag the caption on the preview to move it or drag its corner to resize it. Portrait and landscape keep their own placement. The exported MP4 uses the same caption artwork as the preview. [↗](https://github.com/anomalyco/hex) **Hex** · [↗](https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf) **Parakeet v3 model**
+
 **Compact** uses H.265 for smaller files at high visual quality. **Compatible** uses H.264 for broader playback support. **Lossless video** preserves the rendered video frames exactly and can produce much larger files. All modes encode the first audio track as AAC when present.
 
 ## Built with
@@ -24,7 +26,7 @@ React, TypeScript, and Vite for the interface, Tauri and Rust for the desktop ap
 
 MiniVidCut uses the Windows WebView2 runtime and an FFmpeg 8.0 or later build with `ffmpeg` and `ffprobe` available on PATH. The Compact preset requires `libx265`, and Compatible and Lossless video require `libx264`. [↗](https://ffmpeg.org/download.html) **FFmpeg downloads**
 
-From source, install Node.js, Rust, and the Windows C++ build tools, then run:
+From source, install Node.js, Rust, and the Windows C++ build tools. Make sure CMake is on PATH, then run:
 
 ```powershell
 npm ci

@@ -19,6 +19,7 @@ pub fn run() {
             captions::generate_captions,
             captions::cancel_captions,
             titles::generate_title,
+            titles::select_moment,
             caption_overlay::prepare_caption_overlay,
             caption_overlay::discard_caption_overlays,
             video::open_video,

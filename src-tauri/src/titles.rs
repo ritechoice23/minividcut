@@ -102,9 +102,19 @@ fn clean_title(output: &str) -> Option<String> {
 }
 
 fn infer_title(runtime: &Path, model: &Path, transcript: &str) -> Result<String> {
+    let output = complete(
+        runtime,
+        model,
+        &title_prompt(transcript),
+        &["--threads", "4", "--predict", "24"],
+    )?;
+    clean_title(&output).ok_or_else(|| "The model did not produce a usable title.".into())
+}
+
+fn complete(runtime: &Path, model: &Path, input: &str, options: &[&str]) -> Result<String> {
     let mut prompt = tempfile::NamedTempFile::new().map_err(|error| error.to_string())?;
     prompt
-        .write_all(title_prompt(transcript).as_bytes())
+        .write_all(input.as_bytes())
         .map_err(|error| error.to_string())?;
     let output = command(runtime.join(COMPLETION))
         .current_dir(runtime)
@@ -119,20 +129,16 @@ fn infer_title(runtime: &Path, model: &Path, transcript: &str) -> Result<String>
             "--no-escape",
             "--ctx-size",
             "4096",
-            "--threads",
-            "4",
-            "--predict",
-            "24",
             "--temp",
             "0",
         ])
+        .args(options)
         .output()
         .map_err(|error| format!("Could not start the title engine: {error}"))?;
     if !output.status.success() {
         return Err(format!("The title engine stopped ({})", output.status));
     }
-    clean_title(&String::from_utf8_lossy(&output.stdout))
-        .ok_or_else(|| "The model did not produce a usable title.".into())
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 #[tauri::command]
@@ -144,6 +150,69 @@ pub async fn generate_title(
     if transcript.trim().is_empty() {
         return Err("A transcript is needed to generate a title.".into());
     }
+    with_model(app, progress, move |runtime, model| {
+        infer_title(runtime, model, &transcript)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn select_moment(
+    app: AppHandle,
+    request: String,
+    excerpts: Vec<String>,
+    progress: Channel<String>,
+) -> Result<Option<usize>> {
+    if request.trim().is_empty() || excerpts.is_empty() || excerpts.len() > 4 {
+        return Err("Provide a request and up to four transcript excerpts.".into());
+    }
+    with_model(app, progress, move |runtime, model| {
+        match_excerpt(runtime, model, &request, &excerpts)
+    })
+    .await
+}
+
+fn match_excerpt(
+    runtime: &Path,
+    model: &Path,
+    request: &str,
+    excerpts: &[String],
+) -> Result<Option<usize>> {
+    let clean = |text: &str, limit| -> String {
+        text.chars()
+            .take(limit)
+            .filter(|c| !matches!(c, '<' | '>' | '\0'))
+            .map(|c| if c.is_whitespace() { ' ' } else { c })
+            .collect()
+    };
+    let mut labels = String::from("X");
+    let mut input = format!("<|startoftext|><|im_start|>user\nChoose the excerpt that best fits the request. X means none.\nRequest: {}\n", clean(request, 240));
+    for (index, excerpt) in excerpts.iter().enumerate() {
+        let label = (b'A' + index as u8) as char;
+        labels.push(label);
+        input.push_str(&format!("{label}: {}\n", clean(excerpt, 1300)));
+    }
+    input.push_str("<|im_end|>\n<|im_start|>assistant\nAnswer: ");
+    let grammar = format!("root ::= [{labels}]");
+    let output = complete(
+        runtime,
+        model,
+        &input,
+        &["--threads", "2", "--predict", "3", "--grammar", &grammar],
+    )?;
+    Ok(output
+        .trim()
+        .bytes()
+        .next()
+        .filter(|label| (b'A'..b'A' + excerpts.len() as u8).contains(label))
+        .map(|label| (label - b'A') as usize))
+}
+
+async fn with_model<T: Send + 'static>(
+    app: AppHandle,
+    progress: Channel<String>,
+    run: impl FnOnce(&Path, &Path) -> Result<T> + Send + 'static,
+) -> Result<T> {
     let directory = app
         .path()
         .app_local_data_dir()
@@ -189,14 +258,32 @@ pub async fn generate_title(
                 |percent| report(format!("Downloading title model… {percent}%")),
             ))?;
         }
-        report("Generating clip title…".into());
-        infer_title(&runtime, &model, &transcript)
+        run(&runtime, &model)
     }).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires the downloaded language model"]
+    fn picks_requested_moments_from_the_transcript() {
+        let runtime = std::env::var_os("MINIVIDCUT_TEST_TITLE_RUNTIME").unwrap();
+        let model = std::env::var_os("MINIVIDCUT_TEST_TITLE_MODEL").unwrap();
+        let excerpts = [
+            "The board meets next Friday.",
+            "We confirmed the quarterly budget.",
+            "My fitness watch congratulated me for standing up. Finally, a manager who sets realistic goals.",
+            "The next agenda item is inventory.",
+        ].map(str::to_owned);
+        for (request, expected) in [("the funniest moment", 2), ("the quarterly budget", 1)] {
+            assert_eq!(
+                match_excerpt(Path::new(&runtime), Path::new(&model), request, &excerpts).unwrap(),
+                Some(expected)
+            );
+        }
+    }
 
     #[test]
     fn transcript_cannot_add_chat_markers() {

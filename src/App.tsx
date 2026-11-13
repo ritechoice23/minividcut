@@ -22,6 +22,8 @@ import { prepareCaptionOverlay } from './caption-export'
 import type { CaptionModel, CaptionProgress } from './CaptionEditor'
 import { captionSlice, clipsNeedingCaptions, DEFAULT_CAPTION_STYLE, offsetCaption, restyleCaptionedClip } from './captions'
 import type { CaptionCue, CaptionStyle, CaptionTrack } from './captions'
+import { DEFAULT_MOMENT_QUERY, missingTranscriptRanges, MOMENT_BATCH_SECONDS, momentCandidates, momentLimit } from './moments'
+import type { Moment } from './moments'
 
 type VideoInfo = { path: string; name: string; duration: number; width: number; height: number; bytes: number }
 type Format = 'landscape' | 'portrait'
@@ -141,6 +143,13 @@ export function App() {
   const [splitOpen, setSplitOpen] = useState(false)
   const [splitMode, setSplitMode] = useState<'mark' | 'add'>('mark')
   const [sections, setSections] = useState<Range[]>([])
+  const [momentsOpen, setMomentsOpen] = useState(false)
+  const [moments, setMoments] = useState<Moment[]>([])
+  const [momentStatus, setMomentStatus] = useState('')
+  const [momentRunning, setMomentRunning] = useState(false)
+  const momentJob = useRef<{ canceled: boolean; transcribing: boolean } | null>(null)
+  const momentCache = useRef<{ revision: number; batches: { range: Range; cues: CaptionCue[] }[] }>({ revision: 0, batches: [] })
+  const playingMoment = useRef<Moment | null>(null)
   const [reviewIndex, setReviewIndex] = useState<number | null>(null)
   const [renaming, setRenaming] = useState<number | null>(null)
   const [clipActions, setClipActions] = useState<number | null>(null)
@@ -279,6 +288,11 @@ export function App() {
         throw new Error('This file differs from the saved draft source. Choose the original video.')
       }
       const request = ++sourceRequest.current
+      stopMomentSearch()
+      setMoments([])
+      setMomentStatus('')
+      setMomentsOpen(false)
+      playingMoment.current = null
       setRecovery(null)
       if (captionJob.current && !captionJob.current.cancelled) {
         captionJob.current.cancelled = true
@@ -420,15 +434,15 @@ export function App() {
     return info
   }, [])
 
-  const confirmTitleDownload = async (automatic: boolean, hasTranscript = false) => {
+  const confirmTitleDownload = async (automatic: boolean, hasTranscript = false, searching = false) => {
     const model = await refreshCaptionModel()
     const allowed = localStorage.getItem(TITLE_DOWNLOAD_KEY) === 'yes' || autoTitles
     if (allowed && (model.installed || hasTranscript)) return true
     const accepted = await confirm(
-      `Generate editable titles on this device?${allowed ? '' : ' First use downloads the 229 MB title model and 25 MB title engine.'}${
+      `${searching ? 'Search this transcript on this device?' : 'Generate editable titles on this device?'}${allowed ? '' : ' First use downloads the 229 MB language model and 25 MB runtime.'}${
         model.installed || hasTranscript ? '' : ` Clips without captions also need the ${Math.round(model.bytes / 1_000_000)} MB speech model.`
       }`,
-      { title: automatic ? 'Enable automatic clip titles?' : 'Generate a clip title?', okLabel: automatic ? 'Enable' : 'Generate' },
+      { title: searching ? 'Find moments with AI' : automatic ? 'Enable automatic clip titles?' : 'Generate a clip title?', okLabel: searching ? 'Search' : automatic ? 'Enable' : 'Generate' },
     )
     if (accepted) localStorage.setItem(TITLE_DOWNLOAD_KEY, 'yes')
     return accepted
@@ -465,7 +479,7 @@ export function App() {
 
   useEffect(() => {
     if (!source || (!autoTitles && !requestedTitle) || !isTauri() || loading || busy || captionsRunning ||
-      titleJob.current || captionJob.current || importLock.current || exportLock.current || titleError) return
+      titleJob.current || captionJob.current || momentJob.current || importLock.current || exportLock.current || titleError) return
     const revision = sourceRequest.current
     const clip = requestedTitle
       ? clips.find(clip => requestedTitle.sourceRevision === revision && clip.id === requestedTitle.id)
@@ -521,7 +535,7 @@ export function App() {
       setTitleProgress('')
       if (!stale()) void refreshCaptionModel().catch(() => {})
     })
-  }, [autoTitles, busy, captionsRunning, clips, loading, renaming, requestedTitle, source, titleError, titleProgress, refreshCaptionModel])
+  }, [autoTitles, busy, captionsRunning, clips, loading, momentRunning, renaming, requestedTitle, source, titleError, titleProgress, refreshCaptionModel])
 
   const openCaptions = (key = captionKey) => {
     setRenaming(null)
@@ -554,7 +568,7 @@ export function App() {
   }, [])
 
   const runCaptionJob = async (targets: { key: string; range: Range; clip?: Clip; track?: CaptionTrack }[], action: 'editor' | 'clip' | 'stack') => {
-    if (!source || !targets.length || titleJob.current || captionJob.current || exportLock.current || importLock.current || fileDialog.current) return
+    if (!source || !targets.length || titleJob.current || captionJob.current || momentJob.current?.transcribing || exportLock.current || importLock.current || fileDialog.current) return
     if (!targets.every(target => validRange(target.range, duration))) return
     const job = { keys: new Set(targets.map(target => target.key)), cancelled: false }
     captionJob.current = job
@@ -660,7 +674,7 @@ export function App() {
     const from = player.currentTime
     const saved = selectedId === 0 ? exportBatch?.ranges.find(clip => clip.id === 0) : clips.find(clip => clip.id === selectedId)
     const reviewed = reviewIndex === null ? undefined : sections[reviewIndex]
-    const previewed = saved ?? reviewed
+    const previewed = saved ?? reviewed ?? playingMoment.current
     const playingSection = previewed?.start === range.start && previewed.end === range.end
 
     if (player.ended || (playingSection && from >= range.end - 0.005) || (!playingSection && from >= duration - 0.005)) {
@@ -673,6 +687,128 @@ export function App() {
     void player.play().catch(error => {
       if (error?.name !== 'AbortError') setNotice(message(error))
     })
+  }
+
+  function stopMomentSearch() {
+    const job = momentJob.current
+    if (!job || job.canceled) return
+    job.canceled = true
+    if (job.transcribing) void invoke('cancel_captions').catch(() => {})
+  }
+
+  const searchMoments = async (request: string, maximum: number) => {
+    if (!source || momentJob.current || captionJob.current || titleJob.current || importLock.current) return
+    const limit = momentLimit(request, maximum)
+    if (limit < 0.05) { setMomentStatus('Enter a positive maximum clip length.'); return }
+    const revision = sourceRequest.current
+    const job = { canceled: false, transcribing: false }
+    momentJob.current = job
+    setMomentRunning(true)
+    const current = () => sourceRequest.current === revision
+    const active = () => current() && !job.canceled
+    const videoRange = { start: 0, end: source.duration }
+    if (momentCache.current.revision !== revision) momentCache.current = { revision, batches: [] }
+    const cache = momentCache.current.batches
+    const known: typeof cache = []
+    const addKnown = (range: Range, track?: CaptionTrack) => {
+      if (!track?.cues.some(cue => cue.text.trim())) return
+      // Edited captions can cover only part of a clip. Scan the rest for speech.
+      for (const cue of track.cues) {
+        if (cue.text.trim() && cue.start >= range.start && cue.end <= range.end) {
+          known.push({ range: cue, cues: [cue] })
+        }
+      }
+    }
+    for (const clip of clips) addKnown(clip, clip.captions)
+    addKnown(videoRange, draftCaptions.range)
+    for (const section of sections) addKnown(section, draftCaptions[`section-${section.start}-${section.end}`])
+    let count = 0
+    try {
+      if (!active()) return
+      const missing = missingTranscriptRanges(videoRange, [...known, ...cache].map(batch => batch.range))
+      if (!await confirmTitleDownload(false, !missing.length, true)) return
+      if (!active()) return
+      setMoments([])
+      for (let start = 0; start < source.duration && active(); start += MOMENT_BATCH_SECONDS) {
+        const batch = { start, end: Math.min(start + MOMENT_BATCH_SECONDS, source.duration) }
+        const status = () => `Searching ${stamp(batch.start)}–${stamp(batch.end)} of ${stamp(source.duration)}…`
+        setMomentStatus(status())
+        const cues = known.filter(item => item.range.start >= batch.start && item.range.start < batch.end).flatMap(item => item.cues)
+        const includeGenerated = (generated: CaptionCue[]) => {
+          const existing = cues.slice()
+          cues.push(...generated.filter(cue => !existing.some(saved => rangesOverlap(saved, cue))))
+        }
+        for (const cached of cache) {
+          if (rangesOverlap(cached.range, batch)) includeGenerated(cached.cues.filter(cue => cue.start >= batch.start && cue.start < batch.end))
+        }
+        const gaps = missing.filter(gap => rangesOverlap(gap, batch)).map(gap => ({
+          start: Math.max(gap.start, batch.start), end: Math.min(gap.end, batch.end),
+        })).filter(gap => gap.end - gap.start >= 0.05)
+        for (const gap of gaps) {
+          while (active() && captionJob.current) await new Promise(resolve => setTimeout(resolve, 100))
+          if (!active()) break
+          job.transcribing = true
+          try {
+            const progress = new Channel<CaptionProgress>()
+            progress.onmessage = update => {
+              if (active() && update.stage === 'downloading') setMomentStatus(`Downloading speech model… ${Math.round(update.fraction * 100)}%`)
+            }
+            const result = await invoke<CaptionCue[]>('generate_captions', {
+              request: { path: source.path, range: gap, allowDownload: true }, progress,
+            })
+            const generated = result.map(cue => offsetCaption(cue, gap.start))
+            cache.push({ range: gap, cues: generated })
+            includeGenerated(generated)
+          } finally {
+            job.transcribing = false
+          }
+        }
+        if (!active()) break
+        setMomentStatus(status())
+        const unique = [...new Map(cues.map(cue => [`${cue.start}:${cue.end}`, cue])).values()].sort((a, b) => a.start - b.start)
+        const candidates = momentCandidates(unique, { ...batch, end: Math.min(source.duration, batch.end + limit) }, limit)
+        for (let index = 0; index < candidates.length && active(); index += 4) {
+          const group = candidates.slice(index, index + 4)
+          const progress = new Channel<string>()
+          progress.onmessage = text => { if (active()) setMomentStatus(text) }
+          const match = await invoke<number | null>('select_moment', { request, excerpts: group.map(item => item.text), progress })
+          if (active() && match !== null && group[match]) {
+            count++
+            setMoments(items => [...items, group[match]])
+          }
+        }
+      }
+      if (active()) setMomentStatus(count ? `Review ${count} suggested ${count === 1 ? 'moment' : 'moments'}.` : 'No matching moments found.')
+    } catch (error) {
+      if (active()) setMomentStatus(message(error))
+    } finally {
+      if (current() && job.canceled) setMomentStatus('Search stopped. Suggestions found so far are kept.')
+      momentJob.current = null
+      setMomentRunning(false)
+      if (current()) void refreshCaptionModel().catch(() => {})
+    }
+  }
+
+  const previewMoment = (moment: Moment) => {
+    const player = video.current
+    playingMoment.current = moment
+    setSelectedId(null)
+    setReviewIndex(null)
+    setRange(moment)
+    revealTimelineTime(moment.start)
+    seek(moment.start)
+    playUntil.current = moment.end
+    if (player) void player.play().catch(error => {
+      if (error?.name !== 'AbortError') setNotice(message(error))
+    })
+  }
+
+  const addMoment = (moment: Moment) => {
+    if (exportLock.current || importLock.current || clips.length >= MAX_CLIPS) return
+    const id = nextId.current++
+    const style = sharedCaptionStyle.current ?? DEFAULT_CAPTION_STYLE
+    setClips(items => items.length >= MAX_CLIPS || items.some(clip => clip.start === moment.start && clip.end === moment.end)
+      ? items : [...items, { id, start: moment.start, end: moment.end, captions: { style, cues: moment.cues } }])
   }
 
   const editBoundary = (side: keyof Range, value: number, original = range) => {
@@ -802,6 +938,7 @@ export function App() {
   }
 
   const selectClip = (clip: Clip) => {
+    playingMoment.current = null
     setClipActions(null)
     video.current?.pause()
     setRange(clip)
@@ -1253,6 +1390,32 @@ export function App() {
               </select>
             </label>
           </div>
+          <section className="moment-panel" aria-label="Smart Split suggestions" hidden={!momentsOpen}>
+            <form className="moment-controls" onSubmit={event => {
+              event.preventDefault()
+              const fields = new FormData(event.currentTarget)
+              void searchMoments(String(fields.get('prompt') || '').trim() || DEFAULT_MOMENT_QUERY, Number(fields.get('maximum')))
+            }}>
+              <input type="text" name="prompt" maxLength={240} aria-label="Describe the moments to find" placeholder="Most important takeaways" />
+              <label>Max <input type="number" name="maximum" min={1} max={120} defaultValue={30} required aria-label="Maximum seconds per clip" /> s</label>
+              <button className="button outline small" disabled={momentRunning || captionsRunning || Boolean(titleProgress) || loading} type="submit"><Sparkles size={14} /> Find</button>
+              {momentRunning && <button className="text-button" type="button" onClick={stopMomentSearch}>Stop</button>}
+              <button className="icon-button compact" type="button" aria-label="Hide Smart Split" title="Hide Smart Split" onClick={() => setMomentsOpen(false)}><X size={16} /></button>
+            </form>
+            {momentStatus && <p className="moment-status" role="status">{momentStatus}</p>}
+            {moments.length > 0 && <ol className="moment-results">
+              {moments.map(moment => {
+                const added = clips.some(clip => clip.start === moment.start && clip.end === moment.end)
+                return <li key={`${moment.start}:${moment.end}`}>
+                  <button className="icon-button compact" title="Play suggestion" aria-label={`Play suggestion at ${stamp(moment.start, true)}`}
+                    disabled={preview !== 'direct' && preview !== 'proxy'} onClick={() => previewMoment(moment)}><Play size={14} /></button>
+                  <span><small>{stamp(moment.start, true)} – {stamp(moment.end, true)}</small><strong title={moment.text}>{moment.text}</strong></span>
+                  <button className="button outline small" disabled={added || busy || clips.length >= MAX_CLIPS}
+                    onClick={() => addMoment(moment)}>{added ? <Check size={14} /> : <Plus size={14} />}{added ? 'Added' : 'Add clip'}</button>
+                </li>
+              })}
+            </ol>}
+          </section>
         </section>
 
         <aside className="editor-sidebar panel" aria-label="Clips and captions">
@@ -1414,6 +1577,8 @@ export function App() {
               <button className="icon-button compact" aria-label="Zoom in timeline" title="Zoom in"
                 disabled={disabled || timelineZoom === MAX_TIMELINE_ZOOM} onClick={() => zoomTimelineTo(timelineZoom * 2)}><ZoomIn size={16} /></button>
             </div>
+            <button className="button outline small smart-split" disabled={!source || loading} aria-expanded={momentsOpen}
+              onClick={() => setMomentsOpen(open => !open)}><Sparkles size={15} /> Smart Split</button>
             <div className="split">
               <button className="button outline small" disabled={trimDisabled || !canSaveRange || editingCaptionJob} onClick={() => setSplitOpen(!splitOpen)} aria-expanded={splitOpen}><Split size={15} /> Split range <ChevronDown size={13} /></button>
               {splitOpen && canSaveRange && !trimDisabled && <div className="split-menu">
@@ -1441,6 +1606,9 @@ export function App() {
                   <div className="range-shade" style={{ width: `${pct(range.start)}%` }} />
                   <div className="range-shade right" style={{ width: `${100 - pct(range.end)}%` }} />
                   <div className="selection" style={{ left: `${pct(range.start)}%`, width: `${pct(range.end) - pct(range.start)}%` }} />
+                  {moments.filter(moment => pct(moment.end) > pct(moment.start)).map(moment =>
+                    <div className="moment-mark" key={`${moment.start}:${moment.end}`} aria-hidden="true"
+                      style={{ left: `${pct(moment.start)}%`, width: `${pct(moment.end) - pct(moment.start)}%` }} />)}
                   {[...new Set(sections.flatMap(section => [section.start, section.end]))].filter(point => point > 0 && point < duration && inView(point)).map(point =>
                     <div className="section-mark" key={point} style={{ left: `${pct(point)}%` }} />)}
                   {(['start', 'end'] as const).filter(edge => inView(range[edge])).map(edge => <button key={edge} className={`handle ${edge}`} disabled={trimDisabled}

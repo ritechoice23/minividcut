@@ -11,6 +11,8 @@ Add automatic captions on your device and export all your clips in one batch.
 
 Enable **Auto-title** in the Clips panel to name clips from their transcripts. The first title downloads a 229 MB language model and a 25 MB CPU runtime. Clips without captions also use the existing speech model. Double-click a clip title to edit it.
 
+Use **Smart Split** above the timeline to find moments by description, such as “the funniest moments, no more than 30 seconds.” The search reuses available captions and transcribes missing portions in the background. Suggestions appear below the player and on the timeline as the search runs. Preview a suggestion or add it to the clip list.
+
 ## Built with
 
 React, TypeScript, and Vite for the interface, Tauri and Rust for the desktop app, and FFmpeg for video processing.

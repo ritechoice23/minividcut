@@ -5,6 +5,11 @@ import { captionAt } from './captions'
 import type { CaptionFormat, CaptionState, CaptionStyle, CaptionTrack } from './captions'
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value))
+const handles = [
+  ['top left', -1, -1], ['top', 0, -1], ['top right', 1, -1],
+  ['left', -1, 0], ['right', 1, 0],
+  ['bottom left', -1, 1], ['bottom', 0, 1], ['bottom right', 1, 1],
+] as const
 
 export function CaptionPreview({ track, format, video, time, editable, onStyle }: {
   track: CaptionTrack; format: CaptionFormat; video: RefObject<HTMLVideoElement | null>; time: number
@@ -18,8 +23,10 @@ export function CaptionPreview({ track, format, video, time, editable, onStyle }
   const pending = useRef<CaptionStyle | null>(null)
   const style = draft ?? track.style
   const lastState = useRef<CaptionState | undefined>(undefined)
+  const lastGuide = useRef<CaptionState | undefined>(undefined)
   const refreshPreview = useRef<((time: number) => void) | null>(null)
-  const gesture = useRef<{ x: number; y: number; width: number; height: number; start: CaptionStyle; resize: boolean } | null>(null)
+  const gesture = useRef<{ x: number; y: number; width: number; height: number; start: CaptionStyle;
+    boxWidth: number; boxHeight: number; direction?: readonly [number, number] } | null>(null)
   const dimensions = useMemo(() => captionDimensions(format), [format])
   const states = useMemo(() => captionSequence(track.cues, style.mode ?? 'phrase', style.syncMs), [track.cues, style.mode, style.syncMs])
   const layoutFor = useMemo(() => {
@@ -48,8 +55,9 @@ export function CaptionPreview({ track, format, video, time, editable, onStyle }
         ? states.find(item => item.start >= position) ?? states.at(-1)
         : undefined
       const visible = state ?? guide
-      if (!force && visible === lastState.current) return
-      lastState.current = visible
+      if (!force && state === lastState.current && guide === lastGuide.current) return
+      lastState.current = state
+      lastGuide.current = guide
       context.clearRect(0, 0, width, height)
       const layout = visible && layoutFor(visible.cue)
       if (handle.current) {
@@ -62,10 +70,10 @@ export function CaptionPreview({ track, format, video, time, editable, onStyle }
           })
         }
       }
-      if (visible && layout && sprite.current) {
+      if (state && layout && sprite.current) {
         const ink = sprite.current.getContext('2d')
         if (ink) {
-          renderCaptionSprite(sprite.current, ink, layout, guide ? { ...visible, active: -1, mode: 'phrase' } : visible, style)
+          renderCaptionSprite(sprite.current, ink, layout, state, style)
           context.drawImage(sprite.current, layout.box.x, layout.box.y)
         }
       }
@@ -99,7 +107,7 @@ export function CaptionPreview({ track, format, video, time, editable, onStyle }
     if (player?.paused) refreshPreview.current?.(player.readyState > 0 ? player.currentTime : time)
   }, [time, video])
 
-  const start = (event: PointerEvent<HTMLElement>, resize: boolean) => {
+  const start = (event: PointerEvent<HTMLElement>, direction?: readonly [number, number]) => {
     if (event.button !== 0 || !canvas.current) return
     event.stopPropagation()
     video.current?.pause()
@@ -109,7 +117,8 @@ export function CaptionPreview({ track, format, video, time, editable, onStyle }
     const point = rect ? { x: (rect.left - frame.left + rect.width / 2) / width,
       y: (rect.top - frame.top + rect.height / 2) / height } : captionPoint(track.style, format)
     gesture.current = { x: event.clientX, y: event.clientY, width, height,
-      start: resize ? track.style : { ...track.style, points: { ...track.style.points, [format]: point } }, resize }
+      boxWidth: rect?.width || 1, boxHeight: rect?.height || 1, direction,
+      start: { ...track.style, points: { ...track.style.points, [format]: point } } }
     event.currentTarget.setPointerCapture(event.pointerId)
   }
   const move = (event: PointerEvent<HTMLElement>) => {
@@ -119,9 +128,21 @@ export function CaptionPreview({ track, format, video, time, editable, onStyle }
     const dx = (event.clientX - drag.x) / drag.width
     const dy = (event.clientY - drag.y) / drag.height
     let next: CaptionStyle
-    if (drag.resize) {
+    if (drag.direction) {
+      const [horizontal, vertical] = drag.direction
       const initial = drag.start.scale ?? (drag.start.size === 'small' ? 0.81 : drag.start.size === 'large' ? 1.25 : 1)
-      next = { ...drag.start, scale: clamp(initial + (dx + dy) * 3, 0.55, 2) }
+      const horizontalChange = horizontal * (event.clientX - drag.x) / drag.boxWidth
+      const verticalChange = vertical * (event.clientY - drag.y) / drag.boxHeight
+      const change = horizontal && vertical
+        ? (horizontalChange * drag.boxWidth + verticalChange * drag.boxHeight) / (drag.boxWidth + drag.boxHeight)
+        : horizontalChange + verticalChange
+      const scale = clamp(initial * (1 + change), 0.55, 2)
+      const point = captionPoint(drag.start, format)
+      const growth = scale / initial - 1
+      next = { ...drag.start, scale, points: { ...drag.start.points, [format]: {
+        x: clamp(point.x + horizontal * growth * drag.boxWidth / drag.width / 2, 0, 1),
+        y: clamp(point.y + vertical * growth * drag.boxHeight / drag.height / 2, 0, 1),
+      } } }
     } else {
       const point = captionPoint(drag.start, format)
       next = { ...drag.start, points: { ...drag.start.points, [format]: {
@@ -154,16 +175,18 @@ export function CaptionPreview({ track, format, video, time, editable, onStyle }
           x: clamp(point.x + direction[0] * step, 0, 1), y: clamp(point.y + direction[1] * step, 0, 1),
         } } })
       }}
-      onPointerDown={event => start(event, false)} onPointerMove={move} onPointerUp={stop} onLostPointerCapture={stop}>
-      <button type="button" className="caption-resize" aria-label="Resize captions" title="Drag to resize captions"
-        onPointerDown={event => start(event, true)} onPointerMove={move} onPointerUp={stop} onLostPointerCapture={stop}
+      onPointerDown={event => start(event)} onPointerMove={move} onPointerUp={stop} onLostPointerCapture={stop}>
+      {handles.map(([label, x, y]) => <button key={label} type="button" className="caption-resize"
+        data-x={x} data-y={y} tabIndex={x === 1 && y === 1 ? 0 : -1}
+        aria-label={`Resize captions from ${label}`} title={`Resize from ${label}`}
+        onPointerDown={event => start(event, [x, y])} onPointerMove={move} onPointerUp={stop} onLostPointerCapture={stop}
         onKeyDown={event => {
           if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return
           event.preventDefault()
           event.stopPropagation()
           const scale = track.style.scale ?? (track.style.size === 'small' ? 0.81 : track.style.size === 'large' ? 1.25 : 1)
           onStyle({ ...track.style, scale: clamp(scale + (event.key === 'ArrowRight' ? 0.05 : -0.05), 0.55, 2) })
-        }} />
+        }} />)}
     </div>}
   </>
 }

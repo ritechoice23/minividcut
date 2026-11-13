@@ -237,7 +237,7 @@ fn append_cues(cues: &mut Vec<Cue>, words: Vec<Word>, offset: f64, duration: f64
         if phrase.as_ref().is_some_and(|cue| {
             !punctuation
                 && (cue.text.ends_with(['.', '!', '?', '…', '。', '！', '？'])
-                    || start - cue.end > 0.5
+                    || start - cue.end >= 0.27
                     || end - cue.start > 3.2
                     || cue.text.chars().count() + text.chars().count() > 44)
         }) {
@@ -325,13 +325,15 @@ fn transcribe_audio(
         if length <= 0.0 {
             break;
         }
-        if samples.iter().any(|sample| sample.abs() > 0.0001) {
+        let audible = audible_ranges(&samples);
+        if let Some(&(_, last)) = audible.last() {
             samples.resize(samples.len().max(SAMPLE_RATE), 0.0);
             let transcript = session.run(&samples, &options);
             check_cancel(cancel)?;
             let transcript =
                 transcript.map_err(|error| format!("Could not transcribe the audio: {error}"))?;
-            append_cues(&mut cues, transcript.words, offset, length);
+            let words = align_to_audio(transcript.words, &audible);
+            append_cues(&mut cues, words, offset, length.min(last as f64 / 1000.0));
         }
         processed += size / 4;
         report(CaptionProgress::Transcribing {
@@ -339,6 +341,51 @@ fn transcribe_audio(
         });
     }
     Ok(cues)
+}
+
+fn audible_ranges(samples: &[f32]) -> Vec<(i64, i64)> {
+    const WINDOW: usize = SAMPLE_RATE / 100;
+    const PAUSE_MS: i64 = 280;
+    let mut ranges: Vec<(i64, i64)> = Vec::new();
+    for (index, window) in samples.chunks(WINDOW).enumerate() {
+        if window.iter().map(|sample| sample * sample).sum::<f32>()
+            <= window.len() as f32 * 0.000_000_25
+        {
+            continue;
+        }
+        let start = index as i64 * 10;
+        let end = start + (window.len() * 1000 / SAMPLE_RATE) as i64;
+        if let Some((_, previous_end)) =
+            ranges.last_mut().filter(|(_, end)| start - *end < PAUSE_MS)
+        {
+            *previous_end = end;
+        } else {
+            ranges.push((start, end));
+        }
+    }
+    ranges
+}
+
+fn align_to_audio(words: Vec<Word>, audible: &[(i64, i64)]) -> Vec<Word> {
+    words
+        .into_iter()
+        .filter_map(|mut word| {
+            let (start, end) = audible
+                .iter()
+                .map(|&(start, end)| (start.max(word.t0_ms), end.min(word.t1_ms)))
+                .max_by_key(|&(start, end)| end - start)?;
+            if end <= start {
+                // Some model punctuation has no duration. Keep it with the
+                // preceding word without restoring text in a silent interval.
+                return (word.t0_ms == word.t1_ms
+                    && word.text.chars().all(|ch| !ch.is_alphanumeric()))
+                .then_some(word);
+            }
+            word.t0_ms = start;
+            word.t1_ms = end;
+            Some(word)
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -388,6 +435,41 @@ pub async fn generate_captions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preserves_silent_gaps_and_clamps_early_word_boundaries() {
+        let mut samples = vec![0.0; SAMPLE_RATE];
+        samples[1600..3200].fill(0.05);
+        samples[8000..11200].fill(0.05);
+        let audible = audible_ranges(&samples);
+        assert_eq!(audible, vec![(100, 200), (500, 700)]);
+        let words = [
+            (70, 190, "First"),
+            (210, 450, "noise"),
+            (470, 740, "second"),
+        ]
+        .into_iter()
+        .map(|(t0_ms, t1_ms, text)| Word {
+            t0_ms,
+            t1_ms,
+            text: text.into(),
+            ..Default::default()
+        })
+        .collect();
+        let words = align_to_audio(words, &audible);
+        assert_eq!(
+            words
+                .iter()
+                .map(|word| (word.t0_ms, word.t1_ms))
+                .collect::<Vec<_>>(),
+            [(100, 190), (500, 700)]
+        );
+        let mut cues = Vec::new();
+        append_cues(&mut cues, words, 0.0, 1.0);
+        assert_eq!(cues.len(), 2);
+        assert!(cues[0].end < cues[1].start);
+        assert!(audible_ranges(&[0.0; 160]).is_empty());
+    }
 
     #[test]
     fn groups_words_at_pauses_and_keeps_shot_offsets() {

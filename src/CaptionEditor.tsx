@@ -1,13 +1,13 @@
 import { memo, useState } from 'react'
-import { LoaderCircle, Plus, Trash2 } from 'lucide-react'
+import { Copy, Plus, Subtitles, Trash2 } from 'lucide-react'
 import { parseTime, stamp } from './clip'
 import type { Range } from './clip'
-import { CAPTION_ACCENT, CAPTION_FONTS, DEFAULT_CAPTION_STYLE, fitCaptionTiming } from './captions'
+import { CAPTION_ACCENT, CAPTION_FONTS, CAPTION_STROKE, CAPTION_SYNC_MS, DEFAULT_CAPTION_STYLE, captionStroke, fitCaptionTiming } from './captions'
 import type { CaptionFormat, CaptionStyle, CaptionTrack } from './captions'
 
 export type CaptionModel = { installed: boolean; bytes: number }
-export type CaptionProgress = { stage: 'preparing' | 'loading' | 'starting' | 'canceling' }
-  | { stage: 'downloading' | 'transcribing'; fraction: number }
+export type CaptionProgress = ({ stage: 'preparing' | 'loading' | 'starting' | 'canceling' }
+  | { stage: 'downloading' | 'transcribing'; fraction: number }) & { index?: number; total?: number }
 
 function progressLabel(progress: CaptionProgress) {
   switch (progress.stage) {
@@ -15,8 +15,8 @@ function progressLabel(progress: CaptionProgress) {
     case 'preparing': return 'Preparing audio…'
     case 'loading': return 'Loading the caption model…'
     case 'canceling': return 'Canceling…'
-    case 'downloading': return `Downloading model · ${Math.floor(progress.fraction * 100)}%`
-    case 'transcribing': return `Transcribing · ${Math.floor(progress.fraction * 100)}%`
+    case 'downloading': return 'Downloading the speech model…'
+    case 'transcribing': return 'Listening to the clip…'
   }
 }
 
@@ -60,6 +60,12 @@ export const CaptionEditor = memo(function CaptionEditor({
   const { style, cues } = track ?? { style: defaultStyle ?? DEFAULT_CAPTION_STYLE, cues: [] }
   const update = (next: CaptionTrack) => { setFeedback(''); onChange(next) }
   const restyle = (changes: Partial<CaptionStyle>) => { setFeedback(''); onStyle({ ...style, ...changes }) }
+  const applyStyle = () => {
+    if (onApplyStyle(style)) {
+      setStyleOpen(false)
+      setFeedback('Style applied to all clips.')
+    }
+  }
   const setTime = (index: number, edge: keyof Range, value: number) => {
     const cue = fitCaptionTiming(cues, index, edge, value, range)
     if (cue) update({ style, cues: cues.map((item, row) => row === index ? cue : item) })
@@ -81,17 +87,13 @@ export const CaptionEditor = memo(function CaptionEditor({
     <div className="caption-heading">
       <div><p title={label}>{label}</p></div>
     </div>
+    {progress ? <CaptionJobProgress progress={progress} onCancel={onCancel} /> : <>
     <div className="caption-actions">
-      {progress ? <>
-        <span role="status"><LoaderCircle size={13} className="spin" /> {progressLabel(progress)}</span>
-        <button className="text-button" onClick={onCancel} disabled={progress.stage === 'starting' || progress.stage === 'canceling'}>Cancel</button>
-      </> : <>
         <button className="button outline small" disabled={!model} onClick={onGenerate}>
           {model?.installed ? cues.length ? 'Regenerate' : 'Generate captions'
             : model ? `Download & generate · ${Math.round(model.bytes / 1_000_000)} MB` : 'Generate captions'}
         </button>
         <button className="icon-button compact" title="Add caption at playhead" aria-label="Add caption at playhead" onClick={add}><Plus size={16} /></button>
-      </>}
     </div>
     {(feedback || status) && <p className="caption-feedback" role="status">{feedback || status}</p>}
     {model && !model.installed && !progress && !status && <p className="caption-feedback">One-time download. Transcription runs on this device.</p>}
@@ -104,6 +106,8 @@ export const CaptionEditor = memo(function CaptionEditor({
             {Object.entries(STYLE_OPTIONS.mode).map(([value, title]) => <option key={value} value={value}>{title}</option>)}
           </select>
         </label>
+        <button className="text-button caption-apply" disabled={!canApplyStyle} onClick={applyStyle}
+          title="Copy this style to all clips and use it for new captions"><Copy size={12} /> Apply to all clips</button>
       </div>
       {styleOpen && <fieldset id="caption-style" className="caption-style" disabled={editing} aria-label="Caption appearance">
         <label>Font<select aria-label="Font" value={style.font ?? (style.preset === 'serif' ? 'Georgia' : 'Arial')}
@@ -130,14 +134,13 @@ export const CaptionEditor = memo(function CaptionEditor({
           onChange={event => restyle({ scale: Number(event.target.value) })} /></label>
         {style.mode === 'highlight' && <label>Highlight<input type="color" aria-label="Highlight color"
           value={style.accent ?? CAPTION_ACCENT} onChange={event => restyle({ accent: event.target.value })} /></label>}
-        <button className="text-button caption-apply" disabled={!canApplyStyle}
-          title="Copy this style to all clips and use it for new captions"
-          onClick={() => {
-            if (onApplyStyle(style)) {
-              setStyleOpen(false)
-              setFeedback('Style applied to all clips.')
-            }
-          }}>Apply to all clips</button>
+        <label>Stroke<input type="range" aria-label="Stroke width" min="0" max="30" step="1"
+          value={captionStroke(style)} onChange={event => restyle({ stroke: Number(event.target.value) })} /></label>
+        <label>Stroke color<input type="color" aria-label="Stroke color" value={style.strokeColor ?? CAPTION_STROKE}
+          onChange={event => restyle({ strokeColor: event.target.value })} /></label>
+        {style.mode !== 'phrase' && <label>Word sync<input type="number" aria-label="Word sync in milliseconds"
+          title="Positive values move word highlights later" min="-300" max="300" step="10"
+          value={style.syncMs ?? CAPTION_SYNC_MS} onChange={event => restyle({ syncMs: Math.max(-300, Math.min(300, Number(event.target.value))) })} /></label>}
       </fieldset>}
       <ol className="caption-cues">
         {cues.map((cue, index) => <li key={index}>
@@ -158,5 +161,25 @@ export const CaptionEditor = memo(function CaptionEditor({
         </li>)}
       </ol>
     </>}
+    </>}
   </section>
 })
+
+export function CaptionJobProgress({ progress, onCancel }: { progress: CaptionProgress; onCancel: () => void }) {
+  const fraction = 'fraction' in progress ? progress.fraction : undefined
+  const percent = fraction === undefined ? undefined : Math.floor(100 * fraction)
+  return <div className="caption-job">
+    <div className="caption-job-ring" role="progressbar" aria-label={progressLabel(progress)} aria-valuenow={percent}>
+      <svg viewBox="0 0 64 64" className={percent === undefined ? 'spin' : undefined} aria-hidden="true">
+        <circle cx="32" cy="32" r="28" />
+        <circle cx="32" cy="32" r="28" pathLength="100" strokeDasharray={`${percent ?? 24} 100`} />
+      </svg>
+      {percent === undefined ? <Subtitles size={21} aria-hidden="true" /> : <strong>{percent}%</strong>}
+    </div>
+    <div role="status" className="caption-job-label">
+      <strong>{progressLabel(progress)}</strong>
+      {(progress.total ?? 0) > 1 && <span>Clip {(progress.index ?? 0) + 1} of {progress.total}</span>}
+    </div>
+    <button className="text-button" onClick={onCancel} disabled={progress.stage === 'canceling'}>Cancel</button>
+  </div>
+}

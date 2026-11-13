@@ -19,7 +19,7 @@ import { CaptionEditor } from './CaptionEditor'
 import { CaptionPreview } from './CaptionPreview'
 import { prepareCaptionOverlay } from './caption-export'
 import type { CaptionModel, CaptionProgress } from './CaptionEditor'
-import { captionSlice, DEFAULT_CAPTION_STYLE, offsetCaption, restyleCaptionedClip } from './captions'
+import { captionSlice, clipsNeedingCaptions, DEFAULT_CAPTION_STYLE, offsetCaption, restyleCaptionedClip } from './captions'
 import type { CaptionCue, CaptionStyle, CaptionTrack } from './captions'
 
 type VideoInfo = { path: string; name: string; duration: number; width: number; height: number }
@@ -118,7 +118,7 @@ export function App() {
   const sharedCaptionStyle = useRef<CaptionStyle | null>(null)
   const clipsTab = useRef<HTMLButtonElement>(null)
   const captionsTab = useRef<HTMLButtonElement>(null)
-  const captionJob = useRef<{ key: string; cancelled: boolean } | null>(null)
+  const captionJob = useRef<{ keys: Set<string>; cancelled: boolean } | null>(null)
   const frameCache = useRef(new Map<number, string>())
   const video = useRef<HTMLVideoElement>(null)
   const track = useRef<HTMLDivElement>(null)
@@ -338,12 +338,13 @@ export function App() {
   const refreshCaptionModel = useCallback(async () => {
     const info = await invoke<CaptionModel>('caption_model')
     setCaptionModel(info)
+    return info
   }, [])
 
-  const openCaptions = () => {
+  const openCaptions = (key = captionKey) => {
     setRenaming(null)
     setCaptionsOpen(true)
-    void refreshCaptionModel().catch(error => setCaptionStatus({ key: captionKey, text: message(error) }))
+    void refreshCaptionModel().catch(error => setCaptionStatus({ key, text: message(error) }))
   }
 
   const closeCaptions = useCallback(() => {
@@ -370,46 +371,93 @@ export function App() {
     return true
   }, [])
 
-  const generateCaptions = useCallback(async () => {
-    if (!source || !captionModel || captionJob.current || exportLock.current || importLock.current || !validRange(range, duration)) return
-    const job = { key: captionKey, cancelled: false }
+  const runCaptionJob = async (targets: { key: string; range: Range; clip?: Clip; track?: CaptionTrack }[], action: 'editor' | 'clip' | 'stack') => {
+    if (!source || !targets.length || captionJob.current || exportLock.current || importLock.current || fileDialog.current) return
+    if (!targets.every(target => validRange(target.range, duration))) return
+    const job = { keys: new Set(targets.map(target => target.key)), cancelled: false }
     captionJob.current = job
     const request = sourceRequest.current
+    const batch = action === 'stack'
+    const statusKey = batch ? 'batch' : targets[0].key
+    const stale = () => job.cancelled || request !== sourceRequest.current
+    let saved = 0
+    let empty = 0
+    let noAudio = false
+    const failures: string[] = []
     try {
-      if (activeCaptions?.cues.length && !await confirm('Generate a new transcript and replace the captions for this shot?', {
-        title: 'Regenerate captions?', okLabel: 'Regenerate',
-      })) return
-      if (request !== sourceRequest.current) return
+      const model = captionModel ?? await refreshCaptionModel()
+      if (stale()) return
+      if (action !== 'editor' && !model.installed && !await confirm(
+        `Download the ${Math.round(model.bytes / 1_000_000)} MB speech model to generate captions on this device?`,
+        { title: 'Download caption model?', okLabel: 'Download & generate' },
+      )) return
+      if (action === 'editor' && targets[0].track?.cues.some(cue => cue.text.trim()) &&
+        !await confirm('Generate a new transcript and replace the captions for this shot?', {
+          title: 'Regenerate captions?', okLabel: 'Regenerate',
+        })) return
+      if (stale()) return
       setCaptionStatus(null)
-      setCaptionProgress({ stage: 'starting' })
-      const progress = new Channel<CaptionProgress>()
-      progress.onmessage = update => {
-        if (captionJob.current === job && !job.cancelled) setCaptionProgress(update)
+      for (const [index, target] of targets.entries()) {
+        if (stale()) break
+        const position = { index, total: targets.length }
+        setCaptionProgress({ stage: 'starting', ...position })
+        const progress = new Channel<CaptionProgress>()
+        progress.onmessage = update => {
+          if (captionJob.current === job && !stale()) setCaptionProgress({ ...update, ...position })
+        }
+        try {
+          const { start, end } = target.range
+          const cues = await invoke<CaptionCue[]>('generate_captions', {
+            request: { path: source.path, range: { start, end }, allowDownload: !model.installed },
+            progress,
+          })
+          if (stale()) break
+          if (!cues.length) { empty++; continue }
+          const track: CaptionTrack = {
+            style: target.track?.style ?? sharedCaptionStyle.current ?? { ...DEFAULT_CAPTION_STYLE, mode: 'highlight', font: 'Segoe UI' },
+            cues: cues.map(cue => offsetCaption(cue, start)),
+          }
+          if (target.clip) {
+            setClips(items => items.map(clip => clip.id === target.clip?.id ? { ...clip, captions: track } : clip))
+          } else {
+            setDraftCaptions(items => ({ ...items, [target.key]: track }))
+          }
+          saved++
+        } catch (error) {
+          if (stale()) break
+          if (message(error) === 'This video has no audio track to caption.') {
+            noAudio = true
+            empty += targets.length - index
+            break
+          }
+          failures.push(message(error))
+          if (!model.installed && !await refreshCaptionModel().then(info => info.installed).catch(() => false)) break
+        }
       }
-      const cues = await invoke<CaptionCue[]>('generate_captions', {
-        request: { path: source.path, range: { start: range.start, end: range.end }, allowDownload: !captionModel.installed },
-        progress,
-      })
-      if (job.cancelled || request !== sourceRequest.current) return
-      if (cues.length) saveCaptions({
-        style: activeCaptions?.style ?? sharedCaptionStyle.current ?? { ...DEFAULT_CAPTION_STYLE, mode: 'highlight', font: 'Segoe UI' },
-        cues: cues.map(cue => offsetCaption(cue, range.start)),
-      })
-      else setCaptionStatus({ key: captionKey, text: 'No speech detected in this shot.' })
+      if (request !== sourceRequest.current) return
+      if (batch) {
+        const details = [`${saved} captioned`, empty ? `${empty} with no speech` : '', failures.length ? `${failures.length} failed` : '',
+          job.cancelled ? 'Canceled' : saved + empty + failures.length < targets.length ? 'Batch stopped' : ''].filter(Boolean)
+        setCaptionStatus({ key: statusKey, text: details.join(' · ') + (failures.length ? `. ${failures[0]}` : '') })
+      } else if (failures.length || empty) {
+        setCaptionStatus({ key: statusKey, text: failures[0] ?? (noAudio ? 'This video has no audio track to caption.' : 'No speech detected in this clip.') })
+      }
     } catch (error) {
-      if (!job.cancelled && request === sourceRequest.current) setCaptionStatus({ key: captionKey, text: message(error) })
+      if (!stale()) setCaptionStatus({ key: statusKey, text: message(error) })
     } finally {
       captionJob.current = null
       setCaptionProgress(null)
-      void refreshCaptionModel().catch(() => {})
+      if (request === sourceRequest.current) void refreshCaptionModel().catch(() => {})
     }
-  }, [source, captionModel, range, duration, captionKey, activeCaptions, refreshCaptionModel, saveCaptions])
+  }
+
+  const generateCaptions = () => void runCaptionJob([{ key: captionKey, range, clip: selectedClip, track: activeCaptions }], 'editor')
 
   const cancelCaptions = useCallback(() => {
     const job = captionJob.current
     if (!job) return
     job.cancelled = true
-    setCaptionProgress({ stage: 'canceling' })
+    setCaptionProgress(current => current && { stage: 'canceling', index: current.index, total: current.total })
     void invoke('cancel_captions').catch(() => {})
   }, [])
 
@@ -492,7 +540,7 @@ export function App() {
   const addClip = () => {
     if (selectedLocked) return
     if (!validRange(range, duration)) return
-    if (captionJob.current?.key === captionKey) return
+    if (captionJob.current?.keys.has(captionKey)) return
     if (selectedId !== null) {
       setClips(items => items.map(clip => clip.id === selectedId ? {
         ...clip, start: range.start, end: range.end, captions: captionSlice(clip.captions, range),
@@ -528,7 +576,7 @@ export function App() {
   const splitParts = (parts: Range[] | null, selectLast = false) => {
     if (selectedLocked) return
     setSplitOpen(false)
-    if (captionJob.current?.key === captionKey) return
+    if (captionJob.current?.keys.has(captionKey)) return
     if (!parts || parts.length < 2) {
       setNotice(parts ? 'Choose an interval shorter than the trim range.' : 'Choose a longer interval to create at most 100 sections.')
       return
@@ -578,6 +626,24 @@ export function App() {
     setReviewIndex(null)
     revealTimelineTime(clip.start)
     seek(clip.start)
+  }
+
+  const captionClip = (clip: Clip) => {
+    selectClip(clip)
+    openCaptions(`clip-${clip.id}`)
+    captionsTab.current?.focus()
+    if (clipsNeedingCaptions([clip]).length) {
+      void runCaptionJob([{ key: `clip-${clip.id}`, range: clip, clip, track: clip.captions }], 'clip')
+    }
+  }
+
+  const captionStack = () => {
+    const missing = clipsNeedingCaptions(clips)
+    if (!missing.length) return
+    selectClip(missing[0])
+    openCaptions(`clip-${missing[0].id}`)
+    captionsTab.current?.focus()
+    void runCaptionJob(missing.map(clip => ({ key: `clip-${clip.id}`, range: clip, clip, track: clip.captions })), 'stack')
   }
 
   const trimSection = () => {
@@ -838,7 +904,7 @@ export function App() {
   const disabled = !hasSource || loading
   const trimDisabled = disabled || selectedLocked
   const canSaveRange = validRange(range, duration)
-  const editingCaptionJob = captionsRunning && captionJob.current?.key === captionKey
+  const editingCaptionJob = captionsRunning && Boolean(captionJob.current?.keys.has(captionKey))
   const canTrim = !trimDisabled && canSaveRange && !captionJob.current && (
     selectedClip ? rangesOverlap(selectedClip, range)
       : sections.length ? sections.some(section => rangesOverlap(section, range))
@@ -939,7 +1005,7 @@ export function App() {
             </button>
             {hasSource && <button className={`icon-button caption-toggle${activeCaptions?.cues.length ? ' has-captions' : ''}`}
               title="Captions" aria-label="Captions" aria-expanded={captionsOpen} aria-controls="captions-panel"
-              onClick={captionsOpen ? closeCaptions : openCaptions}>
+              onClick={() => captionsOpen ? closeCaptions() : openCaptions()}>
               {captionsRunning ? <LoaderCircle size={17} className="spin" /> : <Subtitles size={18} />}
             </button>}
           </div>
@@ -982,13 +1048,13 @@ export function App() {
               <Clapperboard size={15} /> Clips <span className="count">{displayedClips.length}</span>
             </button>
             <button ref={captionsTab} type="button" role="tab" id="captions-tab" aria-selected={captionsOpen} aria-controls="captions-panel"
-              tabIndex={captionsOpen ? 0 : -1} onClick={openCaptions}>
+              tabIndex={captionsOpen ? 0 : -1} onClick={() => openCaptions()}>
               <Subtitles size={16} /> Captions {captionsRunning && <LoaderCircle size={13} className="spin" aria-label="Generating captions" />}
             </button>
           </div>
           <div className="sidebar-content" id="captions-panel" role="tabpanel" aria-labelledby="captions-tab" hidden={!captionsOpen}>
             {showCaptionEditor ? <CaptionEditor key={captionKey} label={captionLabel} range={range} track={activeCaptions}
-          model={captionModel} progress={captionProgress} status={captionStatus?.key === captionKey ? captionStatus.text : ''}
+          model={captionModel} progress={captionProgress} status={captionStatus?.key === captionKey || captionStatus?.key === 'batch' ? captionStatus.text : ''}
           format={format} editing={editingCaptionJob} canApplyStyle={!busy && !captionsRunning}
           defaultStyle={sharedCaptionStyle.current ?? undefined} onApplyStyle={applyCaptionStyle}
           onChange={saveCaptions} onStyle={saveCaptionStyle} onGenerate={generateCaptions} onCancel={cancelCaptions}
@@ -999,7 +1065,8 @@ export function App() {
           </div>
           <div className="sidebar-content queue" id="clips-panel" role="tabpanel" aria-labelledby="clips-tab" hidden={captionsOpen}>
           {displayedClips.length > 0 && <div className="panel-heading">
-            <span className="queue-duration" title="Total clip duration">{stamp(displayedClips.reduce((total, clip) => total + clip.end - clip.start, 0), true)}</span>
+            <button className="button outline small" title="Generate captions for clips without captions" disabled={disabled || busy || captionsRunning || !clipsNeedingCaptions(clips).length}
+              onClick={captionStack}><Subtitles size={14} /> Caption all</button>
             {selectedClip && !busy
               ? <button className="button outline small" disabled={disabled || captionsRunning || renaming !== null}
                 onClick={() => void exportVideos(selectedClip)}><ArrowDownToLine size={13} /> Export selected</button>
@@ -1070,7 +1137,10 @@ export function App() {
                   <span><strong>{title}</strong><small>{stamp(clip.start, true)} – {stamp(clip.end, true)}</small></span>
                 </button>}
                 {state && <ExportBadge state={state} />}
-                {!locked && <button className="icon-button compact clip-remove" aria-label={`Remove clip ${index + 1}`} title="Remove clip" disabled={disabled || editing || captionJob.current?.key === `clip-${clip.id}`} style={{ visibility: editing ? 'hidden' : undefined }} onClick={() => {
+                {!locked && !editing && <button className={`icon-button compact clip-caption${clipsNeedingCaptions([clip]).length ? '' : ' has-captions'}`}
+                  aria-label={`Captions for ${title}`} title={clipsNeedingCaptions([clip]).length ? 'Generate captions' : 'Edit captions'}
+                  disabled={disabled || busy || captionsRunning} onClick={() => captionClip(clip)}><Subtitles size={15} /></button>}
+                {!locked && <button className="icon-button compact clip-remove" aria-label={`Remove clip ${index + 1}`} title="Remove clip" disabled={disabled || editing || captionJob.current?.keys.has(`clip-${clip.id}`)} style={{ visibility: editing ? 'hidden' : undefined }} onClick={() => {
                   setClips(items => items.filter(item => item.id !== clip.id))
                   if (selectedId === clip.id) setSelectedId(null)
                 }}><Trash2 size={14} /></button>}

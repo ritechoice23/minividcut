@@ -1,11 +1,30 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { captionAt, captionDisplayText, captionSlice, captionStates, fitCaptionTiming, offsetCaption, restyleCaptionedClip, timedWords } from '../src/captions.ts'
+import { captionAt, captionDisplayText, captionSlice, captionStates, clipsNeedingCaptions, fitCaptionTiming, offsetCaption, restyleCaptionedClip, timedWords } from '../src/captions.ts'
 
 const track = {
   style: { preset: 'classic', position: 'bottom', size: 'medium' },
   cues: [{ start: 3, end: 5, text: 'Hello' }, { start: 5, end: 8, text: 'there' }],
 }
+
+test('batch generation skips clips with edited captions and fills empty tracks', () => {
+  const saved = { id: 1, start: 0, end: 3, captions: track }
+  const blank = { id: 2, start: 3, end: 5, captions: { ...track, cues: [{ start: 3, end: 4, text: '  ' }] } }
+  const missing = { id: 3, start: 5, end: 6 }
+  assert.deepEqual(clipsNeedingCaptions([saved, blank, missing]), [blank, missing])
+})
+
+test('word sync delays the highlight without extending it across silence', () => {
+  const cue = { start: 0, end: 2, text: 'One two', words: [
+    { start: 0.2, end: 0.5, text: 'One' }, { start: 1, end: 1.4, text: 'two' },
+  ] }
+  const states = captionStates(cue, 'highlight', 60)
+  assert.equal(captionAt(states, 0.23).active, -1)
+  assert.equal(captionAt(states, 0.27).active, 0)
+  assert.equal(captionAt(states, 0.8).active, -1)
+  assert.equal(captionAt(states, 1.07).active, 1)
+  assert.equal(captionAt(captionStates(cue, 'word', 60), 0.8), undefined)
+})
 
 test('case changes only the rendered text and sentence case follows sentences across cues', () => {
   const cues = [{ start: 0, end: 1, text: '“hÉLLO and' }, { start: 1, end: 2, text: 'wELCOME!” next LINE.' }]

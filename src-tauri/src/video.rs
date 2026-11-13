@@ -1,4 +1,7 @@
-use crate::export_batch::{self, Update};
+use crate::{
+    caption_overlay::{CaptionOverlays, Overlay},
+    export_batch::{self, Update},
+};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -39,8 +42,8 @@ pub struct VideoInfo {
 
 #[derive(Clone, Copy, Deserialize)]
 pub struct Clip {
-    start: f64,
-    end: f64,
+    pub(crate) start: f64,
+    pub(crate) end: f64,
 }
 
 #[derive(Deserialize)]
@@ -48,6 +51,11 @@ pub struct ExportClip {
     #[serde(flatten)]
     range: Clip,
     title: Option<String>,
+    captions: Option<crate::caption_render::CaptionTrack>,
+    #[serde(rename = "captionOverlay")]
+    overlay_id: Option<String>,
+    #[serde(skip)]
+    overlay: Option<Overlay>,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -97,6 +105,83 @@ impl Quality {
             Self::Lossless => &["-c:v", "libx264", "-preset", "fast", "-qp", "0"],
         }
     }
+
+    fn hardware_candidates(self) -> &'static [&'static [&'static str]] {
+        match self {
+            Self::Compact => &[
+                &[
+                    "-c:v",
+                    "hevc_nvenc",
+                    "-preset",
+                    "p5",
+                    "-rc",
+                    "vbr",
+                    "-cq",
+                    "24",
+                    "-b:v",
+                    "0",
+                    "-tag:v",
+                    "hvc1",
+                ],
+                &[
+                    "-c:v",
+                    "hevc_qsv",
+                    "-preset",
+                    "medium",
+                    "-global_quality",
+                    "24",
+                    "-tag:v",
+                    "hvc1",
+                ],
+                &[
+                    "-c:v", "hevc_amf", "-quality", "quality", "-rc", "cqp", "-qp_i", "22",
+                    "-qp_p", "24", "-tag:v", "hvc1",
+                ],
+            ],
+            Self::Compatible => &[
+                &[
+                    "-c:v",
+                    "h264_nvenc",
+                    "-preset",
+                    "p5",
+                    "-rc",
+                    "vbr",
+                    "-cq",
+                    "19",
+                    "-b:v",
+                    "0",
+                ],
+                &[
+                    "-c:v",
+                    "h264_qsv",
+                    "-preset",
+                    "medium",
+                    "-global_quality",
+                    "19",
+                ],
+                &[
+                    "-c:v", "h264_amf", "-quality", "quality", "-rc", "cqp", "-qp_i", "17",
+                    "-qp_p", "19",
+                ],
+            ],
+            Self::Lossless => &[],
+        }
+    }
+}
+
+fn hardware_encoder(quality: Quality, format: Format) -> Option<&'static [&'static str]> {
+    let size = match format {
+        Format::Portrait => "color=s=1080x1920:r=30",
+        Format::Landscape => "color=s=1920x1080:r=30",
+    };
+    quality.hardware_candidates().iter().copied().find(|args| {
+        ffmpeg()
+            .args(["-f", "lavfi", "-i", size, "-frames:v", "1"])
+            .args(*args)
+            .args(["-pix_fmt", "yuv420p", "-f", "null", "-"])
+            .output()
+            .is_ok_and(|output| output.status.success())
+    })
 }
 
 #[derive(Clone, Serialize)]
@@ -229,7 +314,7 @@ fn probe(path: PathBuf) -> Result<VideoInfo> {
     })
 }
 
-async fn background<T: Send + 'static>(
+pub(crate) async fn background<T: Send + 'static>(
     task: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
     tauri::async_runtime::spawn_blocking(task)
@@ -257,6 +342,45 @@ fn ffmpeg() -> Command {
 
 fn input<'a>(cmd: &'a mut Command, path: &Path) -> &'a mut Command {
     cmd.args(["-protocol_whitelist", "file", "-i"]).arg(path)
+}
+
+pub(crate) fn caption_audio(path: &Path, mut range: Clip, pcm: &Path) -> Result<f64> {
+    let video = probe(source(path)?)?;
+    validate_clips(std::slice::from_mut(&mut range), video.duration)?;
+    let duration = range.end - range.start;
+    let mut cmd = ffmpeg();
+    cmd.args(["-ss", &format!("{:.6}", range.start)]);
+    let output = input(&mut cmd, &video.path)
+        .args([
+            "-t",
+            &format!("{duration:.6}"),
+            "-map",
+            "0:a:0?",
+            "-vn",
+            "-sn",
+            "-dn",
+            "-ac",
+            "1",
+            "-af",
+            "aresample=16000:async=1:first_pts=0",
+            "-c:a",
+            "pcm_f32le",
+            "-f",
+            "f32le",
+        ])
+        .arg(pcm)
+        .output()
+        .map_err(|error| launch_error("ffmpeg", error))?;
+    if !output.status.success() {
+        if String::from_utf8_lossy(&output.stderr).contains("does not contain any stream") {
+            return Err("This video has no audio track to caption.".into());
+        }
+        return Err(process_error(
+            "Could not read the clip’s audio",
+            &output.stderr,
+        ));
+    }
+    Ok(duration)
 }
 
 fn thumbnail_at(path: &Path, time: f64) -> Result<String> {
@@ -381,16 +505,71 @@ fn filter(format: Format, framing: Framing, position: FramePosition) -> Result<S
     Ok(format!("scale={width}:{height}:force_original_aspect_ratio={scale}:force_divisible_by=2:reset_sar=1,{frame}"))
 }
 
+#[derive(Clone, Copy, Default)]
+struct CaptionLayers<'a> {
+    legacy: Option<(&'a crate::caption_render::CaptionTrack, Format)>,
+    overlay: Option<&'a Overlay>,
+}
+
 fn encode_clip(
     path: &Path,
     clip: Clip,
     filter: &str,
     quality: Quality,
     destination: &Path,
+    captions: CaptionLayers<'_>,
+    on_progress: impl Fn(f64),
+) -> Result<()> {
+    encode_with(
+        path,
+        clip,
+        filter,
+        quality.args(),
+        destination,
+        captions,
+        on_progress,
+    )
+}
+
+fn encode_with(
+    path: &Path,
+    clip: Clip,
+    filter: &str,
+    encoder: &[&str],
+    destination: &Path,
+    captions: CaptionLayers<'_>,
     on_progress: impl Fn(f64),
 ) -> Result<()> {
     let mut cmd = ffmpeg();
     let duration = clip.end - clip.start;
+    // Use a fixed relative filename so Windows drive letters and user paths
+    // never enter FFmpeg's filter expression.
+    let subtitles = captions
+        .legacy
+        .filter(|_| captions.overlay.is_none())
+        .filter(|(track, _)| !track.cues.is_empty())
+        .map(|(track, format)| {
+            let directory = tempfile::tempdir()?;
+            let (width, height) = match format {
+                Format::Landscape => (1920, 1080),
+                Format::Portrait => (1080, 1920),
+            };
+            std::fs::write(
+                directory.path().join("captions.ass"),
+                track.ass(width, height, duration),
+            )?;
+            Ok::<_, std::io::Error>(directory)
+        })
+        .transpose()
+        .map_err(|error| format!("Could not prepare captions for export: {error}"))?;
+    let caption_filter;
+    let filter = if let Some(directory) = &subtitles {
+        cmd.current_dir(directory.path());
+        caption_filter = format!("{filter},ass=filename=captions.ass");
+        &caption_filter
+    } else {
+        filter
+    };
     let log = tempfile::tempfile().map_err(|error| error.to_string())?;
     let mut read_log = log.try_clone().map_err(|error| error.to_string())?;
     cmd.args([
@@ -401,43 +580,60 @@ fn encode_clip(
         "-ss",
         &format!("{:.6}", clip.start),
     ]);
-    input(&mut cmd, path)
-        .args([
-            "-t",
-            &format!("{duration:.6}"),
-            "-map",
-            "0:V:0",
-            "-map",
-            "0:a:0?",
-            "-sn",
-            "-dn",
-            "-map_metadata",
-            "-1",
-            "-map_chapters",
-            "-1",
-            "-vf",
-            filter,
-        ])
-        .args(quality.args())
-        .args([
-            "-threads:v",
-            "2",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-movflags",
-            "+faststart",
-            "-abort_on",
-            "empty_output",
-            "-progress",
-            "pipe:1",
+    input(&mut cmd, path);
+    if let Some(overlay) = captions.overlay {
+        let graph = format!("[0:V:0]{filter}[video];[video][1:v]overlay=x={}:y={}:eof_action=pass:repeatlast=0[captioned]", overlay.x, overlay.y);
+        cmd.current_dir(overlay.directory.path()).args([
             "-f",
-            "mp4",
-        ])
-        .arg(destination);
+            "concat",
+            "-safe",
+            "0",
+            "-protocol_whitelist",
+            "file",
+            "-i",
+            "captions.ffconcat",
+            "-filter_complex_threads",
+            "1",
+            "-filter_complex",
+            &graph,
+            "-map",
+            "[captioned]",
+        ]);
+    } else {
+        cmd.args(["-map", "0:V:0", "-vf", filter]);
+    }
+    cmd.args([
+        "-t",
+        &format!("{duration:.6}"),
+        "-map",
+        "0:a:0?",
+        "-sn",
+        "-dn",
+        "-map_metadata",
+        "-1",
+        "-map_chapters",
+        "-1",
+    ])
+    .args(encoder)
+    .args([
+        "-threads:v",
+        "2",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        "-abort_on",
+        "empty_output",
+        "-progress",
+        "pipe:1",
+        "-f",
+        "mp4",
+    ])
+    .arg(destination);
     let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(log)
@@ -534,8 +730,7 @@ fn export_name(title: Option<&str>, stem: &str, index: usize) -> String {
 fn encode_batch(
     path: &Path,
     folder: &Path,
-    clips: &[Clip],
-    titles: &[Option<String>],
+    clips: &[ExportClip],
     options: ExportOptions,
     mut progress: impl FnMut(Progress),
 ) -> Result<Vec<ClipExport>> {
@@ -548,31 +743,55 @@ fn encode_batch(
         .take(60)
         .collect();
     let cpus = std::thread::available_parallelism().map_or(1, usize::from);
+    let hardware = hardware_encoder(options.quality, options.format);
     let mut results = vec![None; clips.len()];
     export_batch::run(
         clips.len(),
         export_batch::worker_count(clips.len(), cpus),
         |index, report| -> Result<u64> {
+            let clip = &clips[index];
             let output = tempfile::Builder::new()
                 .prefix(".minividcut-")
                 .suffix(".mp4")
                 .tempfile_in(folder)
                 .map_err(|error| format!("Could not write in this folder: {error}"))?;
-            encode_clip(
-                path,
-                clips[index],
-                &filter,
-                options.quality,
-                output.path(),
-                report,
-            )?;
+            let captions = CaptionLayers {
+                legacy: clip.captions.as_ref().map(|track| (track, options.format)),
+                overlay: clip.overlay.as_ref(),
+            };
+            let accelerated = hardware.is_some_and(|args| {
+                encode_with(
+                    path,
+                    clip.range,
+                    &filter,
+                    args,
+                    output.path(),
+                    captions,
+                    report,
+                )
+                .is_ok()
+            });
+            if !accelerated {
+                encode_clip(
+                    path,
+                    clip.range,
+                    &filter,
+                    options.quality,
+                    output.path(),
+                    captions,
+                    report,
+                )?;
+            }
             let bytes = output
                 .as_file()
                 .metadata()
                 .map_err(|error| error.to_string())?
                 .len();
-            let title = titles.get(index).and_then(Option::as_deref);
-            save_clip(output, folder, &export_name(title, &stem, index))?;
+            save_clip(
+                output,
+                folder,
+                &export_name(clip.title.as_deref(), &stem, index),
+            )?;
             Ok(bytes)
         },
         |index, event| {
@@ -601,29 +820,65 @@ pub async fn export_clips(
     app: AppHandle,
     path: PathBuf,
     folder: PathBuf,
-    clips: Vec<ExportClip>,
+    mut clips: Vec<ExportClip>,
     options: ExportOptions,
     progress: Channel<Progress>,
 ) -> Result<Vec<ClipExport>> {
     background(move || {
         let exports = app.state::<Exports>();
-        let _batch = exports.batch.try_lock().map_err(|_| "An export is already running.")?;
+        let _batch = exports
+            .batch
+            .try_lock()
+            .map_err(|_| "An export is already running.")?;
         let video = probe(source(&path)?)?;
-        let (mut ranges, titles): (Vec<_>, Vec<_>) = clips.into_iter().map(|clip| (clip.range, clip.title)).unzip();
+        let mut ranges: Vec<_> = clips.iter().map(|clip| clip.range).collect();
         validate_clips(&mut ranges, video.duration)?;
+        for (clip, range) in clips.iter_mut().zip(ranges) {
+            clip.range = range;
+        }
+        let overlays = app.state::<CaptionOverlays>();
+        let (width, height) = match options.format {
+            Format::Landscape => (1920, 1080),
+            Format::Portrait => (1080, 1920),
+        };
+        for clip in &mut clips {
+            if let Some(id) = &clip.overlay_id {
+                let overlay = overlays.take(id)?;
+                if !overlay.fits(width, height) {
+                    return Err("Caption artwork falls outside the output frame.".into());
+                }
+                clip.overlay = Some(overlay);
+            }
+        }
         if !folder.is_absolute() || !folder.is_dir() {
             return Err("Choose an existing export folder.".into());
         }
-        if matches!(options.quality, Quality::Compact) {
-            let encoders = output(command("ffmpeg").args(["-hide_banner", "-encoders"]), "ffmpeg", "Could not list video encoders")?;
-            if !String::from_utf8_lossy(&encoders.stdout).lines().any(|line| line.split_whitespace().nth(1) == Some("libx265")) {
-                return Err("Compact exports require FFmpeg with libx265. Choose Compatible to export with H.264.".into());
+        if clips.iter().any(|clip| {
+            clip.overlay.is_none()
+                && clip
+                    .captions
+                    .as_ref()
+                    .is_some_and(|track| !track.cues.is_empty())
+        }) {
+            let filters = output(
+                command("ffmpeg").args(["-hide_banner", "-filters"]),
+                "ffmpeg",
+                "Could not list video filters",
+            )?;
+            if !String::from_utf8_lossy(&filters.stdout)
+                .lines()
+                .any(|line| line.split_whitespace().nth(1) == Some("ass"))
+            {
+                return Err("Captioned exports require an FFmpeg build with libass.".into());
             }
         }
-        let results = encode_batch(&video.path, &folder, &ranges, &titles, options, |event| {
+        let results = encode_batch(&video.path, &folder, &clips, options, |event| {
             let _ = progress.send(event);
         })?;
-        if results.iter().any(|state| matches!(state, ClipExport::Saved { .. })) {
+        if results
+            .iter()
+            .any(|state| matches!(state, ClipExport::Saved { .. }))
+        {
             *exports.folder.lock().map_err(|error| error.to_string())? = Some(folder);
         }
         Ok(results)
@@ -726,6 +981,7 @@ mod tests {
                 &filter(format, framing, FramePosition { x: 50, y: 50 }).unwrap(),
                 Quality::Compatible,
                 &path,
+                CaptionLayers::default(),
                 |_| {},
             )
             .unwrap();
@@ -750,6 +1006,179 @@ mod tests {
             )
             .unwrap();
             assert_eq!(String::from_utf8_lossy(&audio.stdout).trim(), "aac");
+        }
+    }
+
+    #[test]
+    fn composites_timed_caption_artwork_at_its_exact_position() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("source.mp4");
+        output(
+            ffmpeg()
+                .args([
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=black:s=320x180:r=30:d=2",
+                    "-c:v",
+                    "libx264",
+                ])
+                .arg(&path),
+            "ffmpeg",
+            "Could not make a test source",
+        )
+        .unwrap();
+        let mut images = Vec::new();
+        for color in ["black@0", "red", "blue"] {
+            images.push(
+                output(
+                    ffmpeg().args([
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        &format!("color={color}:s=80x40,format=rgba"),
+                        "-frames:v",
+                        "1",
+                        "-threads",
+                        "1",
+                        "-c:v",
+                        "png",
+                        "-f",
+                        "image2pipe",
+                        "pipe:1",
+                    ]),
+                    "ffmpeg",
+                    "Could not make test artwork",
+                )
+                .unwrap()
+                .stdout,
+            );
+        }
+        let header = serde_json::to_vec(&serde_json::json!({
+            "x": 240, "y": 320, "width": 80, "height": 40,
+            "sizes": images.iter().map(Vec::len).collect::<Vec<_>>(),
+            "frames": [{ "at": 0, "image": 0 }, { "at": 153, "image": 1 }, { "at": 365, "image": 2 }, { "at": 661, "image": 0 }]
+        })).unwrap();
+        let mut payload = (header.len() as u32).to_le_bytes().to_vec();
+        payload.extend(header);
+        payload.extend(images.into_iter().flatten());
+        let overlay = crate::caption_overlay::prepare(&payload).unwrap();
+        let destination = folder.path().join("captioned.mp4");
+        let clip = Clip {
+            start: 0.5,
+            end: 1.5,
+        };
+        let filter = filter(
+            Format::Landscape,
+            Framing::Fill,
+            FramePosition { x: 50, y: 50 },
+        )
+        .unwrap();
+        encode_clip(
+            &path,
+            clip,
+            &filter,
+            Quality::Compatible,
+            &destination,
+            CaptionLayers {
+                legacy: None,
+                overlay: Some(&overlay),
+            },
+            |_| {},
+        )
+        .unwrap();
+        let sample = |time: &str, x: &str| {
+            let mut cmd = ffmpeg();
+            cmd.args(["-ss", time]);
+            output(
+                input(&mut cmd, &destination).args([
+                    "-vf",
+                    &format!("crop=2:2:{x}:340,format=rgb24"),
+                    "-frames:v",
+                    "1",
+                    "-f",
+                    "rawvideo",
+                    "pipe:1",
+                ]),
+                "ffmpeg",
+                "Could not read sample pixel",
+            )
+            .unwrap()
+            .stdout
+        };
+        assert!(sample("0.10", "280")[0] < 20);
+        assert!(sample("0.20", "280")[0] > 200);
+        assert!(sample("0.20", "420")[0] < 20);
+        assert!(sample("0.40", "280")[2] > 200);
+        assert!(sample("0.70", "280")[2] < 20);
+    }
+
+    #[test]
+    fn burns_captions_at_clip_relative_times_in_both_formats() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("dark source.mp4");
+        output(
+            ffmpeg()
+                .args([
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=black:s=320x180:r=10:d=2",
+                    "-c:v",
+                    "libx264",
+                ])
+                .arg(&path),
+            "ffmpeg",
+            "Could not make a test source",
+        )
+        .unwrap();
+        let track: crate::caption_render::CaptionTrack =
+            serde_json::from_value(serde_json::json!({
+                "style": { "preset": "boxed", "position": "bottom", "size": "medium" },
+                "cues": [{ "start": 0.2, "end": 0.6, "text": "Caption in the frame" }]
+            }))
+            .unwrap();
+        for format in [Format::Portrait, Format::Landscape] {
+            let destination = folder.path().join("captioned output.mp4");
+            let framing = filter(format, Framing::Fit, FramePosition { x: 50, y: 50 }).unwrap();
+            encode_clip(
+                &path,
+                Clip {
+                    start: 0.5,
+                    end: 1.5,
+                },
+                &framing,
+                Quality::Compatible,
+                &destination,
+                CaptionLayers {
+                    legacy: Some((&track, format)),
+                    overlay: None,
+                },
+                |_| {},
+            )
+            .unwrap();
+            let peak = |time: &str| {
+                let mut cmd = ffmpeg();
+                cmd.args(["-ss", time]);
+                let frame = output(
+                    input(&mut cmd, &destination).args([
+                        "-frames:v",
+                        "1",
+                        "-pix_fmt",
+                        "gray",
+                        "-f",
+                        "rawvideo",
+                        "pipe:1",
+                    ]),
+                    "ffmpeg",
+                    "Could not read a test frame",
+                )
+                .unwrap();
+                *frame.stdout.iter().max().unwrap()
+            };
+            assert!(peak("0.1") < 20);
+            assert!(peak("0.4") > 200);
+            assert!(peak("0.8") < 20);
         }
     }
 
@@ -819,19 +1248,23 @@ mod tests {
         let clips: Vec<_> = (0..10)
             .map(|index| {
                 let start = f64::from(index) / 8.0;
-                Clip {
-                    start,
-                    end: start + 0.125,
+                ExportClip {
+                    range: Clip {
+                        start,
+                        end: start + 0.125,
+                    },
+                    title: (index == 0).then(|| "Opening".to_owned()),
+                    captions: None,
+                    overlay_id: None,
+                    overlay: None,
                 }
             })
             .collect();
         let mut saved = [false; 10];
-        let titles = [Some("Opening".to_owned())];
         let results = encode_batch(
             &source,
             folder.path(),
             &clips,
-            &titles,
             ExportOptions {
                 format: Format::Landscape,
                 framing: Framing::Fill,
@@ -921,6 +1354,7 @@ mod tests {
             &filter,
             Quality::Lossless,
             &destination,
+            CaptionLayers::default(),
             |_| {},
         )
         .unwrap();

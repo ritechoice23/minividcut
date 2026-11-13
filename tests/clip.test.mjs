@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { moveBoundary, parseTime, splitRange, stamp, validRange } from '../src/clip.ts'
+import { cutRange, moveBoundary, parseTime, splitRange, stamp, validRange } from '../src/clip.ts'
 
 test('accepts seconds and timecodes with millisecond precision', () => {
   assert.equal(parseTime('1:02:03.456'), 3723.456)
@@ -37,4 +37,12 @@ test('splits the active range without a tiny trailing clip', () => {
     { start: 0, end: 15 }, { start: 15, end: 30.01 },
   ])
   assert.equal(splitRange({ start: 0, end: 1600 }, 15), null)
+})
+test('cuts a middle, edge, or entire section while dropping unusably short remnants', () => {
+  const clip = { start: 1, end: 10 }
+  assert.deepEqual(cutRange(clip, { start: 3, end: 7 }), [{ start: 1, end: 3 }, { start: 7, end: 10 }])
+  assert.deepEqual(cutRange(clip, { start: 0, end: 4 }), [{ start: 4, end: 10 }])
+  assert.deepEqual(cutRange(clip, { start: 4, end: 9.98 }), [{ start: 1, end: 4 }])
+  assert.deepEqual(cutRange(clip, { start: 0, end: 11 }), [])
+  assert.deepEqual(cutRange(clip, { start: 10, end: 11 }), [clip])
 })

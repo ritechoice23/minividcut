@@ -1,5 +1,7 @@
+import type { CaptionTrack } from './captions'
+
 export type Range = { start: number; end: number }
-export type Clip = Range & { id: number; title?: string }
+export type Clip = Range & { id: number; title?: string; captions?: CaptionTrack }
 export const MIN_CLIP = 0.05
 export const MAX_CLIPS = 100
 
@@ -42,4 +44,12 @@ export function splitRange(range: Range, seconds: number) {
     start: range.start + index * seconds,
     end: index + 1 === count ? range.end : range.start + (index + 1) * seconds,
   }))
+}
+
+export function cutRange(source: Range, cut: Range): Range[] {
+  if (cut.start >= source.end || cut.end <= source.start) return [source]
+  return [
+    { start: source.start, end: Math.min(source.end, cut.start) },
+    { start: Math.max(source.start, cut.end), end: source.end },
+  ].filter(part => validRange(part, source.end))
 }

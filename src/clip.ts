@@ -53,3 +53,37 @@ export function cutRange(source: Range, cut: Range): Range[] {
     { start: Math.max(source.start, cut.end), end: source.end },
   ].filter(part => validRange(part, source.end))
 }
+
+export function trimClips(
+  clips: readonly Clip[],
+  cut: Range,
+  duration: number,
+  makeId: () => number,
+  sliceCaptions?: (track: CaptionTrack | undefined, range: Range) => CaptionTrack | undefined,
+): Clip[] {
+  if (!clips.length) {
+    const kept = cutRange({ start: 0, end: duration }, cut)
+    return kept.map(part => ({
+      ...part,
+      id: makeId(),
+    }))
+  }
+
+  const result: Clip[] = []
+  for (const clip of clips) {
+    if (cut.start >= clip.end || cut.end <= clip.start) {
+      result.push(clip)
+    } else {
+      const kept = cutRange(clip, cut)
+      result.push(
+        ...kept.map((part, index) => ({
+          ...part,
+          id: index === 0 ? clip.id : makeId(),
+          title: index > 0 && clip.title ? `${clip.title} - Part ${index + 1}` : clip.title,
+          captions: sliceCaptions ? sliceCaptions(clip.captions, part) : clip.captions,
+        }))
+      )
+    }
+  }
+  return result
+}

@@ -8,7 +8,7 @@ import {
   Keyboard, LoaderCircle, Monitor, Move, Pause, Play, Plus, RotateCcw, Scissors, Smartphone,
   Split, Subtitles, Trash2, Volume2, VolumeX, X, ZoomIn, ZoomOut,
 } from 'lucide-react'
-import { cutRange, MAX_CLIPS, moveBoundary, parseTime, splitRange, stamp, validRange } from './clip'
+import { cutRange, MAX_CLIPS, moveBoundary, parseTime, splitRange, stamp, trimClips, validRange } from './clip'
 import type { Clip, Range } from './clip'
 import { MAX_TIMELINE_ZOOM, panTimeline, timelineTime, timelineWindow, zoomTimeline } from './timeline'
 import { CENTER, frameTravel, panPosition } from './framing'
@@ -418,18 +418,24 @@ export function App() {
 
   const togglePlay = () => {
     const player = video.current
-    if (!player || player.readyState < 2 || !source) return
+    if (!player || player.readyState === 0 || !source) return
     if (!player.paused) {
       player.pause()
       return
     }
-    if (player.ended) seek(0)
     const from = player.currentTime
     const saved = selectedId === 0 ? exportBatch?.ranges.find(clip => clip.id === 0) : clips.find(clip => clip.id === selectedId)
     const reviewed = reviewIndex === null ? undefined : sections[reviewIndex]
     const previewed = saved ?? reviewed
     const playingSection = previewed?.start === range.start && previewed.end === range.end
-    playUntil.current = playingSection && from >= range.start && from < range.end - 0.005 ? range.end : null
+
+    if (player.ended || (playingSection && from >= range.end - 0.005) || (!playingSection && from >= duration - 0.005)) {
+      seek(playingSection ? range.start : 0)
+    } else if (playingSection && from < range.start) {
+      seek(range.start)
+    }
+
+    playUntil.current = playingSection ? range.end : null
     void player.play().catch(error => setNotice(message(error)))
   }
 
@@ -569,52 +575,71 @@ export function App() {
     seek(clip.start)
   }
 
-  const cutSection = () => {
+  const trimSection = () => {
     if (selectedLocked || !validRange(range, duration) || captionJob.current?.key === captionKey) return
-    if (reviewed && reviewIndex !== null) {
-      const kept = cutRange(reviewed, range)
-      if (kept.length === 1 && kept[0] === reviewed) return
-      if (sections.length - 1 + kept.length > MAX_CLIPS) {
+    if (sections.length > 0) {
+      const overlapping = sections.filter(sec => range.start < sec.end && range.end > sec.start)
+      if (!overlapping.length) return
+
+      const remaining: Range[] = []
+      for (const sec of sections) {
+        if (range.start < sec.end && range.end > sec.start) {
+          remaining.push(...cutRange(sec, range))
+        } else {
+          remaining.push(sec)
+        }
+      }
+
+      if (remaining.length > MAX_CLIPS) {
         setNotice(`Keep at most ${MAX_CLIPS} marked sections.`)
         return
       }
-      const remaining = [...sections.slice(0, reviewIndex), ...kept, ...sections.slice(reviewIndex + 1)]
-      if (currentCaptions) setDraftCaptions(current => ({
-        ...current,
-        [captionKey]: undefined,
-        ...Object.fromEntries(kept.map(part => [`section-${part.start}-${part.end}`, captionSlice(currentCaptions, part)])),
-      }))
+
+      if (currentCaptions) {
+        setDraftCaptions(current => {
+          const updated = { ...current, [captionKey]: undefined }
+          for (const sec of overlapping) {
+            for (const part of cutRange(sec, range)) {
+              updated[`section-${part.start}-${part.end}`] = captionSlice(currentCaptions, part)
+            }
+          }
+          return updated
+        })
+      }
+
       setSections(remaining)
-      if (remaining.length) reviewSection(remaining, Math.min(reviewIndex, remaining.length - 1))
-      else {
+      if (remaining.length) {
+        const nextIndex = Math.min(reviewIndex ?? 0, remaining.length - 1)
+        reviewSection(remaining, nextIndex)
+      } else {
         setReviewIndex(null)
-        setRange({ start: range.start, end: range.start })
+        resetRange()
         video.current?.pause()
       }
       setNotice('')
       return
     }
-    if (!selectedClip && clips.length) return
-    const kept = cutRange(selectedClip ?? { start: 0, end: duration }, range)
-    if ((!selectedClip && !kept.length) || (selectedClip && kept[0] === selectedClip)) return
-    if (clips.length - Number(Boolean(selectedClip)) + kept.length > MAX_CLIPS) {
+
+    const trimmed = trimClips(clips, range, duration, () => nextId.current++, captionSlice)
+    if (trimmed.length > MAX_CLIPS) {
       setNotice(`Keep at most ${MAX_CLIPS} clips.`)
       return
     }
-    const pieces = kept.map((part, index) => ({
-      ...part,
-      id: index === 0 && selectedClip ? selectedClip.id : nextId.current++,
-      title: index > 0 && selectedClip?.title ? `${selectedClip.title} - Part ${index + 1}` : selectedClip?.title,
-      captions: captionSlice(currentCaptions, part),
-    }))
-    setClips(items => selectedClip
-      ? items.flatMap(clip => clip.id === selectedClip.id ? pieces : [clip])
-      : pieces)
+
+    setClips(trimmed)
     setCaptionsOpen(false)
-    if (pieces.length) selectClip(pieces[0])
-    else {
-      setSelectedId(null)
-      setRange({ start: range.start, end: range.start })
+
+    if (trimmed.length) {
+      const stillSelected = selectedId !== null && trimmed.find(clip => clip.id === selectedId)
+      if (stillSelected) {
+        selectClip(stillSelected)
+      } else {
+        const oldIndex = clips.findIndex(clip => clip.id === selectedId)
+        const nextIndex = oldIndex >= 0 ? Math.min(oldIndex, trimmed.length - 1) : 0
+        selectClip(trimmed[nextIndex])
+      }
+    } else {
+      resetRange()
       video.current?.pause()
     }
     setNotice('')
@@ -692,11 +717,23 @@ export function App() {
   }
 
   useEffect(() => {
+    const isTextEditing = (el: Element | null): boolean => {
+      if (!el) return false
+      if (el.closest('textarea, [contenteditable="true"], [contenteditable=""]')) return true
+      const input = el.closest('input')
+      if (input) {
+        const nonText = ['range', 'color', 'checkbox', 'radio', 'button', 'submit', 'reset', 'file']
+        return !nonText.includes(input.type.toLowerCase())
+      }
+      return false
+    }
+
     const shortcutsHandler = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase()
+      const target = event.target instanceof Element ? event.target : null
+
       if (event.key === 'Escape') {
-        if (captionsOpen && event.target instanceof Element && event.target.closest('#caption-editor') &&
-          !event.target.closest('input, select, textarea')) closeCaptions()
+        if (captionsOpen && target?.closest('#caption-editor') && !target.closest('input, select, textarea')) closeCaptions()
         setShortcuts(false)
         setSplitOpen(false)
         return
@@ -706,20 +743,50 @@ export function App() {
         void chooseVideo()
         return
       }
-      const target = event.target instanceof Element ? event.target : null
-      if (event.ctrlKey || event.metaKey || event.altKey || shortcuts || !source || loading ||
-        target?.closest('input, select, textarea, [contenteditable]')) return
+
+      if ((event.ctrlKey || event.metaKey) && !event.altKey) {
+        if (key === '+' || key === '=' || event.code === 'NumpadAdd') {
+          event.preventDefault()
+          if (source && !loading) zoomTimelineTo(timelineZoom * 2)
+          return
+        }
+        if (key === '-' || key === '_' || event.code === 'NumpadSubtract') {
+          event.preventDefault()
+          if (source && !loading) zoomTimelineTo(timelineZoom / 2)
+          return
+        }
+        if (key === '0' || event.code === 'Numpad0') {
+          event.preventDefault()
+          if (source && !loading) zoomTimelineTo(1)
+          return
+        }
+      }
+
+      if (shortcuts) return
+
+      if (key === ' ' || event.code === 'Space') {
+        if (!isTextEditing(target)) {
+          event.preventDefault()
+          if (source && !loading) togglePlay()
+          return
+        }
+      }
+
+      if (isTextEditing(target) || event.ctrlKey || event.metaKey || event.altKey || !source || loading) return
       if (key === 'i' || key === 'o') {
         editBoundary(key === 'i' ? 'start' : 'end', time)
         return
       }
-      if (target?.closest('button')) return
-      if (key === ' ') { event.preventDefault(); togglePlay() }
       if (key === 'arrowleft' || key === 'arrowright') {
-        event.preventDefault()
-        seek(time + (key === 'arrowleft' ? -1 : 1) * (event.shiftKey ? 5 : 1))
+        if (!target?.closest('input[type="range"]')) {
+          event.preventDefault()
+          seek(time + (key === 'arrowleft' ? -1 : 1) * (event.shiftKey ? 5 : 1))
+        }
+        return
       }
-      if (key === 'enter' && !event.repeat) addClip()
+      if (key === 'enter' && !event.repeat) {
+        if (!target?.closest('button, a, input, select, textarea')) addClip()
+      }
     }
     window.addEventListener('keydown', shortcutsHandler)
     return () => window.removeEventListener('keydown', shortcutsHandler)
@@ -791,16 +858,19 @@ export function App() {
 
   const disabled = !hasSource || loading
   const trimDisabled = disabled || selectedLocked
-  const cutTarget = reviewed ?? selectedClip
-  const canCut = !trimDisabled && (cutTarget
-    ? range.start < cutTarget.end && range.end > cutTarget.start
-    : !clips.length && (range.start > 0 || range.end < duration))
   const canSaveRange = validRange(range, duration)
+  const editingCaptionJob = captionsRunning && captionJob.current?.key === captionKey
+  const canTrim = !trimDisabled && canSaveRange && !editingCaptionJob && (
+    sections.length > 0
+      ? sections.some(sec => range.start < sec.end && range.end > sec.start)
+      : clips.length > 0
+        ? clips.some(clip => range.start < clip.end && range.end > clip.start)
+        : (range.start > 0 || range.end < duration)
+  )
   const batchCount = clips.length || (hasSource && !sections.length ? 1 : 0)
   const summary = exportBatch && summarizeExport(exportBatch.ranges, exportBatch.states)
   const singleExport = busy ? exportBatch?.ranges.find(clip => clip.id === 0) : undefined
   const displayedClips = singleExport ? [singleExport, ...clips] : clips
-  const editingCaptionJob = captionsRunning && captionJob.current?.key === captionKey
   const captionLabel = selectedClip ? selectedClip.title || `Clip ${clips.indexOf(selectedClip) + 1}`
     : reviewed ? `Section ${(reviewIndex ?? 0) + 1}` : 'Current range'
   const showCaptionEditor = captionsOpen && !trimDisabled && canSaveRange
@@ -1094,8 +1164,8 @@ export function App() {
             <TimeField label="Out" value={range.end} disabled={trimDisabled} onChange={value => editBoundary('end', value)} onMark={() => editBoundary('end', time)} />
             <button className="icon-button compact" title="Reset trim range" aria-label="Reset trim range" onClick={resetRange} disabled={trimDisabled}><RotateCcw size={15} /></button>
             {hasSource && <span className="range-duration" title={canSaveRange ? 'Trim range duration' : 'A clip must be at least 0.05 seconds long'}>{stamp(range.end - range.start, true)}</span>}
-            <button className="button outline small cut-section" disabled={!canCut || !canSaveRange || editingCaptionJob}
-              title="Remove the In–Out section and keep the remaining parts" onClick={cutSection}><Scissors size={14} /> Cut out</button>
+            <button className="button outline small trim-section cut-section" disabled={!canTrim}
+              title="Trim the In–Out section and keep the remaining parts" onClick={trimSection}><Scissors size={14} /> Trim</button>
             {selectedLocked ? <button className="button add" onClick={resetRange}><Plus size={16} /> New clip</button> : <button className="button add" disabled={trimDisabled || !canSaveRange || editingCaptionJob} onClick={addClip}>{selectedId === null ? <Plus size={16} /> : <Check size={16} />}{selectedId === null ? 'Add clip' : 'Update clip'}</button>}
           </div>
           {sections.length > 0 && <div className="section-review" role="group" aria-label="Review marked sections">
@@ -1119,7 +1189,7 @@ export function App() {
       {shortcuts && <div className="dialog-backdrop" onClick={() => setShortcuts(false)}>
         <section className="shortcut-dialog panel" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" onClick={event => event.stopPropagation()}>
           <div className="section-title"><h2>Keyboard shortcuts</h2><button autoFocus className="icon-button" aria-label="Close shortcuts" onClick={() => setShortcuts(false)}><X size={18} /></button></div>
-          <dl>{[['Open video', 'Ctrl O'], ['Play / pause', 'Space'], ['Seek 1 second', '← / →'], ['Seek 5 seconds', 'Shift ← / →'], ['Mark In', 'I'], ['Mark Out', 'O'], ['Add or update clip', 'Enter']].map(([label, key]) =>
+          <dl>{[['Open video', 'Ctrl O'], ['Play / pause', 'Space'], ['Zoom in', 'Ctrl +'], ['Zoom out', 'Ctrl -'], ['Fit timeline', 'Ctrl 0'], ['Seek 1 second', '← / →'], ['Seek 5 seconds', 'Shift ← / →'], ['Mark In', 'I'], ['Mark Out', 'O'], ['Add or update clip', 'Enter']].map(([label, key]) =>
             <div key={label}><dt>{label}</dt><dd><Key>{key}</Key></dd></div>)}</dl>
         </section>
       </div>}

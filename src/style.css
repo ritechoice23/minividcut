@@ -181,7 +181,7 @@ h2 { font-size: 13px; font-weight: 660; letter-spacing: .03px; }
 .clip-strip { position: relative; height: 9px; margin-top: 7px; }
 .clip-strip button { position: absolute; height: 100%; min-width: 3px; padding: 0; border: 1px solid #839e52; border-radius: 2px; background: #4a6132; }
 .clip-strip button:hover:not(:disabled), .clip-strip button.selected { z-index: 1; border-color: var(--lime); background: #a4c85d; }
-.cut-section:not(:disabled):hover { color: #f5bfaa; border-color: #795043; }
+.trim-section:not(:disabled):hover, .cut-section:not(:disabled):hover { color: #f5bfaa; border-color: #795043; }
 .accessible-scrubber { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .accessible-scrubber:focus-visible { z-index: 4; width: 100%; height: auto; margin: 0; bottom: -10px; opacity: 1; accent-color: var(--lime); }
 .statusbar { min-height: 36px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 20px; border-top: 1px solid #232323; color: #a4a49e; font-size: 11px; }

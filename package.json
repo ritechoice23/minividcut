@@ -1,6 +1,6 @@
 {
   "name": "minividcut",
-  "version": "0.4.0",
+  "version": "0.4.2",
   "description": "Lightweight local video cutter",
   "scripts": {
     "test": "node --test",

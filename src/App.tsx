@@ -8,7 +8,7 @@ import {
   Keyboard, LoaderCircle, Monitor, Move, Pause, Play, Plus, RotateCcw, Scissors, Smartphone,
   Split, Subtitles, Trash2, Volume2, VolumeX, X, ZoomIn, ZoomOut,
 } from 'lucide-react'
-import { cutRange, MAX_CLIPS, moveBoundary, parseTime, splitRange, stamp, trimClips, validRange } from './clip'
+import { cutRange, MAX_CLIPS, moveBoundary, parseTime, rangesOverlap, splitRange, stamp, validRange } from './clip'
 import type { Clip, Range } from './clip'
 import { MAX_TIMELINE_ZOOM, panTimeline, timelineTime, timelineWindow, zoomTimeline } from './timeline'
 import { CENTER, frameTravel, panPosition } from './framing'
@@ -116,7 +116,8 @@ export function App() {
   const [captionStatus, setCaptionStatus] = useState<{ key: string; text: string } | null>(null)
   const [draftCaptions, setDraftCaptions] = useState<Record<string, CaptionTrack | undefined>>({})
   const sharedCaptionStyle = useRef<CaptionStyle | null>(null)
-  const captionButton = useRef<HTMLButtonElement>(null)
+  const clipsTab = useRef<HTMLButtonElement>(null)
+  const captionsTab = useRef<HTMLButtonElement>(null)
   const captionJob = useRef<{ key: string; cancelled: boolean } | null>(null)
   const frameCache = useRef(new Map<number, string>())
   const video = useRef<HTMLVideoElement>(null)
@@ -151,10 +152,12 @@ export function App() {
   const pct = (value: number) => visibleTime.span
     ? Math.max(0, Math.min(100, 100 * (value - visibleTime.start) / visibleTime.span)) : 0
   const inView = (value: number) => value >= visibleTime.start - 0.000001 && value <= visibleTime.end + 0.000001
-  const zoomTimelineTo = (zoom: number) => {
-    timelinePanned.current = false
+  const zoomTimelineTo = (requested: number) => {
+    const zoom = Math.max(1, Math.min(MAX_TIMELINE_ZOOM, requested))
+    if (zoom === timelineZoom) return
+    const anchor = inView(time) ? time : (visibleTime.start + visibleTime.end) / 2
     setTimelineZoom(zoom)
-    setTimelineStart(zoomTimeline(duration, zoom, time))
+    setTimelineStart(zoomTimeline(duration, zoom, anchor))
   }
   const revealTimelineTime = (point: number) => {
     timelinePanned.current = false
@@ -338,13 +341,14 @@ export function App() {
   }, [])
 
   const openCaptions = () => {
+    setRenaming(null)
     setCaptionsOpen(true)
     void refreshCaptionModel().catch(error => setCaptionStatus({ key: captionKey, text: message(error) }))
   }
 
   const closeCaptions = useCallback(() => {
     setCaptionsOpen(false)
-    captionButton.current?.focus()
+    clipsTab.current?.focus()
   }, [])
 
   const saveCaptions = useCallback((track: CaptionTrack) => {
@@ -418,7 +422,7 @@ export function App() {
 
   const togglePlay = () => {
     const player = video.current
-    if (!player || player.readyState === 0 || !source) return
+    if (!player || !source || loading) return
     if (!player.paused) {
       player.pause()
       return
@@ -436,7 +440,9 @@ export function App() {
     }
 
     playUntil.current = playingSection ? range.end : null
-    void player.play().catch(error => setNotice(message(error)))
+    void player.play().catch(error => {
+      if (error?.name !== 'AbortError') setNotice(message(error))
+    })
   }
 
   const editBoundary = (side: keyof Range, value: number, original = range) => {
@@ -492,7 +498,6 @@ export function App() {
         ...clip, start: range.start, end: range.end, captions: captionSlice(clip.captions, range),
       } : clip))
       setSelectedId(null)
-      setCaptionsOpen(false)
       return
     }
     if (clips.length >= MAX_CLIPS) {
@@ -502,7 +507,7 @@ export function App() {
     const clip = { start: range.start, end: range.end, id: nextId.current++, captions: activeCaptions }
     setClips(items => [...items, clip])
     if (activeCaptions) {
-      setDraftCaptions(current => ({ ...current, [captionKey]: undefined }))
+      if (reviewIndex === null) setDraftCaptions(current => ({ ...current, [captionKey]: undefined }))
       setSelectedId(clip.id)
       setReviewIndex(null)
     }
@@ -576,70 +581,40 @@ export function App() {
   }
 
   const trimSection = () => {
-    if (selectedLocked || !validRange(range, duration) || captionJob.current?.key === captionKey) return
-    if (sections.length > 0) {
-      const overlapping = sections.filter(sec => range.start < sec.end && range.end > sec.start)
-      if (!overlapping.length) return
+    if (!canTrim) return
+    const draftTargets = selectedClip ? [selectedClip] : sections.length ? sections : [{ start: 0, end: duration }]
+    const parts = draftTargets.flatMap(section => cutRange(section, range))
+    const remaining = selectedClip
+      ? [...new Map([...sections, ...parts].map(section => [`${section.start}-${section.end}`, section])).values()]
+        .sort((first, second) => first.start - second.start || first.end - second.end)
+      : parts
+    if (remaining.length > MAX_CLIPS) {
+      setNotice(`Keep at most ${MAX_CLIPS} marked sections.`)
+      return
+    }
 
-      const remaining: Range[] = []
-      for (const sec of sections) {
-        if (range.start < sec.end && range.end > sec.start) {
-          remaining.push(...cutRange(sec, range))
-        } else {
-          remaining.push(sec)
+    setDraftCaptions(current => {
+      const updated = { ...current }
+      if (!selectedClip) for (const key of Object.keys(updated)) if (key.startsWith('section-')) delete updated[key]
+      for (const section of draftTargets) {
+        const track = selectedClip ? selectedClip.captions
+          : sections.length ? current[`section-${section.start}-${section.end}`] : current.range
+        for (const part of cutRange(section, range)) {
+          if (track) updated[`section-${part.start}-${part.end}`] = captionSlice(track, part)
         }
       }
+      return updated
+    })
 
-      if (remaining.length > MAX_CLIPS) {
-        setNotice(`Keep at most ${MAX_CLIPS} marked sections.`)
-        return
-      }
-
-      if (currentCaptions) {
-        setDraftCaptions(current => {
-          const updated = { ...current, [captionKey]: undefined }
-          for (const sec of overlapping) {
-            for (const part of cutRange(sec, range)) {
-              updated[`section-${part.start}-${part.end}`] = captionSlice(currentCaptions, part)
-            }
-          }
-          return updated
-        })
-      }
-
-      setSections(remaining)
-      if (remaining.length) {
-        const nextIndex = Math.min(reviewIndex ?? 0, remaining.length - 1)
-        reviewSection(remaining, nextIndex)
-      } else {
-        setReviewIndex(null)
-        resetRange()
-        video.current?.pause()
-      }
-      setNotice('')
-      return
-    }
-
-    const trimmed = trimClips(clips, range, duration, () => nextId.current++, captionSlice)
-    if (trimmed.length > MAX_CLIPS) {
-      setNotice(`Keep at most ${MAX_CLIPS} clips.`)
-      return
-    }
-
-    setClips(trimmed)
-    setCaptionsOpen(false)
-
-    if (trimmed.length) {
-      const stillSelected = selectedId !== null && trimmed.find(clip => clip.id === selectedId)
-      if (stillSelected) {
-        selectClip(stillSelected)
-      } else {
-        const oldIndex = clips.findIndex(clip => clip.id === selectedId)
-        const nextIndex = oldIndex >= 0 ? Math.min(oldIndex, trimmed.length - 1) : 0
-        selectClip(trimmed[nextIndex])
-      }
+    setSections(remaining)
+    if (remaining.length) {
+      const preferred = parts.find(section => section.start >= range.end) ?? parts.at(-1)
+      const next = preferred ? remaining.findIndex(section => section.start === preferred.start && section.end === preferred.end) : -1
+      reviewSection(remaining, next < 0 ? remaining.length - 1 : next)
     } else {
-      resetRange()
+      setSelectedId(null)
+      setReviewIndex(null)
+      setRange({ start: range.start, end: range.start })
       video.current?.pause()
     }
     setNotice('')
@@ -764,14 +739,6 @@ export function App() {
 
       if (shortcuts) return
 
-      if (key === ' ' || event.code === 'Space') {
-        if (!isTextEditing(target)) {
-          event.preventDefault()
-          if (source && !loading) togglePlay()
-          return
-        }
-      }
-
       if (isTextEditing(target) || event.ctrlKey || event.metaKey || event.altKey || !source || loading) return
       if (key === 'i' || key === 'o') {
         editBoundary(key === 'i' ? 'start' : 'end', time)
@@ -788,8 +755,20 @@ export function App() {
         if (!target?.closest('button, a, input, select, textarea')) addClip()
       }
     }
+    const playbackShortcut = (event: KeyboardEvent) => {
+      if ((event.key !== ' ' && event.code !== 'Space') || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || !video.current) return
+      const target = event.target instanceof Element ? event.target : null
+      if (isTextEditing(target)) return
+      event.preventDefault()
+      event.stopPropagation()
+      if (!event.repeat) togglePlay()
+    }
+    window.addEventListener('keydown', playbackShortcut, true)
     window.addEventListener('keydown', shortcutsHandler)
-    return () => window.removeEventListener('keydown', shortcutsHandler)
+    return () => {
+      window.removeEventListener('keydown', playbackShortcut, true)
+      window.removeEventListener('keydown', shortcutsHandler)
+    }
   })
 
   const scrub = (event: ReactPointerEvent, edge?: keyof Range, offset = 0) => {
@@ -860,12 +839,10 @@ export function App() {
   const trimDisabled = disabled || selectedLocked
   const canSaveRange = validRange(range, duration)
   const editingCaptionJob = captionsRunning && captionJob.current?.key === captionKey
-  const canTrim = !trimDisabled && canSaveRange && !editingCaptionJob && (
-    sections.length > 0
-      ? sections.some(sec => range.start < sec.end && range.end > sec.start)
-      : clips.length > 0
-        ? clips.some(clip => range.start < clip.end && range.end > clip.start)
-        : (range.start > 0 || range.end < duration)
+  const canTrim = !trimDisabled && canSaveRange && !captionJob.current && (
+    selectedClip ? rangesOverlap(selectedClip, range)
+      : sections.length ? sections.some(section => rangesOverlap(section, range))
+        : range.start > 0 || range.end < duration
   )
   const batchCount = clips.length || (hasSource && !sections.length ? 1 : 0)
   const summary = exportBatch && summarizeExport(exportBatch.ranges, exportBatch.states)
@@ -960,9 +937,9 @@ export function App() {
             <button className="icon-button mute" aria-label={muted ? 'Unmute' : 'Mute'} title={muted ? 'Unmute' : 'Mute'} disabled={!source} onClick={() => setMuted(!muted)}>
               {muted ? <VolumeX size={18} /> : <Volume2 size={18} />}
             </button>
-            {hasSource && <button ref={captionButton} className={`icon-button caption-toggle${activeCaptions?.cues.length ? ' has-captions' : ''}`}
-              title="Captions" aria-label="Captions" aria-expanded={showCaptionEditor} aria-controls={showCaptionEditor ? 'caption-editor' : undefined}
-              disabled={trimDisabled || !canSaveRange} onClick={captionsOpen ? closeCaptions : openCaptions}>
+            {hasSource && <button className={`icon-button caption-toggle${activeCaptions?.cues.length ? ' has-captions' : ''}`}
+              title="Captions" aria-label="Captions" aria-expanded={captionsOpen} aria-controls="captions-panel"
+              onClick={captionsOpen ? closeCaptions : openCaptions}>
               {captionsRunning ? <LoaderCircle size={17} className="spin" /> : <Subtitles size={18} />}
             </button>}
           </div>
@@ -989,19 +966,45 @@ export function App() {
           </div>
         </section>
 
-        {showCaptionEditor ? <CaptionEditor key={captionKey} label={captionLabel} range={range} track={activeCaptions}
+        <aside className="editor-sidebar panel" aria-label="Clips and captions">
+          <div className="sidebar-tabs" role="tablist" aria-label="Editor sidebar" onKeyDown={event => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+            event.preventDefault()
+            event.stopPropagation()
+            const captions = event.key === 'End' || (event.key !== 'Home' && !captionsOpen)
+            if (captions) {
+              openCaptions()
+              captionsTab.current?.focus()
+            } else closeCaptions()
+          }}>
+            <button ref={clipsTab} type="button" role="tab" id="clips-tab" aria-selected={!captionsOpen} aria-controls="clips-panel"
+              tabIndex={captionsOpen ? -1 : 0} onClick={() => setCaptionsOpen(false)}>
+              <Clapperboard size={15} /> Clips <span className="count">{displayedClips.length}</span>
+            </button>
+            <button ref={captionsTab} type="button" role="tab" id="captions-tab" aria-selected={captionsOpen} aria-controls="captions-panel"
+              tabIndex={captionsOpen ? 0 : -1} onClick={openCaptions}>
+              <Subtitles size={16} /> Captions {captionsRunning && <LoaderCircle size={13} className="spin" aria-label="Generating captions" />}
+            </button>
+          </div>
+          <div className="sidebar-content" id="captions-panel" role="tabpanel" aria-labelledby="captions-tab" hidden={!captionsOpen}>
+            {showCaptionEditor ? <CaptionEditor key={captionKey} label={captionLabel} range={range} track={activeCaptions}
           model={captionModel} progress={captionProgress} status={captionStatus?.key === captionKey ? captionStatus.text : ''}
           format={format} editing={editingCaptionJob} canApplyStyle={!busy && !captionsRunning}
           defaultStyle={sharedCaptionStyle.current ?? undefined} onApplyStyle={applyCaptionStyle}
           onChange={saveCaptions} onStyle={saveCaptionStyle} onGenerate={generateCaptions} onCancel={cancelCaptions}
-          onClose={closeCaptions} onSeek={captionSeek} getTime={captionPlayhead} /> : <aside className="queue panel" aria-label="Clips">
-          <div className="panel-heading">
-            <div className="source-line"><Clapperboard size={16} /><h2>Clips</h2><span className="count">{displayedClips.length}</span></div>
+          onSeek={captionSeek} getTime={captionPlayhead} /> : <div className="empty-queue">
+            <Subtitles size={21} />
+            <p>{!hasSource ? 'Open a video to add captions.' : selectedLocked ? 'This clip is locked while it exports.' : 'Select a range to add captions.'}</p>
+          </div>}
+          </div>
+          <div className="sidebar-content queue" id="clips-panel" role="tabpanel" aria-labelledby="clips-tab" hidden={captionsOpen}>
+          {displayedClips.length > 0 && <div className="panel-heading">
+            <span className="queue-duration" title="Total clip duration">{stamp(displayedClips.reduce((total, clip) => total + clip.end - clip.start, 0), true)}</span>
             {selectedClip && !busy
               ? <button className="button outline small" disabled={disabled || captionsRunning || renaming !== null}
                 onClick={() => void exportVideos(selectedClip)}><ArrowDownToLine size={13} /> Export selected</button>
-              : displayedClips.length > 0 && <span className="queue-duration" title="Total clip duration">{stamp(displayedClips.reduce((total, clip) => total + clip.end - clip.start, 0), true)}</span>}
-          </div>
+              : null}
+          </div>}
           {summary && <section className="export-summary" aria-label="Batch export">
             <div className="export-heading">
               <strong>{busy ? 'Exporting clips' : summary.failed ? 'Export finished with errors' : 'Export complete'}</strong>
@@ -1074,7 +1077,8 @@ export function App() {
                 {state?.status === 'encoding' && <div className="clip-meter" aria-hidden="true"><span style={{ width: `${state.fraction * 100}%` }} /></div>}
               </li>
             })}</ol>}
-        </aside>}
+          </div>
+        </aside>
 
         <section className="timeline panel" aria-label="Timeline">
           <div className="panel-heading timeline-heading">
@@ -1164,8 +1168,8 @@ export function App() {
             <TimeField label="Out" value={range.end} disabled={trimDisabled} onChange={value => editBoundary('end', value)} onMark={() => editBoundary('end', time)} />
             <button className="icon-button compact" title="Reset trim range" aria-label="Reset trim range" onClick={resetRange} disabled={trimDisabled}><RotateCcw size={15} /></button>
             {hasSource && <span className="range-duration" title={canSaveRange ? 'Trim range duration' : 'A clip must be at least 0.05 seconds long'}>{stamp(range.end - range.start, true)}</span>}
-            <button className="button outline small trim-section cut-section" disabled={!canTrim}
-              title="Trim the In–Out section and keep the remaining parts" onClick={trimSection}><Scissors size={14} /> Trim</button>
+            <button className="button outline small trim-section" disabled={!canTrim}
+              title="Remove the In–Out range and mark the remaining parts on the timeline" onClick={trimSection}><Scissors size={14} /> Trim</button>
             {selectedLocked ? <button className="button add" onClick={resetRange}><Plus size={16} /> New clip</button> : <button className="button add" disabled={trimDisabled || !canSaveRange || editingCaptionJob} onClick={addClip}>{selectedId === null ? <Plus size={16} /> : <Check size={16} />}{selectedId === null ? 'Add clip' : 'Update clip'}</button>}
           </div>
           {sections.length > 0 && <div className="section-review" role="group" aria-label="Review marked sections">

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { cutRange, moveBoundary, parseTime, splitRange, stamp, trimClips, validRange } from '../src/clip.ts'
+import { cutRange, moveBoundary, parseTime, splitRange, stamp, validRange } from '../src/clip.ts'
 
 test('accepts seconds and timecodes with millisecond precision', () => {
   assert.equal(parseTime('1:02:03.456'), 3723.456)
@@ -45,45 +45,4 @@ test('cuts a middle, edge, or entire section while dropping unusably short remna
   assert.deepEqual(cutRange(clip, { start: 4, end: 9.98 }), [{ start: 1, end: 4 }])
   assert.deepEqual(cutRange(clip, { start: 0, end: 11 }), [])
   assert.deepEqual(cutRange(clip, { start: 10, end: 11 }), [clip])
-})
-
-test('trimClips trims out any part of the timeline or selected clips', () => {
-  let id = 10
-  const nextId = () => ++id
-
-  // Trimming full video when clips are empty
-  const fromEmpty = trimClips([], { start: 10, end: 20 }, 60, nextId)
-  assert.deepEqual(fromEmpty, [
-    { start: 0, end: 10, id: 11 },
-    { start: 20, end: 60, id: 12 },
-  ])
-
-  // Trimming an already selected clip completely
-  const existing = [
-    { start: 0, end: 10, id: 1 },
-    { start: 20, end: 40, id: 2, title: 'Scene 2' },
-    { start: 50, end: 60, id: 3 },
-  ]
-  const trimmedSelected = trimClips(existing, { start: 20, end: 40 }, 60, nextId)
-  assert.deepEqual(trimmedSelected, [
-    { start: 0, end: 10, id: 1 },
-    { start: 50, end: 60, id: 3 },
-  ])
-
-  // Trimming a part of an unselected or selected clip
-  const trimmedPart = trimClips(existing, { start: 25, end: 35 }, 60, nextId)
-  assert.deepEqual(trimmedPart, [
-    { start: 0, end: 10, id: 1 },
-    { start: 20, end: 25, id: 2, title: 'Scene 2', captions: undefined },
-    { start: 35, end: 40, id: 13, title: 'Scene 2 - Part 2', captions: undefined },
-    { start: 50, end: 60, id: 3 },
-  ])
-
-  // Trimming across multiple clips on the timeline
-  const trimmedAcross = trimClips(existing, { start: 8, end: 25 }, 60, nextId)
-  assert.deepEqual(trimmedAcross, [
-    { start: 0, end: 8, id: 1, title: undefined, captions: undefined },
-    { start: 25, end: 40, id: 2, title: 'Scene 2', captions: undefined },
-    { start: 50, end: 60, id: 3 },
-  ])
 })

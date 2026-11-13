@@ -1,4 +1,4 @@
-import { CAPTION_ACCENT, captionDisplayText, captionStates } from './captions'
+import { CAPTION_ACCENT, CAPTION_STROKE, CAPTION_SYNC_MS, captionDisplayText, captionStates, captionStroke } from './captions'
 import type { CaptionCue, CaptionFormat, CaptionState, CaptionStyle } from './captions'
 
 export const captionDimensions = (format: CaptionFormat) => format === 'portrait'
@@ -75,8 +75,9 @@ export function drawCaption(context: Context, layout: Layout, state: CaptionStat
   context.font = font
   context.textBaseline = 'middle'
   context.lineJoin = 'round'
-  context.strokeStyle = '#101010e6'
-  context.lineWidth = size * 0.11
+  const stroke = captionStroke(style)
+  context.strokeStyle = style.strokeColor ?? CAPTION_STROKE
+  if (stroke > 0) context.lineWidth = size * stroke / 100
 
   const lineArt = (text: string, width: number, baseline: number, runs: Run[]) => {
     if (!text) return
@@ -86,9 +87,8 @@ export function drawCaption(context: Context, layout: Layout, state: CaptionStat
       context.roundRect(left - size * 0.18, baseline - step * 0.48, width + size * 0.36, step * 0.96, size * 0.12)
       context.fillStyle = '#101010d9'
       context.fill()
-    } else {
-      context.strokeText(text, left, baseline)
     }
+    if (stroke > 0) context.strokeText(text, left, baseline)
     context.fillStyle = '#ffffff'
     context.fillText(text, left, baseline)
     const highlighted = state.mode === 'highlight' && runs.some(run => run.index === state.active)
@@ -135,4 +135,5 @@ export function captionLayouts(context: Context, cues: CaptionCue[], style: Capt
   }
 }
 
-export const captionSequence = (cues: CaptionCue[], mode: CaptionState['mode']) => cues.flatMap(cue => captionStates(cue, mode))
+export const captionSequence = (cues: CaptionCue[], mode: CaptionState['mode'], syncMs = CAPTION_SYNC_MS) =>
+  cues.flatMap(cue => captionStates(cue, mode, syncMs))

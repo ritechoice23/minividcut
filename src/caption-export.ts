@@ -16,7 +16,7 @@ export async function prepareCaptionOverlay(track: CaptionTrack, format: Caption
   const sprite = document.createElement('canvas')
   const ink = sprite.getContext('2d')
   if (!context || !ink) throw new Error('Could not open the caption renderer.')
-  const states = captionSequence(track.cues, track.style.mode ?? 'phrase')
+  const states = captionSequence(track.cues, track.style.mode ?? 'phrase', track.style.syncMs)
   const layoutFor = captionLayouts(context, track.cues, track.style, format)
   if (!states.length) return undefined
 

@@ -1,5 +1,5 @@
 import { memo, useState } from 'react'
-import { LoaderCircle, Plus, Trash2, X } from 'lucide-react'
+import { LoaderCircle, Plus, Trash2 } from 'lucide-react'
 import { parseTime, stamp } from './clip'
 import type { Range } from './clip'
 import { CAPTION_ACCENT, CAPTION_FONTS, DEFAULT_CAPTION_STYLE, fitCaptionTiming } from './captions'
@@ -47,13 +47,13 @@ const STYLE_OPTIONS = {
 
 export const CaptionEditor = memo(function CaptionEditor({
   label, range, track, model, progress, status, format, editing, canApplyStyle, defaultStyle,
-  onChange, onStyle, onApplyStyle, onGenerate, onCancel, onClose, onSeek, getTime,
+  onChange, onStyle, onApplyStyle, onGenerate, onCancel, onSeek, getTime,
 }: {
   label: string; range: Range; track?: CaptionTrack; model: CaptionModel | null; progress: CaptionProgress | null
   status: string; format: CaptionFormat; editing: boolean; onChange: (track: CaptionTrack) => void
   canApplyStyle: boolean; defaultStyle?: CaptionStyle; onApplyStyle: (style: CaptionStyle) => boolean
   onStyle: (style: CaptionStyle) => void; onGenerate: () => void; onCancel: () => void
-  onClose: () => void; onSeek: (time: number) => void; getTime: () => number
+  onSeek: (time: number) => void; getTime: () => number
 }) {
   const [feedback, setFeedback] = useState('')
   const [styleOpen, setStyleOpen] = useState(false)
@@ -77,10 +77,9 @@ export const CaptionEditor = memo(function CaptionEditor({
     update({ style, cues: [...cues.slice(0, index), { start, end, text: '' }, ...cues.slice(index)] })
   }
 
-  return <section className="caption-editor panel" id="caption-editor" aria-labelledby="caption-heading">
+  return <section className="caption-editor" id="caption-editor" aria-label="Caption editor">
     <div className="caption-heading">
-      <div><h2 id="caption-heading">Captions</h2><p title={label}>{label}</p></div>
-      <button className="icon-button compact" aria-label="Close captions" onClick={onClose}><X size={16} /></button>
+      <div><p title={label}>{label}</p></div>
     </div>
     <div className="caption-actions">
       {progress ? <>

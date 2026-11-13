@@ -108,8 +108,15 @@ h2 { font-size: 13px; font-weight: 660; letter-spacing: .03px; }
 .button.add { background: #282f1e; border-color: #414f2e; color: #d7edb8; min-height: 31px; padding: 0 8px; font-size: 11px; gap: 4px; }
 .trim-bar .button.add { margin-left: auto; }
 .button.add:hover:not(:disabled) { background: #364426; }
-.queue { grid-column: 2; grid-row: 1 / -1; display: flex; flex-direction: column; overflow: hidden; }
-.queue .panel-heading { flex-shrink: 0; border-bottom: 1px solid var(--stroke); }
+.editor-sidebar { grid-column: 2; grid-row: 1 / -1; display: flex; flex-direction: column; overflow: hidden; }
+.sidebar-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; padding: 5px; border-bottom: 1px solid var(--stroke); }
+.sidebar-tabs button { display: flex; justify-content: center; align-items: center; gap: 6px; min-height: 34px; min-width: 0; border: 1px solid transparent; border-radius: 6px; color: var(--muted); background: transparent; font-size: 12px; }
+.sidebar-tabs button:hover { background: #242424; color: #f0f0ec; }
+.sidebar-tabs button[aria-selected="true"] { border-color: #455532; background: #252e1e; color: #e1f1cf; }
+.sidebar-tabs button:focus-visible { outline-offset: -2px; }
+.sidebar-content { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: hidden; }
+.sidebar-content[hidden] { display: none; }
+.queue .panel-heading { min-height: 37px; flex-shrink: 0; border-bottom: 1px solid var(--stroke); }
 .export-summary { display: grid; gap: 7px; flex-shrink: 0; margin: 8px 8px 0; padding: 10px; background: #21251c; border: 1px solid #39452d; border-radius: 7px; }
 .export-heading, .export-detail { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .export-heading { color: #e9f1e0; font-size: 12px; }
@@ -181,7 +188,7 @@ h2 { font-size: 13px; font-weight: 660; letter-spacing: .03px; }
 .clip-strip { position: relative; height: 9px; margin-top: 7px; }
 .clip-strip button { position: absolute; height: 100%; min-width: 3px; padding: 0; border: 1px solid #839e52; border-radius: 2px; background: #4a6132; }
 .clip-strip button:hover:not(:disabled), .clip-strip button.selected { z-index: 1; border-color: var(--lime); background: #a4c85d; }
-.trim-section:not(:disabled):hover, .cut-section:not(:disabled):hover { color: #f5bfaa; border-color: #795043; }
+.trim-section:not(:disabled):hover { color: #f5bfaa; border-color: #795043; }
 .accessible-scrubber { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .accessible-scrubber:focus-visible { z-index: 4; width: 100%; height: auto; margin: 0; bottom: -10px; opacity: 1; accent-color: var(--lime); }
 .statusbar { min-height: 36px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 20px; border-top: 1px solid #232323; color: #a4a49e; font-size: 11px; }
@@ -215,7 +222,7 @@ h2 { font-size: 13px; font-weight: 660; letter-spacing: .03px; }
 @media (max-width: 660px) {
   .app { height: auto; overflow: visible; }
   .workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: 375px calc(174px + var(--pan-height, 0px)) auto; }
-  .queue { grid-column: 1; grid-row: 3; min-height: 128px; max-height: 380px; }
+  .editor-sidebar { grid-column: 1; grid-row: 3; min-height: 174px; max-height: 420px; }
   .top-actions kbd, .shortcuts-button { display: none; }
   .top-actions { gap: 5px; }
   .topbar .button { padding-inline: 8px; }
@@ -274,7 +281,7 @@ h2 { font-size: 13px; font-weight: 660; letter-spacing: .03px; }
   position: absolute; right: 0; bottom: 0; width: 13px; height: 13px; padding: 0;
   border: 1px solid #171717; border-radius: 3px; background: var(--lime); cursor: nwse-resize; touch-action: none;
 }
-.caption-editor { display: flex; flex-direction: column; overflow: hidden; }
+.caption-editor { display: flex; flex: 1; min-height: 0; flex-direction: column; overflow: auto; }
 .caption-heading {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
   padding: 11px 13px; border-bottom: 1px solid var(--stroke);
@@ -306,6 +313,3 @@ h2 { font-size: 13px; font-weight: 660; letter-spacing: .03px; }
 .caption-cue-time input { width: 100%; text-align: center; }
 .caption-cue-time button { flex-shrink: 0; }
 .caption-cues textarea { display: block; width: 100%; resize: vertical; line-height: 1.35; font-size: 12px; }
-@media (max-width: 660px) {
-  .caption-editor { grid-column: 1; grid-row: 3; min-height: 128px; max-height: 380px; }
-}

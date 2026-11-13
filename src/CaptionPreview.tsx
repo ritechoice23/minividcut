@@ -21,7 +21,7 @@ export function CaptionPreview({ track, format, video, time, editable, onStyle }
   const refreshPreview = useRef<((time: number) => void) | null>(null)
   const gesture = useRef<{ x: number; y: number; width: number; height: number; start: CaptionStyle; resize: boolean } | null>(null)
   const dimensions = useMemo(() => captionDimensions(format), [format])
-  const states = useMemo(() => captionSequence(track.cues, style.mode ?? 'phrase'), [track.cues, style.mode])
+  const states = useMemo(() => captionSequence(track.cues, style.mode ?? 'phrase', style.syncMs), [track.cues, style.mode, style.syncMs])
   const layoutFor = useMemo(() => {
     const context = document.createElement('canvas').getContext('2d')
     return context && captionLayouts(context, track.cues, style, format)
@@ -65,7 +65,7 @@ export function CaptionPreview({ track, format, video, time, editable, onStyle }
       if (visible && layout && sprite.current) {
         const ink = sprite.current.getContext('2d')
         if (ink) {
-          renderCaptionSprite(sprite.current, ink, layout, visible, style)
+          renderCaptionSprite(sprite.current, ink, layout, guide ? { ...visible, active: -1, mode: 'phrase' } : visible, style)
           context.drawImage(sprite.current, layout.box.x, layout.box.y)
         }
       }

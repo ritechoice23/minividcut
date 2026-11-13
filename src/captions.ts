@@ -15,6 +15,9 @@ export type CaptionStyle = {
   case?: CaptionCase
   font?: CaptionFont
   accent?: string
+  stroke?: number
+  strokeColor?: string
+  syncMs?: number
   scale?: number
   points?: Partial<Record<CaptionFormat, CaptionPoint>>
 }
@@ -22,6 +25,16 @@ export type CaptionTrack = { cues: CaptionCue[]; style: CaptionStyle }
 export const DEFAULT_CAPTION_STYLE: CaptionStyle = { preset: 'classic', position: 'bottom', size: 'medium' }
 export const CAPTION_FONTS: CaptionFont[] = ['Segoe UI', 'Arial', 'Georgia', 'Impact']
 export const CAPTION_ACCENT = '#cefa72'
+export const CAPTION_STROKE = '#101010'
+export const CAPTION_SYNC_MS = 60
+
+export function captionStroke(style: CaptionStyle) {
+  return style.stroke ?? (style.preset === 'boxed' ? 0 : 11)
+}
+
+export function clipsNeedingCaptions(clips: readonly Clip[]) {
+  return clips.filter(clip => !clip.captions?.cues.some(cue => cue.text.trim()))
+}
 
 export function restyleCaptionedClip(clip: Clip, style: CaptionStyle): Clip {
   return clip.captions ? { ...clip, captions: { ...clip.captions, style } } : clip
@@ -116,16 +129,20 @@ export function timedWords(cue: CaptionCue) {
 
 export type CaptionState = Range & { cue: CaptionCue; active: number; mode: CaptionMode }
 
-export function captionStates(cue: CaptionCue, mode: CaptionMode): CaptionState[] {
+export function captionStates(cue: CaptionCue, mode: CaptionMode, syncMs = 0): CaptionState[] {
   if (!cue.text.trim()) return []
   if (mode === 'phrase') return [{ start: cue.start, end: cue.end, cue, active: -1, mode }]
   const states: CaptionState[] = []
   let cursor = cue.start
-  timedWords(cue).forEach((word, active) => {
-    const start = Math.max(cursor, word.start)
-    const end = Math.min(cue.end, word.end)
+  const delay = syncMs / 1000
+  timedWords(cue).forEach((word, active, words) => {
+    if (word.end <= word.start) return
+    const start = Math.max(cursor, word.start + delay)
+    const next = words[active + 1]
+    // Shift connected word boundaries together. Leave a real pause clear.
+    const end = Math.min(cue.end, word.end + (next && Math.abs(next.start - word.end) < 0.08 ? delay : 0))
     if (end <= start) return
-    if (mode === 'highlight' && start > cursor) states.push({ start: cursor, end: start, cue, active: -1, mode })
+    if (mode === 'highlight' && start - cursor > 0.000001) states.push({ start: cursor, end: start, cue, active: -1, mode })
     states.push({ start, end, cue, active, mode })
     cursor = end
   })

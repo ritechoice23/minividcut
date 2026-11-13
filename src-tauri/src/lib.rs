@@ -9,6 +9,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             video::open_video,
             video::thumbnails,
+            video::clip_thumbnail,
             video::prepare_preview,
             video::export_clips,
             video::open_export_folder

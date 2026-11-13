@@ -204,6 +204,52 @@ fn input<'a>(cmd: &'a mut Command, path: &Path) -> &'a mut Command {
     cmd.args(["-protocol_whitelist", "file", "-i"]).arg(path)
 }
 
+fn thumbnail_at(path: &Path, time: f64) -> Result<String> {
+    let mut cmd = ffmpeg();
+    cmd.args([
+        "-filter_threads",
+        "1",
+        "-threads:v",
+        "1",
+        "-ss",
+        &format!("{time:.6}"),
+    ]);
+    input(&mut cmd, path).args([
+        "-map",
+        "0:V:0",
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale=176:100:force_original_aspect_ratio=decrease:force_divisible_by=2:reset_sar=1",
+        "-c:v",
+        "mjpeg",
+        "-threads",
+        "1",
+        "-f",
+        "image2pipe",
+        "pipe:1",
+    ]);
+    let frame = output(&mut cmd, "ffmpeg", "Could not render thumbnail")?;
+    if frame.stdout.is_empty() {
+        return Err("There is no frame at this point in the video.".into());
+    }
+    Ok(format!(
+        "data:image/jpeg;base64,{}",
+        STANDARD.encode(frame.stdout)
+    ))
+}
+
+#[tauri::command]
+pub async fn clip_thumbnail(path: PathBuf, start: f64) -> Result<String> {
+    background(move || {
+        if !start.is_finite() || start < 0.0 {
+            return Err("Invalid clip start.".into());
+        }
+        thumbnail_at(&source(&path)?, start)
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn thumbnails(path: PathBuf, duration: f64) -> Result<Vec<String>> {
     background(move || {
@@ -213,33 +259,7 @@ pub async fn thumbnails(path: PathBuf, duration: f64) -> Result<Vec<String>> {
         }
         Ok((0..10)
             .map(|index| {
-                let mut cmd = ffmpeg();
-                cmd.args([
-                    "-ss",
-                    &format!("{:.6}", duration * (f64::from(index) + 0.35) / 10.0),
-                ]);
-                input(&mut cmd, &path).args([
-                    "-map",
-                    "0:V:0",
-                    "-frames:v",
-                    "1",
-                    "-vf",
-                    "scale=176:100:force_original_aspect_ratio=increase,crop=176:100",
-                    "-c:v",
-                    "mjpeg",
-                    "-threads",
-                    "1",
-                    "-f",
-                    "image2pipe",
-                    "pipe:1",
-                ]);
-                output(&mut cmd, "ffmpeg", "Could not render thumbnail")
-                    .ok()
-                    .filter(|frame| !frame.stdout.is_empty())
-                    .map(|frame| {
-                        format!("data:image/jpeg;base64,{}", STANDARD.encode(frame.stdout))
-                    })
-                    .unwrap_or_default()
+                thumbnail_at(&path, duration * (f64::from(index) + 0.35) / 10.0).unwrap_or_default()
             })
             .collect())
     })

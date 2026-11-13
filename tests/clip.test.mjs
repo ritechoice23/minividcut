@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { parseTime, splitRange, stamp, validRange } from '../src/clip.ts'
+import { moveBoundary, parseTime, splitRange, stamp, validRange } from '../src/clip.ts'
 
 test('accepts seconds and timecodes with millisecond precision', () => {
   assert.equal(parseTime('1:02:03.456'), 3723.456)
@@ -16,6 +16,17 @@ test('rejects invalid trim bounds', () => {
   assert.ok(!validRange({ start: 3, end: 3.04 }, 5))
   assert.ok(!validRange({ start: 3, end: 5.01 }, 5))
   assert.ok(!validRange({ start: NaN, end: 5 }, 5))
+})
+
+test('places the requested marker at the playhead on either side of the other marker', () => {
+  const range = { start: 2, end: 4 }
+  assert.deepEqual(moveBoundary(range, 'start', 3, 10), { start: 3, end: 4 })
+  assert.deepEqual(moveBoundary(range, 'start', 7, 10), { start: 7, end: 7.05 })
+  assert.deepEqual(moveBoundary(range, 'end', 1, 10), { start: 0.95, end: 1 })
+  assert.deepEqual(moveBoundary(range, 'start', 10, 10), { start: 10, end: 10 })
+  assert.deepEqual(moveBoundary(range, 'end', 0, 10), { start: 0, end: 0 })
+  assert.equal(moveBoundary(range, 'end', 10.01, 10), null)
+  assert.equal(moveBoundary(range, 'start', NaN, 10), null)
 })
 
 test('splits the active range without a tiny trailing clip', () => {

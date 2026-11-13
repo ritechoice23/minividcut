@@ -25,6 +25,16 @@ export function validRange(range: Range, duration: number) {
     && range.start >= 0 && range.end <= duration && range.end - range.start + 0.000001 >= MIN_CLIP
 }
 
+export function moveBoundary(range: Range, side: keyof Range, value: number, duration: number): Range | null {
+  const mark = Math.abs(value - duration) <= 0.0005 ? duration : value
+  if (!Number.isFinite(mark) || mark < 0 || mark > duration) return null
+
+  if (side === 'start') {
+    return { start: mark, end: Math.min(duration, Math.max(range.end, mark + MIN_CLIP)) }
+  }
+  return { start: Math.max(0, Math.min(range.start, mark - MIN_CLIP)), end: mark }
+}
+
 export function splitRange(range: Range, seconds: number) {
   const count = Math.max(1, Math.ceil((range.end - range.start - MIN_CLIP + 0.000001) / seconds))
   if (count > MAX_CLIPS) return null

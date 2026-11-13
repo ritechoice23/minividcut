@@ -8,7 +8,7 @@ import {
   Keyboard, LoaderCircle, Monitor, Pause, Play, Plus, RotateCcw, Scissors, Smartphone,
   Split, Volume2, VolumeX, X,
 } from 'lucide-react'
-import { MAX_CLIPS, MIN_CLIP, parseTime, splitRange, stamp, validRange } from './clip'
+import { MAX_CLIPS, moveBoundary, parseTime, splitRange, stamp, validRange } from './clip'
 import type { Clip, Range } from './clip'
 
 type VideoInfo = { path: string; name: string; duration: number; width: number; height: number }
@@ -33,7 +33,7 @@ function TimeField({ label, value, onChange, onMark, disabled }: {
 }) {
   const [draft, setDraft] = useState<string | null>(null)
   return (
-    <label className="time-field">
+    <div className="time-field">
       <span>{label}</span>
       <div className="time-input">
         <input aria-label={label + ' time'} disabled={disabled} spellCheck={false}
@@ -51,7 +51,7 @@ function TimeField({ label, value, onChange, onMark, disabled }: {
         <button type="button" title={`Set ${label.toLowerCase()} at playhead`} aria-label={`Set ${label.toLowerCase()} at playhead`}
           className="mark-button" onClick={onMark} disabled={disabled}>{label === 'In' ? '[' : ']'}</button>
       </div>
-    </label>
+    </div>
   )
 }
 
@@ -77,7 +77,7 @@ export function App() {
   const [splitOpen, setSplitOpen] = useState(false)
   const video = useRef<HTMLVideoElement>(null)
   const track = useRef<HTMLDivElement>(null)
-  const dragOffset = useRef(0)
+  const trimDrag = useRef<{ range: Range; offset: number } | null>(null)
   const sourceRequest = useRef(0)
   const importLock = useRef(false)
   const nextId = useRef(1)
@@ -199,15 +199,14 @@ export function App() {
     void player.play().catch(error => setNotice(message(error)))
   }
 
-  const editBoundary = (side: keyof Range, value: number, quiet = false) => {
-    const bounded = Number.isFinite(value) && Math.abs(value - duration) <= 0.0005 ? duration : value
-    const candidate = { ...range, [side]: bounded }
-    if (!validRange(candidate, duration)) {
-      if (!quiet) setNotice('Keep In and Out inside the video and at least 0.05 seconds apart.')
+  const editBoundary = (side: keyof Range, value: number, original = range) => {
+    const next = moveBoundary(original, side, value, duration)
+    if (!next) {
+      setNotice('Enter a time inside the video.')
       return false
     }
-    setRange(candidate)
-    if (!quiet) setNotice('')
+    setRange(next)
+    setNotice('')
     return true
   }
 
@@ -305,15 +304,19 @@ export function App() {
         void chooseVideo()
         return
       }
+      const target = event.target instanceof Element ? event.target : null
       if (event.ctrlKey || event.metaKey || event.altKey || shortcuts || !source || loading || busy ||
-        (event.target instanceof Element && event.target.closest('button, input, select, textarea, [contenteditable]'))) return
+        target?.closest('input, select, textarea, [contenteditable]')) return
+      if (key === 'i' || key === 'o') {
+        editBoundary(key === 'i' ? 'start' : 'end', time)
+        return
+      }
+      if (target?.closest('button')) return
       if (key === ' ') { event.preventDefault(); togglePlay() }
       if (key === 'arrowleft' || key === 'arrowright') {
         event.preventDefault()
         seek(time + (key === 'arrowleft' ? -1 : 1) * (event.shiftKey ? 5 : 1))
       }
-      if (key === 'i') editBoundary('start', time)
-      if (key === 'o') editBoundary('end', time)
       if (key === 'enter' && !event.repeat) addClip()
     }
     window.addEventListener('keydown', shortcutsHandler)
@@ -324,11 +327,10 @@ export function App() {
     if (!track.current || !source || busy || loading) return
     const rect = track.current.getBoundingClientRect()
     const pointer = (event.clientX - rect.left) / rect.width * duration
-    const position = Math.max(0, Math.min(duration, pointer - (edge ? dragOffset.current : 0)))
-    if (edge) {
-      const boundary = edge === 'start' ? Math.min(position, range.end - MIN_CLIP) : Math.max(position, range.start + MIN_CLIP)
-      if (editBoundary(edge, Math.max(0, Math.min(duration, boundary)), true)) seek(boundary)
-    } else seek(position)
+    const drag = edge ? trimDrag.current : null
+    const time = Math.max(0, Math.min(duration, pointer - (drag?.offset ?? 0)))
+    if (edge && drag) editBoundary(edge, time, drag.range)
+    seek(time)
   }
 
   const startScrub = (event: ReactPointerEvent, edge?: keyof Range) => {
@@ -338,7 +340,7 @@ export function App() {
     video.current?.pause()
     if (edge) {
       const rect = track.current.getBoundingClientRect()
-      dragOffset.current = (event.clientX - rect.left) / rect.width * duration - range[edge]
+      trimDrag.current = { range, offset: (event.clientX - rect.left) / rect.width * duration - range[edge] }
       seek(range[edge])
     } else scrub(event)
   }
@@ -480,13 +482,17 @@ export function App() {
                   <div className="range-shade right" style={{ width: `${100 - pct(range.end)}%` }} />
                   <div className="selection" style={{ left: `${pct(range.start)}%`, width: `${pct(range.end - range.start)}%` }} />
                   {(['start', 'end'] as const).map(edge => <button key={edge} className={`handle ${edge}`} disabled={disabled}
-                    aria-label={edge === 'start' ? 'Drag trim start' : 'Drag trim end'} style={{ left: `${pct(range[edge])}%` }}
+                    aria-label={edge === 'start' ? 'Drag trim start' : 'Drag trim end'}
+                    data-tight={pct(range.end - range.start) < 5}
+                    style={{ left: `clamp(0px, calc(${pct(range[edge])}% - ${edge === 'end' ? 11 : 0}px), calc(100% - 11px))` }}
                     onPointerDown={event => startScrub(event, edge)}
                     onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) scrub(event, edge) }}
+                    onLostPointerCapture={() => { trimDrag.current = null }}
                     onKeyDown={event => {
                       if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
                       event.preventDefault()
-                      const value = range[edge] + (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 1 : 0.1)
+                      const change = (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 1 : 0.1)
+                      const value = Math.max(0, Math.min(duration, range[edge] + change))
                       if (editBoundary(edge, value)) seek(value)
                     }}><span /></button>)}
                   <div className="playhead" style={{ left: `${pct(time)}%` }}><span /></div>

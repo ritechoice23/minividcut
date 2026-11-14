@@ -26,6 +26,9 @@ import { captionSlice, clipsNeedingCaptions, DEFAULT_CAPTION_STYLE, offsetCaptio
 import type { CaptionCue, CaptionStyle, CaptionTrack } from './captions'
 import { DEFAULT_MOMENT_QUERY, missingTranscriptRanges, MOMENT_BATCH_SECONDS, momentCandidates, momentLimit } from './moments'
 import type { Moment } from './moments'
+import { MusicMenu } from './MusicMenu'
+import { effectiveMusic, musicPosition } from './music'
+import type { Music, MusicTrack } from './music'
 
 type VideoInfo = { path: string; name: string; duration: number; width: number; height: number; bytes: number }
 type Format = 'landscape' | 'portrait'
@@ -35,6 +38,7 @@ type Draft = {
   version: 1; source: VideoInfo; range: Range; clips: Clip[]; sections: Range[]
   format: Format; quality: Quality; framing: Framing; positions: Record<Format, FramePosition>
   captions: Record<string, CaptionTrack | undefined>; captionStyle: CaptionStyle | null
+  music?: Music | null
 }
 const DRAFT_KEY = 'minividcut.draft'
 const AUTO_TITLES_KEY = 'minividcut.auto-titles'
@@ -57,6 +61,7 @@ const FORMATS = {
   portrait: { ratio: '9:16', aspect: 9 / 16, size: '1080 × 1920', label: 'Portrait', icon: Smartphone },
 }
 const message = (error: unknown) => error instanceof Error ? error.message : String(error)
+const trackKey = (track: MusicTrack) => track.kind === 'library' ? `library:${track.id}` : `file:${track.path}`
 
 function Key({ children }: { children: ReactNode }) {
   return <kbd>{children}</kbd>
@@ -131,6 +136,14 @@ export function App() {
   const timelineBody = useRef<HTMLDivElement>(null)
   const [playing, setPlaying] = useState(false)
   const [muted, setMuted] = useState(false)
+  const [projectMusic, setProjectMusic] = useState<Music | null>(null)
+  const musicPlayer = useRef<HTMLAudioElement>(null)
+  const setMusicPlayer = useCallback((audio: HTMLAudioElement | null) => {
+    if (musicPlayer.current !== audio) musicPlayer.current?.pause()
+    musicPlayer.current = audio
+  }, [])
+  const musicPaths = useRef(new Map<string, string>())
+  const [previewMusic, setPreviewMusic] = useState<{ key: string; path: string } | null>(null)
   const [draftFormat, setFormat] = useState<Format>('landscape')
   const [draftQuality, setQuality] = useState<Quality>('compact')
   const [draftFraming, setFraming] = useState<Framing>('fill')
@@ -299,6 +312,61 @@ export function App() {
     return () => body.removeEventListener('wheel', scrollTimeline)
   }, [duration, timelineZoom])
   const selectedClip = clips.find(clip => clip.id === selectedId)
+  const activeMusic = effectiveMusic(projectMusic, selectedClip?.music)
+  const musicTrack = activeMusic?.track
+  const musicKey = musicTrack ? trackKey(musicTrack) : ''
+  const musicPath = previewMusic?.key === musicKey ? previewMusic.path : ''
+  const canMixPreview = preview !== 'preparing' && preview !== 'unavailable'
+
+  useEffect(() => {
+    if (!musicKey || !musicTrack) return
+    const cached = musicPaths.current.get(musicKey)
+    if (cached) {
+      setPreviewMusic({ key: musicKey, path: cached })
+      return
+    }
+    let active = true
+    void invoke<string>('open_music', { track: musicTrack }).then(path => {
+      if (active) setPreviewMusic({ key: musicKey, path })
+    }).catch(error => {
+      if (active) setNotice(message(error))
+    })
+    return () => { active = false }
+  }, [musicKey, musicTrack])
+
+  const syncMusic = useCallback((force = false) => {
+    const audio = musicPlayer.current
+    const player = video.current
+    if (!audio || !player) return
+    audio.volume = (activeMusic?.volume ?? 0) / 100
+    audio.muted = muted
+    if (audio.readyState === 0) return
+    const target = musicPosition(player.currentTime, range.start, audio.duration)
+    const drift = Math.abs(audio.currentTime - target)
+    if (force || Math.min(drift, Math.max(0, audio.duration - drift)) > 0.25) audio.currentTime = target
+    if (player.paused || player.ended || player.seeking || player.readyState < 3 ||
+        player.currentTime < range.start || player.currentTime >= range.end) {
+      audio.pause()
+    } else if (audio.paused) {
+      void audio.play().catch(error => {
+        if (error?.name !== 'AbortError') setNotice('Could not play the music preview.')
+      })
+    }
+  }, [activeMusic?.volume, muted, range.start, range.end])
+
+  useEffect(() => {
+    syncMusic()
+  }, [syncMusic, musicPath])
+
+  const musicSourceRevision = sourceRequest.current
+  const changeMusic = (scope: 'project' | 'clip', music: Music | null | undefined, path?: string) => {
+    if (musicSourceRevision !== sourceRequest.current || exportLock.current || importLock.current) return
+    if (path && music) musicPaths.current.set(trackKey(music.track), path)
+    if (scope === 'project') setProjectMusic(music ?? null)
+    else if (selectedClip) {
+      setClips(items => items.map(clip => clip.id === selectedClip.id ? { ...clip, music } : clip))
+    }
+  }
   const reviewed = reviewIndex === null ? undefined : sections[reviewIndex]
   const captionKey = selectedClip ? `clip-${selectedClip.id}` : reviewed ? `section-${reviewed.start}-${reviewed.end}` : 'range'
   const currentCaptions = selectedClip ? selectedClip.captions : draftCaptions[captionKey]
@@ -306,7 +374,7 @@ export function App() {
   const captionsRunning = captionProgress !== null
   const hasDraftCaptions = Object.values(draftCaptions).some(track => track?.cues.length)
 
-  const hasEdits = Boolean(source && (clips.length || sections.length || hasDraftCaptions ||
+  const hasEdits = Boolean(source && (clips.length || sections.length || projectMusic || hasDraftCaptions ||
     range.start !== 0 || range.end !== source.duration || draftFormat !== 'landscape' ||
     draftQuality !== 'compact' || draftFraming !== 'fill' || Object.values(positions).some(
       position => position.x !== CENTER.x || position.y !== CENTER.y)))
@@ -317,12 +385,13 @@ export function App() {
       const draft: Draft = {
         version: 1, source, range, clips, sections, format: draftFormat, quality: draftQuality,
         framing: draftFraming, positions, captions: draftCaptions, captionStyle: sharedCaptionStyle.current,
+        music: projectMusic,
       }
       localStorage.setItem(DRAFT_KEY, JSON.stringify(draft))
     } catch {
       setNotice('Draft recovery could not save your latest edits.')
     }
-  }, [source, range, clips, sections, draftFormat, draftQuality, draftFraming, positions, draftCaptions])
+  }, [source, range, clips, sections, draftFormat, draftQuality, draftFraming, positions, draftCaptions, projectMusic])
 
   const loadVideo = useCallback(async (path: string, draft?: Draft) => {
     if (exportLock.current || importLock.current) return
@@ -369,6 +438,7 @@ export function App() {
       setTimelineStart(0)
       setPlaying(false)
       setClips(draft?.clips ?? [])
+      setProjectMusic(draft?.music ?? null)
       setClipActions(null)
       nextId.current = Math.max(0, ...(draft?.clips.map(clip => clip.id) ?? [])) + 1
       setSections(draft?.sections ?? [])
@@ -739,6 +809,20 @@ export function App() {
     })
   }
 
+  const playMusicMix = () => {
+    const player = video.current
+    if (!player) return
+    if (!player.paused) {
+      player.pause()
+      return
+    }
+    if (player.currentTime < range.start || player.currentTime >= range.end - 0.005) seek(range.start)
+    playUntil.current = range.end
+    void player.play().catch(error => {
+      if (error?.name !== 'AbortError') setNotice(message(error))
+    })
+  }
+
   function stopMomentSearch() {
     const job = momentJob.current
     if (!job || job.canceled) return
@@ -997,8 +1081,10 @@ export function App() {
       return
     }
     const added = parts.map((part, index) => {
-      const title = replaced < 0 ? undefined : clips[replaced].title
-      return { ...part, id: nextId.current++, title: title ? `${title} - Part ${index + 1}` : undefined, captions: captionSlice(activeCaptions, part) }
+      const original = clips[replaced]
+      const title = original?.title
+      return { ...part, id: nextId.current++, title: title ? `${title} - Part ${index + 1}` : undefined,
+        captions: captionSlice(activeCaptions, part), music: original?.music }
     })
     setClips(replaced < 0 ? [...clips, ...added] : [...clips.slice(0, replaced), ...added, ...clips.slice(replaced + 1)])
     setSections([])
@@ -1120,7 +1206,7 @@ export function App() {
   const exportVideos = async (only?: Clip) => {
     if (!source || exportLock.current || importLock.current || fileDialog.current || captionJob.current || titleJob.current) return
     if (!clips.length && sections.length) return
-    const batch = only ? [only] : clips.length ? clips : [{ ...range, id: 0, captions: activeCaptions }]
+    const batch: Clip[] = only ? [only] : clips.length ? clips : [{ ...range, id: 0, captions: activeCaptions }]
     const options = { format: draftFormat, framing: draftFraming, position: positions[draftFormat], quality: draftQuality }
     if (!batch.every(clip => validRange(clip, duration))) return
     exportLock.current = true
@@ -1165,7 +1251,8 @@ export function App() {
         const captions = captionSlice(clip.captions, clip, true)
         const captionOverlay = captions && await prepareCaptionOverlay(captions, options.format, clip.end - clip.start, () => cancelRequested.current)
         if (captionOverlay) overlays.push(captionOverlay)
-        prepared.push({ start: clip.start, end: clip.end, title: clip.title, captionOverlay })
+        prepared.push({ start: clip.start, end: clip.end, title: clip.title, captionOverlay,
+          music: effectiveMusic(projectMusic, clip.music) })
       }
       if (hasCaptionArtwork) setNotice('')
       const states = cancelRequested.current ? batch.map(() => ({ status: 'canceled' as const })) : await invoke<ExportState[]>('export_clips', {
@@ -1407,6 +1494,10 @@ export function App() {
         <button className="icon-button settings-trigger" aria-label="Settings" title="Settings"
           aria-pressed={settingsOpen} onClick={() => setSettingsOpen(open => !open)}><SettingsIcon size={16} /></button>
         <div className="export-toolbar">
+          <MusicMenu key={musicSourceRevision} project={projectMusic}
+            clip={selectedClip ? { music: selectedClip.music, title: selectedClip.title || 'Selected clip' } : null}
+            disabled={disabled || busy} canPreview={canMixPreview && Boolean(musicPath) && validRange(range, duration)}
+            playing={playing} onPreview={playMusicMix} onChange={changeMusic} />
           {busy && <div className="export-ring" role="progressbar" aria-label="Export progress"
             aria-valuenow={summary?.percent ?? 0} title={`Exporting · ${summary?.percent ?? 0}%`}>
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1419,7 +1510,7 @@ export function App() {
             onClick={() => setSelectedExportOnly(false)}>
             <ArrowDownToLine size={14} /> Export <ChevronDown size={12} />
           </button>
-          <form ref={exportMenu} id="export-menu" className="export-menu panel" popover="auto" role="dialog" aria-label="Export settings"
+          <form ref={exportMenu} id="export-menu" className="export-menu media-menu panel" popover="auto" role="dialog" aria-label="Export settings"
             onKeyDown={event => event.stopPropagation()} onSubmit={event => {
               event.preventDefault()
               exportMenu.current?.hidePopover()
@@ -1489,11 +1580,20 @@ export function App() {
                           player.pause()
                           seek(stop)
                         } else setTime(Math.min(duration, player.currentTime))
+                        syncMusic()
                       }}
-                      onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)}
-                      onEnded={() => setPlaying(false)} onError={() => void useProxy()}
+                      onPlay={() => setPlaying(true)} onPlaying={() => syncMusic(true)}
+                      onSeeking={() => musicPlayer.current?.pause()} onSeeked={() => syncMusic(true)}
+                      onWaiting={() => musicPlayer.current?.pause()}
+                      onPause={() => { setPlaying(false); musicPlayer.current?.pause() }}
+                      onEnded={() => { setPlaying(false); musicPlayer.current?.pause() }}
+                      onError={() => void useProxy()}
                     />
                   )}
+                  {musicPath && canMixPreview && <audio key={musicPath} ref={setMusicPlayer}
+                    src={convertFileSrc(musicPath)} preload="metadata" loop
+                    onLoadedMetadata={() => syncMusic(true)}
+                    onError={() => setNotice('This track could not play in preview. You can still export it.')} />}
                   {activeCaptions && activeCaptions.cues.length > 0 && preview !== 'preparing' && preview !== 'unavailable' &&
                     <CaptionPreview key={previewPath} track={activeCaptions} format={format} video={video} time={time}
                       editable={showCaptionEditor && !editingCaptionJob} onStyle={saveCaptionStyle} />}

@@ -15,7 +15,7 @@ use std::{
     },
     time::Duration,
 };
-use tauri::{ipc::Channel, AppHandle, Manager};
+use tauri::{ipc::Channel, path::BaseDirectory, AppHandle, Manager};
 use tauri_plugin_opener::OpenerExt;
 
 const MIN_CLIP: f64 = 0.05;
@@ -94,6 +94,7 @@ pub struct ExportClip {
     overlay_id: Option<String>,
     #[serde(skip)]
     overlay: Option<Overlay>,
+    music: Option<MusicSettings>,
 }
 
 #[derive(Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
@@ -448,7 +449,9 @@ pub async fn open_video(
     background(move || {
         let video = probe(source(&path)?)?;
         if expected.is_some_and(|expected| !expected.matches(&video)) {
-            return Err("This file differs from the saved draft source. Choose the original video.".into());
+            return Err(
+                "This file differs from the saved draft source. Choose the original video.".into(),
+            );
         }
         app.asset_protocol_scope()
             .allow_file(&video.path)
@@ -484,7 +487,12 @@ impl VideoIdentity {
 #[cfg(test)]
 #[test]
 fn draft_identity_allows_relocation_and_rejects_a_different_file_size() {
-    let expected = VideoIdentity { duration: 5.0, width: 640, height: 360, bytes: 1024 };
+    let expected = VideoIdentity {
+        duration: 5.0,
+        width: 640,
+        height: 360,
+        bytes: 1024,
+    };
     let mut video = VideoInfo {
         duration: 5.0,
         width: 640,
@@ -507,6 +515,103 @@ fn ffmpeg() -> Command {
 
 fn input<'a>(cmd: &'a mut Command, path: &Path) -> &'a mut Command {
     cmd.args(["-protocol_whitelist", "file", "-i"]).arg(path)
+}
+
+const MUSIC_FORMATS: &str = "mp3,wav,flac,ogg,opus,aac,mov,mp4,m4a,3gp,3g2,mj2";
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum MusicTrack {
+    Library { id: String },
+    File { path: PathBuf },
+}
+
+impl MusicTrack {
+    fn path(&self, app: &AppHandle) -> Result<PathBuf> {
+        let path = match self {
+            Self::Library { id } => {
+                let filename = match id.as_str() {
+                    "a-brand-new-wisdom" => "a-brand-new-wisdom.ogg",
+                    "just-saying-tho" => "just-saying-tho.ogg",
+                    "winter-dust" => "winter-dust.ogg",
+                    "swinging-sweet" => "swinging-sweet.ogg",
+                    _ => return Err("This track is no longer in the music library.".into()),
+                };
+                app.path()
+                    .resolve(Path::new("music").join(filename), BaseDirectory::Resource)
+                    .map_err(|error| error.to_string())?
+            }
+            Self::File { path } => {
+                let extension = path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                if !["mp3", "wav", "m4a", "aac", "flac", "ogg", "opus"]
+                    .contains(&extension.as_str())
+                {
+                    return Err("Choose an MP3, WAV, M4A, AAC, FLAC, OGG or Opus file.".into());
+                }
+                path.clone()
+            }
+        };
+        if !path.is_absolute() || !path.is_file() {
+            return Err("Music file not found. Choose the track again.".into());
+        }
+        Ok(path)
+    }
+}
+
+fn audio_stream(path: &Path, formats: Option<&str>) -> Result<bool> {
+    let mut cmd = command("ffprobe");
+    if let Some(formats) = formats {
+        cmd.args(["-format_whitelist", formats]);
+    }
+    let probe = output(
+        cmd.args([
+            "-v",
+            "error",
+            "-protocol_whitelist",
+            "file",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=index",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(path),
+        "ffprobe",
+        "Could not read the audio track",
+    )?;
+    Ok(!String::from_utf8_lossy(&probe.stdout).trim().is_empty())
+}
+
+#[tauri::command]
+pub async fn open_music(app: AppHandle, track: MusicTrack) -> Result<PathBuf> {
+    background(move || {
+        let path = track.path(&app)?;
+        if !audio_stream(&path, Some(MUSIC_FORMATS))? {
+            return Err("This music file has no readable audio track.".into());
+        }
+        app.asset_protocol_scope()
+            .allow_file(&path)
+            .map_err(|error| error.to_string())?;
+        Ok(path)
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+pub struct MusicSettings {
+    track: MusicTrack,
+    volume: u8,
+}
+
+struct MusicMix {
+    path: PathBuf,
+    volume: u8,
+    source_audio: bool,
 }
 
 pub(crate) fn caption_audio(path: &Path, mut range: Clip, pcm: &Path) -> Result<f64> {
@@ -595,18 +700,30 @@ pub async fn clip_thumbnail(path: PathBuf, start: f64) -> Result<String> {
 }
 
 #[tauri::command]
-pub async fn thumbnails(path: PathBuf, duration: f64, times: Option<Vec<f64>>) -> Result<Vec<String>> {
+pub async fn thumbnails(
+    path: PathBuf,
+    duration: f64,
+    times: Option<Vec<f64>>,
+) -> Result<Vec<String>> {
     background(move || {
         let path = source(&path)?;
         if !duration.is_finite() || duration < MIN_CLIP {
             return Err("Invalid video duration.".into());
         }
-        let times = times.unwrap_or_else(|| (0..10)
-            .map(|index| duration * (f64::from(index) + 0.35) / 10.0).collect());
-        if times.len() > 12 || times.iter().any(|time| !time.is_finite() || *time < 0.0 || *time >= duration) {
+        let times = times.unwrap_or_else(|| {
+            (0..10)
+                .map(|index| duration * (f64::from(index) + 0.35) / 10.0)
+                .collect()
+        });
+        if times.len() > 12
+            || times
+                .iter()
+                .any(|time| !time.is_finite() || *time < 0.0 || *time >= duration)
+        {
             return Err("Invalid timeline thumbnail times.".into());
         }
-        Ok(times.into_iter()
+        Ok(times
+            .into_iter()
             .map(|time| thumbnail_at(&path, time).unwrap_or_default())
             .collect())
     })
@@ -766,6 +883,7 @@ fn encode_clip(
         quality.args(),
         destination,
         captions,
+        None,
         &AtomicBool::new(false),
         on_progress,
     )
@@ -778,6 +896,7 @@ fn encode_with(
     encoder: &[&str],
     destination: &Path,
     captions: CaptionLayers<'_>,
+    music: Option<&MusicMix>,
     cancel: &AtomicBool,
     on_progress: impl Fn(f64),
 ) -> Result<()> {
@@ -823,8 +942,9 @@ fn encode_with(
         &format!("{:.6}", clip.start),
     ]);
     input(&mut cmd, path);
+    let mut graph = Vec::new();
     if let Some(overlay) = captions.overlay {
-        let graph = format!("[0:V:0]{filter}[video];[video][1:v]overlay=x={}:y={}:eof_action=pass:repeatlast=0[captioned]", overlay.x, overlay.y);
+        graph.push(format!("[0:V:0]{filter}[video];[video][1:v]overlay=x={}:y={}:eof_action=pass:repeatlast=0[captioned]", overlay.x, overlay.y));
         cmd.current_dir(overlay.directory.path()).args([
             "-f",
             "concat",
@@ -834,13 +954,33 @@ fn encode_with(
             "file",
             "-i",
             "captions.ffconcat",
+        ]);
+    }
+    if let Some(music) = music {
+        let index = if captions.overlay.is_some() { 2 } else { 1 };
+        let gain = f64::from(music.volume) / 100.0;
+        cmd.args(["-stream_loop", "-1", "-format_whitelist", MUSIC_FORMATS]);
+        input(&mut cmd, &music.path);
+        let level =
+            format!("[{index}:a:0]aformat=sample_rates=48000:channel_layouts=stereo,volume={gain}");
+        if music.source_audio {
+            graph.push(format!("{level}[music]"));
+            graph.push("[0:a:0]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo[original]".into());
+            graph.push("[original][music]amix=inputs=2:duration=longest:normalize=0,alimiter=limit=0.95:level=0:latency=1[mixed]".into());
+        } else {
+            graph.push(format!("{level}[mixed]"));
+        }
+    }
+    if !graph.is_empty() {
+        cmd.args([
             "-filter_complex_threads",
             "1",
             "-filter_complex",
-            &graph,
-            "-map",
-            "[captioned]",
+            &graph.join(";"),
         ]);
+    }
+    if captions.overlay.is_some() {
+        cmd.args(["-map", "[captioned]"]);
     } else {
         cmd.args(["-map", "0:V:0", "-vf", filter]);
     }
@@ -848,7 +988,7 @@ fn encode_with(
         "-t",
         &format!("{duration:.6}"),
         "-map",
-        "0:a:0?",
+        if music.is_some() { "[mixed]" } else { "0:a:0?" },
         "-sn",
         "-dn",
         "-map_metadata",
@@ -1005,6 +1145,7 @@ fn encode_batch(
     folder: &Path,
     clips: &[ExportClip],
     options: ExportOptions,
+    music: Option<&[Result<Option<MusicMix>>]>,
     encoders: &EncoderCache,
     cancel: &AtomicBool,
     workers: usize,
@@ -1035,6 +1176,10 @@ fn encode_batch(
         |index, report| -> Result<(u64, &'static str)> {
             check_export(cancel)?;
             let clip = &clips[index];
+            let mix = match music {
+                Some(mixes) => mixes[index].as_ref().map_err(Clone::clone)?.as_ref(),
+                None => None,
+            };
             let output = tempfile::Builder::new()
                 .prefix(".minividcut-")
                 .suffix(".mp4")
@@ -1053,6 +1198,7 @@ fn encode_batch(
                     args,
                     output.path(),
                     captions,
+                    mix,
                     cancel,
                     |fraction| {
                         if fraction > furthest.get() {
@@ -1164,11 +1310,35 @@ pub async fn export_clips(
         }
         let cpus = std::thread::available_parallelism().map_or(1, usize::from);
         let workers = export_batch::worker_count(clips.len(), cpus);
+        let source_audio = clips
+            .iter()
+            .any(|clip| clip.music.as_ref().is_some_and(|music| music.volume > 0))
+            && audio_stream(&video.path, None)?;
+        let music = clips
+            .iter()
+            .map(|clip| {
+                let Some(music) = &clip.music else {
+                    return Ok(None);
+                };
+                if music.volume == 0 {
+                    return Ok(None);
+                }
+                if music.volume > 100 {
+                    return Err("Music volume must be between 0 and 100%.".into());
+                }
+                Ok(Some(MusicMix {
+                    path: music.track.path(&app)?,
+                    volume: music.volume,
+                    source_audio,
+                }))
+            })
+            .collect::<Vec<_>>();
         let results = encode_batch(
             &video.path,
             &folder,
             &clips,
             options,
+            Some(&music),
             &exports.encoders,
             &cancel,
             workers,
@@ -1408,19 +1578,27 @@ mod tests {
             FramePosition { x: 50, y: 50 },
         )
         .unwrap();
-        encode_clip(
+        let music = MusicMix {
+            path: Path::new(env!("CARGO_MANIFEST_DIR")).join("music/a-brand-new-wisdom.ogg"),
+            volume: 15,
+            source_audio: false,
+        };
+        encode_with(
             &path,
             clip,
             &filter,
-            Quality::Compatible,
+            Quality::Compatible.args(),
             &destination,
             CaptionLayers {
                 legacy: None,
                 overlay: Some(&overlay),
             },
+            Some(&music),
+            &AtomicBool::new(false),
             |_| {},
         )
         .unwrap();
+        assert!(audio_stream(&destination, None).unwrap());
         let sample = |time: &str, x: &str| {
             let mut cmd = ffmpeg();
             cmd.args(["-ss", time]);
@@ -1559,6 +1737,97 @@ mod tests {
     }
 
     #[test]
+    fn exports_looped_music_at_the_requested_gain_with_or_without_source_audio() {
+        let folder = tempfile::tempdir().unwrap();
+        let music = folder.path().join("background music.wav");
+        output(
+            ffmpeg()
+                .args([
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=880:sample_rate=48000",
+                    "-t",
+                    "0.25",
+                ])
+                .arg(&music),
+            "ffmpeg",
+            "Could not make test music",
+        )
+        .unwrap();
+        for source_audio in [false, true] {
+            let video = folder.path().join("source.mp4");
+            let mut fixture = ffmpeg();
+            fixture.args(["-f", "lavfi", "-i", "testsrc2=size=160x90:rate=24"]);
+            if source_audio {
+                fixture.args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"]);
+            }
+            output(
+                fixture.args(["-t", "2", "-c:v", "libx264"]).arg(&video),
+                "ffmpeg",
+                "Could not make test video",
+            )
+            .unwrap();
+            let destination = folder.path().join("mixed.mp4");
+            encode_with(
+                &video,
+                Clip {
+                    start: 0.5,
+                    end: 1.5,
+                },
+                "null",
+                Quality::Compatible.args(),
+                &destination,
+                CaptionLayers {
+                    legacy: None,
+                    overlay: None,
+                },
+                Some(&MusicMix {
+                    path: music.clone(),
+                    volume: 25,
+                    source_audio,
+                }),
+                &AtomicBool::new(false),
+                |_| {},
+            )
+            .unwrap();
+            let mut decode = ffmpeg();
+            decode.args(["-ss", "0.8"]);
+            let audio = output(
+                input(&mut decode, &destination).args([
+                    "-t", "0.1", "-vn", "-ac", "1", "-ar", "48000", "-f", "f32le", "pipe:1",
+                ]),
+                "ffmpeg",
+                "Could not read mixed audio near the end of the clip",
+            )
+            .unwrap();
+            let samples: Vec<_> = audio
+                .stdout
+                .chunks_exact(4)
+                .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+                .collect();
+            assert_eq!(samples.len(), 4800);
+            let amplitude = |frequency: f32| {
+                let (sin, cos) =
+                    samples
+                        .iter()
+                        .enumerate()
+                        .fold((0.0, 0.0), |(sin, cos), (index, sample)| {
+                            let phase = std::f32::consts::TAU * frequency * index as f32 / 48000.0;
+                            (sin + sample * phase.sin(), cos + sample * phase.cos())
+                        });
+                2.0 * sin.hypot(cos) / samples.len() as f32
+            };
+            assert!((0.025..0.038).contains(&amplitude(880.0)));
+            if source_audio {
+                assert!((0.11..0.14).contains(&amplitude(440.0)));
+            } else {
+                assert!(amplitude(440.0) < 0.005);
+            }
+        }
+    }
+
+    #[test]
     fn exports_ten_compact_clips_in_order_and_reports_their_sizes() {
         let folder = tempfile::tempdir().unwrap();
         let source = folder.path().join("test source.mp4");
@@ -1591,6 +1860,7 @@ mod tests {
                     captions: None,
                     overlay_id: None,
                     overlay: None,
+                    music: None,
                 }
             })
             .collect();
@@ -1605,6 +1875,7 @@ mod tests {
                 position: FramePosition { x: 50, y: 50 },
                 quality: Quality::Compact,
             },
+            None,
             &EncoderCache::default(),
             &AtomicBool::new(false),
             2,
@@ -1693,6 +1964,7 @@ mod tests {
                 captions: None,
                 overlay_id: None,
                 overlay: None,
+                music: None,
             })
             .collect();
         let cancel = AtomicBool::new(false);
@@ -1710,6 +1982,7 @@ mod tests {
                 position: FramePosition { x: 50, y: 50 },
                 quality: Quality::Compatible,
             },
+            None,
             &cache,
             &cancel,
             1,
@@ -1776,6 +2049,7 @@ mod tests {
                 legacy: None,
                 overlay: None,
             },
+            None,
             &cancel,
             |_| cancel.store(true, Ordering::Relaxed),
         );
@@ -1874,6 +2148,7 @@ mod tests {
                 captions: None,
                 overlay_id: None,
                 overlay: None,
+                music: None,
             }],
             ExportOptions {
                 format: Format::Portrait,
@@ -1881,6 +2156,7 @@ mod tests {
                 position: FramePosition { x: 50, y: 50 },
                 quality: Quality::Lossless,
             },
+            None,
             &EncoderCache::default(),
             &AtomicBool::new(false),
             1,

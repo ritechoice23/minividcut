@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add background music to all clips or choose a different track for an individual clip. Preview the mix and adjust its volume. Tracks loop automatically through the end of each export.
+- Choose from four built-in CC0 tracks or import a local audio file.
+
 ## 0.5.0 — 2026-11-14
 
 - Find transcript moments with Smart Split, preview suggestions on the timeline, and add the ones you want to export.

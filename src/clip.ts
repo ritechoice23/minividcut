@@ -1,7 +1,8 @@
 import type { CaptionTrack } from './captions'
+import type { Music } from './music'
 
 export type Range = { start: number; end: number }
-export type Clip = Range & { id: number; title?: string; titleManuallyEdited?: boolean; captions?: CaptionTrack }
+export type Clip = Range & { id: number; title?: string; titleManuallyEdited?: boolean; captions?: CaptionTrack; music?: Music | null }
 export const MIN_CLIP = 0.05
 export const MAX_CLIPS = 100
 

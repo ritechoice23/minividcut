@@ -34,16 +34,24 @@ svg { flex-shrink: 0; }
 .topbar [data-tauri-drag-region] { app-region: drag; }
 .brand > * { pointer-events: none; }
 .export-toolbar { display: flex; align-items: center; gap: 7px; padding-inline: 8px; }
-.export-toolbar > button { anchor-name: --export-trigger; }
-.export-menu { position: fixed; inset: 42px 8px auto auto; margin: 0; width: 240px; padding: 13px; color: inherit; box-shadow: 0 10px 30px #0009; }
-.export-menu:popover-open { display: grid; gap: 11px; }
+.export-toolbar > .primary { anchor-name: --export-trigger; }
+.music-trigger { anchor-name: --music-trigger; }
+.music-trigger[data-active="true"] { color: var(--lime); }
+.media-menu { position: fixed; inset: 42px 8px auto auto; margin: 0; width: 240px; padding: 13px; color: inherit; box-shadow: 0 10px 30px #0009; }
+.media-menu:popover-open { display: grid; gap: 11px; }
 @supports (right: anchor(right)) {
   .export-menu { position-anchor: --export-trigger; top: calc(anchor(bottom) + 7px); right: anchor(right); }
+  .music-menu { position-anchor: --music-trigger; top: calc(anchor(bottom) + 7px); right: anchor(right); }
 }
-.export-menu label { display: grid; gap: 5px; color: var(--muted); font-size: 11px; }
-.export-menu select { width: 100%; min-height: 31px; padding: 4px 7px; border: 1px solid #393939; border-radius: 5px; background: #202020; color: #e5e5e0; font: inherit; }
-.export-menu select:focus-visible { outline: 2px solid var(--lime); outline-offset: 2px; }
-.export-menu button { justify-self: end; }
+.media-menu label { display: grid; gap: 5px; color: var(--muted); font-size: 11px; }
+.media-menu select { width: 100%; min-width: 0; min-height: 31px; padding: 4px 7px; border: 1px solid #393939; border-radius: 5px; background: #202020; color: #e5e5e0; font: inherit; }
+.media-menu select:focus-visible { outline: 2px solid var(--lime); outline-offset: 2px; }
+.media-menu button { justify-self: end; }
+.music-menu { width: 255px; }
+.music-menu strong { font-size: 13px; }
+.music-menu input { margin: 0; width: 100%; accent-color: var(--lime); }
+.music-level { display: flex; justify-content: space-between; }
+.music-menu small { color: var(--muted); overflow-wrap: anywhere; }
 .export-ring { width: 23px; height: 23px; }
 .export-ring svg { display: block; width: 100%; fill: none; stroke: #354227; stroke-width: 2.5; transform: rotate(-90deg); }
 .export-ring circle + circle { stroke: var(--lime); stroke-linecap: round; transition: stroke-dasharray .18s; }

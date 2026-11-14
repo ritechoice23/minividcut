@@ -26,6 +26,7 @@ pub fn run() {
             caption_overlay::prepare_caption_overlay,
             caption_overlay::discard_caption_overlays,
             video::open_video,
+            video::open_music,
             video::thumbnails,
             video::clip_thumbnail,
             video::prepare_preview,

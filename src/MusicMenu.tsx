@@ -1,11 +1,10 @@
 import { useEffect, useState } from 'react'
-import { Channel, invoke } from '@tauri-apps/api/core'
+import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import { ExternalLink, Pause, Play, X } from 'lucide-react'
+import { Pause, Play, X } from 'lucide-react'
 import { DEFAULT_MUSIC_VOLUME, effectiveMusic, MUSIC_LIBRARY } from './music'
 import type { Music, MusicTrack } from './music'
-import { fileSize } from './export-progress'
-import { KainoLibrary } from './KainoLibrary'
+import { KainoLibrary, MusicLoading } from './KainoLibrary'
 import type { KainoTrack } from './KainoLibrary'
 
 type Props = {
@@ -22,18 +21,17 @@ type Props = {
 }
 
 const AUDIO_EXTENSIONS = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus']
-type TrackStatus = { id: string; installed: boolean; bytes: number }
 
 export function MusicMenu({ project, clip, disabled, canPreview, playing, open: visible, onClose, onPreview, onChange, onKainoCacheChange }: Props) {
   const [scope, setScope] = useState<'project' | 'clip'>('clip')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
   const [libraryOpen, setLibraryOpen] = useState(false)
-  const [otherTracksOpen, setOtherTracksOpen] = useState(false)
   const [kainoTracks, setKainoTracks] = useState<KainoTrack[]>([])
-  const [library, setLibrary] = useState<TrackStatus[]>([])
-  const [loadingLibrary, setLoadingLibrary] = useState(false)
-  const [download, setDownload] = useState<{ id: string; fraction: number } | null>(null)
+  const [checkingSaved, setCheckingSaved] = useState(false)
+  const [savedError, setSavedError] = useState('')
+  const [savedRetry, setSavedRetry] = useState(0)
+  const [failedTrack, setFailedTrack] = useState<KainoTrack | null>(null)
   const target = clip ? scope : 'project'
   const current = target === 'project' ? project : clip?.music
   const active = effectiveMusic(project, clip?.music)
@@ -44,56 +42,36 @@ export function MusicMenu({ project, clip, disabled, canPreview, playing, open: 
   useEffect(() => {
     if (!visible) return
     let current = true
+    setCheckingSaved(true)
+    setSavedError('')
     void invoke<KainoTrack[]>('local_kaino_tracks').then(tracks => {
       if (current) setKainoTracks(tracks)
-    }).catch(error => { if (current) setError(String(error)) })
-    return () => { current = false }
-  }, [visible])
-
-  async function toggleOtherTracks(open: boolean) {
-    setOtherTracksOpen(open)
-    if (!open || loadingLibrary) return
-    setLoadingLibrary(true)
-    setError('')
-    try {
-      setLibrary(await invoke<TrackStatus[]>('music_library'))
-    } catch (error) {
-      setError(String(error))
-    } finally {
-      setLoadingLibrary(false)
-    }
-  }
-
-  async function downloadTrack(id: string) {
-    setError('')
-    setDownload({ id, fraction: 0 })
-    const progress = new Channel<number>(fraction => {
-      setDownload(current => current?.id === id ? { id, fraction } : current)
+    }).catch(error => {
+      if (current) setSavedError(String(error))
+    }).finally(() => {
+      if (current) setCheckingSaved(false)
     })
-    try {
-      await invoke('download_music', { id, progress })
-      setLibrary(items => items.map(track => track.id === id ? { ...track, installed: true } : track))
-    } catch (error) {
-      setError(String(error))
-    } finally {
-      setDownload(null)
-    }
-  }
+    return () => { current = false }
+  }, [visible, savedRetry])
 
   async function select(value: string | KainoTrack) {
     setError('')
+    setFailedTrack(null)
     if (value === 'inherit' || value === 'off') {
       onChange(target, value === 'inherit' ? undefined : null)
       return
     }
     setPending(true)
+    let chosen: KainoTrack | null = null
     try {
       let track: MusicTrack
       if (typeof value !== 'string') {
+        chosen = value
         track = { kind: 'kaino', id: value.id, name: value.title }
       } else if (value.startsWith('kaino:')) {
         const downloaded = kainoTracks.find(track => `kaino:${track.id}` === value)
         if (!downloaded) return
+        chosen = downloaded
         track = { kind: 'kaino', id: downloaded.id, name: downloaded.title }
       } else if (value === 'browse') {
         const path = await open({ title: 'Choose background music', filters: [{ name: 'Audio files', extensions: AUDIO_EXTENSIONS }] })
@@ -107,6 +85,7 @@ export function MusicMenu({ project, clip, disabled, canPreview, playing, open: 
       const path = await invoke<string>('open_music', { track })
       onChange(target, { track, volume: current?.volume ?? DEFAULT_MUSIC_VOLUME }, path)
     } catch (error) {
+      setFailedTrack(chosen)
       setError(error instanceof Error ? error.message : String(error))
     } finally {
       setPending(false)
@@ -137,11 +116,11 @@ export function MusicMenu({ project, clip, disabled, canPreview, playing, open: 
           {target === 'clip' && <option value="inherit">Use project music</option>}
           <option value="off">No music</option>
           {current?.track.kind === 'file' && <option value="file" disabled>{current.track.name}</option>}
-          <option value="browse">Choose an audio file…</option>
+          <option value="browse">Choose an audio fileâ€¦</option>
           {current?.track.kind === 'kaino' && !kainoTracks.some(track => `kaino:${track.id}` === value) &&
             <option value={value} disabled>{current.track.name} (download required)</option>}
           {kainoTracks.map(track => <option key={track.id} value={`kaino:${track.id}`}>{track.title}</option>)}
-          {MUSIC_LIBRARY.filter(track => track.id === value || library.some(item => item.id === track.id && item.installed))
+          {MUSIC_LIBRARY.filter(track => track.id === value)
             .map(track => <option key={track.id} value={track.id}>{track.name}</option>)}
         </select>
       </label>
@@ -157,32 +136,16 @@ export function MusicMenu({ project, clip, disabled, canPreview, playing, open: 
       <div id="music-library" className="music-library" hidden={!libraryOpen}>
         <KainoLibrary enabled={visible && libraryOpen} canUse={!pending && !disabled} saved={kainoTracks}
           onSaved={setKainoTracks} onUse={track => void select(track)} onCacheChange={onKainoCacheChange} />
-        <button type="button" className="text-button media-library-trigger" aria-expanded={otherTracksOpen}
-          aria-controls="original-music" onClick={() => void toggleOtherTracks(!otherTracksOpen)}>Original loop pack</button>
-        <div id="original-music" className="music-library" hidden={!otherTracksOpen}>
-        <small>CC0 · No attribution required</small>
-        {loadingLibrary && <small role="status">Checking downloads…</small>}
-        {library.map(item => {
-          const track = MUSIC_LIBRARY.find(track => track.id === item.id)
-          if (!track) return null
-          const downloading = download?.id === item.id
-          return <div className="music-library-row" key={item.id}>
-            <span>{track.name}<small>{item.installed ? 'Downloaded' : fileSize(item.bytes)}</small></span>
-            <button type="button" className="button outline small" disabled={(item.installed && disabled) || pending || Boolean(download)}
-              aria-label={item.installed ? `Use ${track.name}` : `Download ${track.name}`}
-              onClick={() => void (item.installed ? select(item.id) : downloadTrack(item.id))}>
-              {downloading ? `${Math.round(download.fraction * 100)}%` : item.installed ? 'Use' : 'Download'}
-            </button>
-          </div>
-        })}
-        {download && <small role="status">Downloading {MUSIC_LIBRARY.find(track => track.id === download.id)?.name}…</small>}
-        </div>
-        <button type="button" className="text-button media-library-trigger" onClick={() => {
-          void invoke('browse_mixkit').catch(error => setError(String(error)))
-        }}><ExternalLink size={13} /> Browse Mixkit</button>
-        <small>Download on Mixkit, then choose the audio file here.</small>
       </div>
-      {pending && <small role="status">Opening track…</small>}
+      {checkingSaved && <MusicLoading label="Checking downloaded tracks…" />}
+      {savedError && <div className="music-retry">
+        <small role="alert">{savedError}</small>
+        <button type="button" className="button outline small"
+          onClick={() => setSavedRetry(retry => retry + 1)}>Retry saved tracks</button>
+      </div>}
+      {pending && <MusicLoading label="Opening track…" />}
+      {failedTrack && <button type="button" className="button outline small" disabled={pending || disabled}
+        onClick={() => void select(failedTrack)}>Retry opening track</button>}
       {error && <small role="alert">{error}</small>}
       </div>
     </section>

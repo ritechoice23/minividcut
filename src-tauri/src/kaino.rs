@@ -12,8 +12,9 @@ use tauri::{ipc::Channel, AppHandle, Manager};
 const BASE: &str = "https://kaino.dev";
 const DOWNLOAD_HOST: &str = "a3abcd2451736f6a3867db58e7c8ec05.r2.cloudflarestorage.com";
 const MAX_AUDIO: usize = 32 * 1024 * 1024;
+const NETWORK_ATTEMPTS: u8 = 3;
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct Track {
     id: String,
     title: String,
@@ -39,6 +40,80 @@ struct SearchResult {
 pub struct SearchPage {
     tracks: Vec<Track>,
     next_page: Option<u32>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MusicProgress {
+    stage: &'static str,
+    attempt: u8,
+    fraction: Option<f64>,
+}
+
+fn report(
+    progress: &Channel<MusicProgress>,
+    stage: &'static str,
+    attempt: u8,
+    fraction: Option<f64>,
+) {
+    let _ = progress.send(MusicProgress {
+        stage,
+        attempt,
+        fraction,
+    });
+}
+
+struct RequestError {
+    message: String,
+    retry: bool,
+}
+
+impl From<&str> for RequestError {
+    fn from(message: &str) -> Self {
+        Self {
+            message: message.into(),
+            retry: false,
+        }
+    }
+}
+
+fn network_error(error: reqwest::Error) -> RequestError {
+    let status = error.status();
+    RequestError {
+        retry: status.map_or_else(
+            || error.is_connect() || error.is_timeout() || error.is_body() || error.is_request(),
+            |status| matches!(status.as_u16(), 408 | 425 | 429 | 500 | 502 | 503 | 504),
+        ),
+        message: if let Some(status) = status {
+            format!("Kaino returned HTTP {}.", status.as_u16())
+        } else if error.is_timeout() {
+            "Kaino took too long to respond.".into()
+        } else if error.is_body() {
+            "The transfer from Kaino was interrupted.".into()
+        } else {
+            "Could not connect to Kaino.".into()
+        },
+    }
+}
+
+async fn retry_network<T, F>(
+    progress: &Channel<MusicProgress>,
+    mut work: impl FnMut(u8) -> F,
+) -> Result<T>
+where
+    F: std::future::Future<Output = std::result::Result<T, RequestError>> + Send,
+{
+    for attempt in 1..=NETWORK_ATTEMPTS {
+        match work(attempt).await {
+            Ok(value) => return Ok(value),
+            Err(error) if error.retry && attempt < NETWORK_ATTEMPTS => {
+                report(progress, "retrying", attempt + 1, None);
+                tokio::time::sleep(Duration::from_millis(600 * u64::from(attempt))).await;
+            }
+            Err(error) => return Err(error.message),
+        }
+    }
+    unreachable!()
 }
 
 fn valid_id(id: &str) -> bool {
@@ -90,11 +165,13 @@ pub fn local_path(app: &AppHandle, id: &str) -> Result<PathBuf> {
         .ok_or_else(|| "Download this track from the Kaino library before using it.".into())
 }
 
-fn client() -> Result<reqwest::Client> {
+fn client(timeout: Duration) -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .https_only(true)
-        .connect_timeout(Duration::from_secs(12))
-        .timeout(Duration::from_secs(90))
+        .user_agent(concat!("MiniVidCut/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(6))
+        .read_timeout(Duration::from_secs(12))
+        .timeout(timeout)
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             let url = attempt.url();
             if attempt.previous().len() <= 2
@@ -111,26 +188,56 @@ fn client() -> Result<reqwest::Client> {
         .map_err(|_| "Could not connect to Kaino.".into())
 }
 
-async fn read_json<T: serde::de::DeserializeOwned>(response: reqwest::Response) -> Result<T> {
-    let mut response = response
-        .error_for_status()
-        .map_err(|_| "Kaino could not complete the request.")?;
+async fn read_json<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+) -> std::result::Result<T, RequestError> {
+    let mut response = response.error_for_status().map_err(network_error)?;
+    let events = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|kind| kind.starts_with("text/event-stream"));
     let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| "Kaino interrupted the request. Try again.")?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(network_error)? {
         if bytes.len() + chunk.len() > 256 * 1024 {
             return Err("Kaino returned too much data.".into());
         }
         bytes.extend_from_slice(&chunk);
+        if events {
+            if let Some(result) = parse_event_json(&bytes) {
+                return Ok(result);
+            }
+        }
     }
-    serde_json::from_slice(&bytes).map_err(|_| "Could not read Kaino’s response.".into())
+    let parsed = if events {
+        parse_event_json(&bytes)
+    } else {
+        serde_json::from_slice(&bytes).ok()
+    };
+    parsed.ok_or_else(|| "Could not read Kaino’s response.".into())
+}
+
+fn parse_event_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
+    let text = std::str::from_utf8(bytes).ok()?.replace("\r\n", "\n");
+    text.split_inclusive("\n\n")
+        .filter(|event| event.ends_with("\n\n"))
+        .find_map(|event| {
+            let data = event
+                .lines()
+                .filter_map(|line| line.strip_prefix("data:"))
+                .map(|value| value.strip_prefix(' ').unwrap_or(value))
+                .collect::<Vec<_>>()
+                .join("\n");
+            serde_json::from_str(&data).ok()
+        })
 }
 
 #[tauri::command]
-pub async fn search_kaino(query: String, page: u32) -> Result<SearchPage> {
+pub async fn search_kaino(
+    query: String,
+    page: u32,
+    progress: Channel<MusicProgress>,
+) -> Result<SearchPage> {
     #[derive(Deserialize)]
     struct Response {
         result: ToolResult,
@@ -144,18 +251,28 @@ pub async fn search_kaino(query: String, page: u32) -> Result<SearchPage> {
     let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
         "name":"search_library","arguments":{"collection":"music","q":query,"page":page.clamp(1,10000)}
     }});
-    let response = client()?
-        .post(format!("{BASE}/mcp"))
-        .header("Accept", "application/json, text/event-stream")
-        .header("Content-Type", "application/json")
-        .body(body.to_string())
-        .send()
-        .await
-        .map_err(|_| "Could not reach Kaino. Check your connection and try again.")?;
-    let search = read_json::<Response>(response)
-        .await?
-        .result
-        .structured_content;
+    let client = client(Duration::from_secs(12))?;
+    let body = body.to_string();
+    let search = retry_network(&progress, |attempt| {
+        let (client, body, progress) = (&client, &body, &progress);
+        async move {
+            report(&progress, "loadingCatalog", attempt, None);
+            let response = client
+                .post(format!("{BASE}/mcp"))
+                .header("Accept", "application/json, text/event-stream")
+                .header("Content-Type", "application/json")
+                .header("MCP-Protocol-Version", "2025-03-26")
+                .body(body.clone())
+                .send()
+                .await
+                .map_err(network_error)?;
+            Ok(read_json::<Response>(response)
+                .await?
+                .result
+                .structured_content)
+        }
+    })
+    .await?;
     Ok(SearchPage {
         tracks: search
             .items
@@ -191,7 +308,11 @@ pub async fn local_kaino_tracks(app: AppHandle) -> Result<Vec<Track>> {
 }
 
 #[tauri::command]
-pub async fn download_kaino(app: AppHandle, id: String, progress: Channel<f64>) -> Result<Track> {
+pub async fn download_kaino(
+    app: AppHandle,
+    id: String,
+    progress: Channel<MusicProgress>,
+) -> Result<Track> {
     #[derive(Deserialize)]
     struct Details {
         #[serde(flatten)]
@@ -209,54 +330,78 @@ pub async fn download_kaino(app: AppHandle, id: String, progress: Channel<f64>) 
     if let Some(track) = cached_track(&directory, &id) {
         return Ok(track);
     }
-    let client = client()?;
+    let client = client(Duration::from_secs(90))?;
     let url = format!("{BASE}/api/library/music/{id}");
-    let details = read_json::<Details>(
-        client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|_| "Could not read track details from Kaino.")?,
-    )
+    let details = retry_network(&progress, |attempt| {
+        let (client, url, progress) = (&client, &url, &progress);
+        async move {
+            report(&progress, "checkingTrack", attempt, None);
+            let response = client
+                .get(url.as_str())
+                .send()
+                .await
+                .map_err(network_error)?;
+            read_json::<Details>(response).await
+        }
+    })
     .await?;
     if !eligible(&details.published) || details.published.track.id != id {
         return Err("This track is no longer available from Kaino under CC0.".into());
     }
-    let expected = details
+    let listed_size = details
         .downloads
         .iter()
         .find(|file| file.format == "mp3")
         .ok_or("Kaino does not offer an MP3 for this track.")?
         .bytes;
-    let mut response = client
-        .get(format!("{url}/download?format=mp3"))
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|_| "Could not download the Kaino track. Try again.")?;
-    let expected = expected.or(response
-        .content_length()
-        .and_then(|size| usize::try_from(size).ok()));
-    if expected.is_some_and(|size| size > MAX_AUDIO || size == 0) {
-        return Err("Invalid track size.".into());
-    }
-    let mut bytes = Vec::with_capacity(expected.unwrap_or(0));
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| "The track download was interrupted. Try again.")?
-    {
-        if bytes.len() + chunk.len() > expected.unwrap_or(MAX_AUDIO) {
-            return Err("Invalid track size.".into());
+    let download_url = format!("{url}/download?format=mp3");
+    let bytes = retry_network(&progress, |attempt| {
+        let (client, download_url, progress) = (&client, &download_url, &progress);
+        async move {
+            report(&progress, "downloading", attempt, None);
+            let mut response = client
+                .get(download_url.as_str())
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+                .map_err(network_error)?;
+            let expected = listed_size.or(response
+                .content_length()
+                .and_then(|size| usize::try_from(size).ok()));
+            if expected.is_some_and(|size| size > MAX_AUDIO || size == 0) {
+                return Err("Invalid track size.".into());
+            }
+            let mut bytes = Vec::with_capacity(expected.unwrap_or(0));
+            let mut last_percent = None;
+            while let Some(chunk) = response.chunk().await.map_err(network_error)? {
+                if bytes.len() + chunk.len() > expected.unwrap_or(MAX_AUDIO) {
+                    return Err("Invalid track size.".into());
+                }
+                bytes.extend_from_slice(&chunk);
+                if let Some(size) = expected {
+                    let percent = (bytes.len() * 100 / size) as u8;
+                    if last_percent != Some(percent) {
+                        last_percent = Some(percent);
+                        report(
+                            &progress,
+                            "downloading",
+                            attempt,
+                            Some(f64::from(percent) / 100.0),
+                        );
+                    }
+                }
+            }
+            if bytes.is_empty() || expected.is_some_and(|size| size != bytes.len()) {
+                return Err(RequestError {
+                    message: "The track download was incomplete.".into(),
+                    retry: true,
+                });
+            }
+            Ok(bytes)
         }
-        bytes.extend_from_slice(&chunk);
-        if let Some(size) = expected {
-            let _ = progress.send(bytes.len() as f64 / size as f64);
-        }
-    }
-    if bytes.is_empty() || expected.is_some_and(|size| size != bytes.len()) {
-        return Err("The track download was incomplete. Try again.".into());
-    }
+    })
+    .await?;
+    report(&progress, "saving", 1, None);
     let track = details.published.track;
     video::background(move || save_track(&root, &directory, track, &bytes)).await
 }
@@ -307,6 +452,46 @@ pub async fn remove_kaino(app: AppHandle, id: String) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_complete_streamed_catalog_results_and_ignores_keepalives() {
+        let stream = b": keepalive\r\n\r\nevent: message\r\ndata: {\r\ndata: \"nextPage\": 2\r\ndata: }\r\n\r\n";
+        assert_eq!(
+            parse_event_json::<serde_json::Value>(stream).unwrap()["nextPage"],
+            2
+        );
+        assert!(parse_event_json::<serde_json::Value>(b"data: {}\n").is_none());
+    }
+
+    #[test]
+    fn temporary_errors_retry_and_permanent_errors_stop() {
+        tauri::async_runtime::block_on(async {
+            let progress = Channel::new(|_| Ok(()));
+            let mut tries = 0;
+            let value = retry_network(&progress, |attempt| {
+                tries += 1;
+                std::future::ready(if attempt == 1 {
+                    Err(RequestError {
+                        message: "Temporary".into(),
+                        retry: true,
+                    })
+                } else {
+                    Ok(42)
+                })
+            })
+            .await
+            .unwrap();
+            assert_eq!((value, tries), (42, 2));
+            let mut tries = 0;
+            let failure = retry_network::<(), _>(&progress, |_| {
+                tries += 1;
+                std::future::ready(Err("Permanent".into()))
+            })
+            .await;
+            assert_eq!(failure.unwrap_err(), "Permanent");
+            assert_eq!(tries, 1);
+        });
+    }
 
     #[test]
     fn accepts_only_licensed_music_and_safe_provider_ids() {

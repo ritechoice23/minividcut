@@ -17,6 +17,7 @@ serde_json = "1"
 base64 = "0.22"
 tempfile = "3"
 reqwest = "0.13"
+tokio = { version = "1", features = ["time"] }
 sha2 = "0.10"
 transcribe-cpp = { version = "=0.4.2", default-features = false }
 # The bindings require the same native version at runtime.

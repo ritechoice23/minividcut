@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep the music panel focused on Kaino and local audio. Show progress and offer retry when catalog loading or a download fails.
+
 - Preview the full clip with its intro, outro, transitions, captions, and music. Playback places Play/Pause between the seek buttons and groups preview volume with mute.
 
 - Search Kaino's CC0 music catalog and download individual tracks on demand. Reuse downloads offline or remove them from the music panel.

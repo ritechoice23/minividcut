@@ -67,6 +67,9 @@ svg { flex-shrink: 0; }
 .kaino-pagination { display: flex; justify-content: space-between; }
 .kaino-library summary { cursor: pointer; font-size: 12px; }
 .kaino-library details .music-library-row { margin-top: 5px; }
+.music-loading { display: grid; gap: 4px; }
+.music-loading progress { width: 100%; height: 7px; accent-color: var(--lime); }
+.music-retry { display: grid; justify-items: start; gap: 6px; }
 .music-library-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
 .music-library-row small { display: block; margin-top: 2px; }
 .music-library-row > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }

@@ -1,10 +1,12 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Channel, invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { ExternalLink, Pause, Play, X } from 'lucide-react'
 import { DEFAULT_MUSIC_VOLUME, effectiveMusic, MUSIC_LIBRARY } from './music'
 import type { Music, MusicTrack } from './music'
 import { fileSize } from './export-progress'
+import { KainoLibrary } from './KainoLibrary'
+import type { KainoTrack } from './KainoLibrary'
 
 type Props = {
   project: Music | null
@@ -16,16 +18,19 @@ type Props = {
   onClose: () => void
   onPreview: () => void
   onChange: (scope: 'project' | 'clip', music: Music | null | undefined, path?: string) => void
+  onKainoCacheChange: (id: string, removed: boolean) => void
 }
 
 const AUDIO_EXTENSIONS = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus']
 type TrackStatus = { id: string; installed: boolean; bytes: number }
 
-export function MusicMenu({ project, clip, disabled, canPreview, playing, open: visible, onClose, onPreview, onChange }: Props) {
+export function MusicMenu({ project, clip, disabled, canPreview, playing, open: visible, onClose, onPreview, onChange, onKainoCacheChange }: Props) {
   const [scope, setScope] = useState<'project' | 'clip'>('clip')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
   const [libraryOpen, setLibraryOpen] = useState(false)
+  const [otherTracksOpen, setOtherTracksOpen] = useState(false)
+  const [kainoTracks, setKainoTracks] = useState<KainoTrack[]>([])
   const [library, setLibrary] = useState<TrackStatus[]>([])
   const [loadingLibrary, setLoadingLibrary] = useState(false)
   const [download, setDownload] = useState<{ id: string; fraction: number } | null>(null)
@@ -34,10 +39,19 @@ export function MusicMenu({ project, clip, disabled, canPreview, playing, open: 
   const active = effectiveMusic(project, clip?.music)
   const canAudition = active && (target === 'clip' || active === project)
   const value = current === undefined ? 'inherit' : current === null ? 'off'
-    : current.track.kind === 'library' ? current.track.id : 'file'
+    : current.track.kind === 'kaino' ? `kaino:${current.track.id}` : current.track.kind === 'library' ? current.track.id : 'file'
 
-  async function toggleLibrary(open: boolean) {
-    setLibraryOpen(open)
+  useEffect(() => {
+    if (!visible) return
+    let current = true
+    void invoke<KainoTrack[]>('local_kaino_tracks').then(tracks => {
+      if (current) setKainoTracks(tracks)
+    }).catch(error => { if (current) setError(String(error)) })
+    return () => { current = false }
+  }, [visible])
+
+  async function toggleOtherTracks(open: boolean) {
+    setOtherTracksOpen(open)
     if (!open || loadingLibrary) return
     setLoadingLibrary(true)
     setError('')
@@ -66,7 +80,7 @@ export function MusicMenu({ project, clip, disabled, canPreview, playing, open: 
     }
   }
 
-  async function select(value: string) {
+  async function select(value: string | KainoTrack) {
     setError('')
     if (value === 'inherit' || value === 'off') {
       onChange(target, value === 'inherit' ? undefined : null)
@@ -75,7 +89,13 @@ export function MusicMenu({ project, clip, disabled, canPreview, playing, open: 
     setPending(true)
     try {
       let track: MusicTrack
-      if (value === 'browse') {
+      if (typeof value !== 'string') {
+        track = { kind: 'kaino', id: value.id, name: value.title }
+      } else if (value.startsWith('kaino:')) {
+        const downloaded = kainoTracks.find(track => `kaino:${track.id}` === value)
+        if (!downloaded) return
+        track = { kind: 'kaino', id: downloaded.id, name: downloaded.title }
+      } else if (value === 'browse') {
         const path = await open({ title: 'Choose background music', filters: [{ name: 'Audio files', extensions: AUDIO_EXTENSIONS }] })
         if (!path) return
         track = { kind: 'file', path, name: path.split(/[/\\]/).pop() ?? path }
@@ -118,6 +138,9 @@ export function MusicMenu({ project, clip, disabled, canPreview, playing, open: 
           <option value="off">No music</option>
           {current?.track.kind === 'file' && <option value="file" disabled>{current.track.name}</option>}
           <option value="browse">Choose an audio file…</option>
+          {current?.track.kind === 'kaino' && !kainoTracks.some(track => `kaino:${track.id}` === value) &&
+            <option value={value} disabled>{current.track.name} (download required)</option>}
+          {kainoTracks.map(track => <option key={track.id} value={`kaino:${track.id}`}>{track.title}</option>)}
           {MUSIC_LIBRARY.filter(track => track.id === value || library.some(item => item.id === track.id && item.installed))
             .map(track => <option key={track.id} value={track.id}>{track.name}</option>)}
         </select>
@@ -130,8 +153,13 @@ export function MusicMenu({ project, clip, disabled, canPreview, playing, open: 
       {canAudition && <button type="button" className="button outline small" disabled={!canPreview || pending || disabled}
         onClick={onPreview}>{playing ? <Pause size={13} /> : <Play size={13} />}{playing ? 'Pause preview' : 'Preview mix'}</button>}
       <button type="button" className="text-button media-library-trigger" aria-expanded={libraryOpen}
-        aria-controls="music-library" onClick={() => void toggleLibrary(!libraryOpen)}>Music library</button>
-      {libraryOpen && <div id="music-library" className="music-library">
+        aria-controls="music-library" onClick={() => setLibraryOpen(!libraryOpen)}>Music library</button>
+      <div id="music-library" className="music-library" hidden={!libraryOpen}>
+        <KainoLibrary enabled={visible && libraryOpen} canUse={!pending && !disabled} saved={kainoTracks}
+          onSaved={setKainoTracks} onUse={track => void select(track)} onCacheChange={onKainoCacheChange} />
+        <button type="button" className="text-button media-library-trigger" aria-expanded={otherTracksOpen}
+          aria-controls="original-music" onClick={() => void toggleOtherTracks(!otherTracksOpen)}>Original loop pack</button>
+        <div id="original-music" className="music-library" hidden={!otherTracksOpen}>
         <small>CC0 · No attribution required</small>
         {loadingLibrary && <small role="status">Checking downloads…</small>}
         {library.map(item => {
@@ -148,11 +176,12 @@ export function MusicMenu({ project, clip, disabled, canPreview, playing, open: 
           </div>
         })}
         {download && <small role="status">Downloading {MUSIC_LIBRARY.find(track => track.id === download.id)?.name}…</small>}
+        </div>
         <button type="button" className="text-button media-library-trigger" onClick={() => {
           void invoke('browse_mixkit').catch(error => setError(String(error)))
         }}><ExternalLink size={13} /> Browse Mixkit</button>
         <small>Download on Mixkit, then choose the audio file here.</small>
-      </div>}
+      </div>
       {pending && <small role="status">Opening track…</small>}
       {error && <small role="alert">{error}</small>}
       </div>

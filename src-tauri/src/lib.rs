@@ -3,6 +3,7 @@ mod caption_overlay;
 mod caption_render;
 mod captions;
 mod export_batch;
+mod kaino;
 mod models;
 mod music_library;
 mod titles;
@@ -33,6 +34,10 @@ pub fn run() {
             music_library::music_library,
             music_library::download_music,
             music_library::browse_mixkit,
+            kaino::search_kaino,
+            kaino::local_kaino_tracks,
+            kaino::download_kaino,
+            kaino::remove_kaino,
             video::thumbnails,
             video::clip_thumbnail,
             video::prepare_preview,

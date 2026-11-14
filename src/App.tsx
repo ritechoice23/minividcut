@@ -65,7 +65,7 @@ const FORMATS = {
   portrait: { ratio: '9:16', aspect: 9 / 16, size: '1080 × 1920', label: 'Portrait', icon: Smartphone },
 }
 const message = (error: unknown) => error instanceof Error ? error.message : String(error)
-const trackKey = (track: MusicTrack) => track.kind === 'library' ? `library:${track.id}` : `file:${track.path}`
+const trackKey = (track: MusicTrack) => track.kind === 'file' ? `file:${track.path}` : `${track.kind}:${track.id}`
 
 function Key({ children }: { children: ReactNode }) {
   return <kbd>{children}</kbd>
@@ -141,6 +141,7 @@ export function App() {
   const [playing, setPlaying] = useState(false)
   const [muted, setMuted] = useState(false)
   const [projectMusic, setProjectMusic] = useState<Music | null>(null)
+  const [musicCacheRevision, setMusicCacheRevision] = useState(0)
   const [projectBookends, setProjectBookends] = useState<Bookends>({})
   const musicPlayer = useRef<HTMLAudioElement>(null)
   const setMusicPlayer = useCallback((audio: HTMLAudioElement | null) => {
@@ -338,7 +339,19 @@ export function App() {
       if (active) setNotice(message(error))
     })
     return () => { active = false }
-  }, [musicKey, musicTrack])
+  }, [musicKey, musicTrack, musicCacheRevision])
+
+  const refreshKainoTrack = (id: string, removed: boolean) => {
+    const key = `kaino:${id}`
+    if (removed) {
+      musicPaths.current.delete(key)
+      setPreviewMusic(current => current?.key === key ? null : current)
+    }
+    if (musicKey === key) {
+      if (!removed) setNotice('')
+      setMusicCacheRevision(revision => revision + 1)
+    }
+  }
 
   const syncMusic = useCallback((force = false) => {
     const audio = musicPlayer.current
@@ -1868,7 +1881,7 @@ export function App() {
             clip={selectedClip ? { music: selectedClip.music, title: selectedClip.title || 'Selected clip' } : null}
             open={mediaDock === 'music'} onClose={() => closeMediaDock('music')}
             disabled={disabled || busy} canPreview={canMixPreview && Boolean(musicPath) && validRange(range, duration)}
-            playing={playing} onPreview={playMusicMix} onChange={changeMusic} />
+            playing={playing} onPreview={playMusicMix} onChange={changeMusic} onKainoCacheChange={refreshKainoTrack} />
           <BookendsMenu key={`bookends-${musicSourceRevision}`} project={projectBookends}
             clip={selectedClip ? { bookends: selectedClip.bookends, title: selectedClip.title || 'Selected clip' } : null}
             open={mediaDock === 'bookends'} onClose={() => closeMediaDock('bookends')}

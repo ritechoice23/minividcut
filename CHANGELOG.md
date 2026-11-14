@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Search Kaino's CC0 music catalog and download individual tracks on demand. Reuse downloads offline or remove them from the music panel.
+
 - Add background music to all clips or choose a different track for an individual clip. Preview the mix and adjust its volume. Tracks loop automatically through the end of each export.
 - Download four optional CC0 tracks from the music library for offline use, or import a local audio file.
 - Add custom intro and outro videos to all clips or to individual clips. Choose a cut, crossfade, or slide for each end.

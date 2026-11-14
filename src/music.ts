@@ -6,7 +6,8 @@ export const MUSIC_LIBRARY = [
 ] as const
 
 type LibraryTrack = typeof MUSIC_LIBRARY[number]['id']
-export type MusicTrack = { kind: 'library'; id: LibraryTrack } | { kind: 'file'; path: string; name: string }
+export type MusicTrack = { kind: 'library'; id: LibraryTrack } | { kind: 'kaino'; id: string; name: string }
+  | { kind: 'file'; path: string; name: string }
 export type Music = { track: MusicTrack; volume: number }
 export const DEFAULT_MUSIC_VOLUME = 15
 

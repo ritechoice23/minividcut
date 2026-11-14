@@ -29,6 +29,9 @@ import type { Moment } from './moments'
 import { MusicMenu } from './MusicMenu'
 import { effectiveMusic, musicPosition } from './music'
 import type { Music, MusicTrack } from './music'
+import { BookendsMenu } from './BookendsMenu'
+import { effectiveBookends } from './bookends'
+import type { Bookend, Bookends } from './bookends'
 
 type VideoInfo = { path: string; name: string; duration: number; width: number; height: number; bytes: number }
 type Format = 'landscape' | 'portrait'
@@ -39,6 +42,7 @@ type Draft = {
   format: Format; quality: Quality; framing: Framing; positions: Record<Format, FramePosition>
   captions: Record<string, CaptionTrack | undefined>; captionStyle: CaptionStyle | null
   music?: Music | null
+  bookends?: Bookends
 }
 const DRAFT_KEY = 'minividcut.draft'
 const AUTO_TITLES_KEY = 'minividcut.auto-titles'
@@ -137,6 +141,7 @@ export function App() {
   const [playing, setPlaying] = useState(false)
   const [muted, setMuted] = useState(false)
   const [projectMusic, setProjectMusic] = useState<Music | null>(null)
+  const [projectBookends, setProjectBookends] = useState<Bookends>({})
   const musicPlayer = useRef<HTMLAudioElement>(null)
   const setMusicPlayer = useCallback((audio: HTMLAudioElement | null) => {
     if (musicPlayer.current !== audio) musicPlayer.current?.pause()
@@ -367,6 +372,14 @@ export function App() {
       setClips(items => items.map(clip => clip.id === selectedClip.id ? { ...clip, music } : clip))
     }
   }
+  const changeBookend = (scope: 'project' | 'clip', end: keyof Bookends, value: Bookend | null | undefined) => {
+    if (musicSourceRevision !== sourceRequest.current || exportLock.current || importLock.current) return
+    if (scope === 'project') setProjectBookends(previous => ({ ...previous, [end]: value }))
+    else if (selectedClip) {
+      setClips(items => items.map(clip => clip.id === selectedClip.id
+        ? { ...clip, bookends: { ...clip.bookends, [end]: value } } : clip))
+    }
+  }
   const reviewed = reviewIndex === null ? undefined : sections[reviewIndex]
   const captionKey = selectedClip ? `clip-${selectedClip.id}` : reviewed ? `section-${reviewed.start}-${reviewed.end}` : 'range'
   const currentCaptions = selectedClip ? selectedClip.captions : draftCaptions[captionKey]
@@ -374,7 +387,7 @@ export function App() {
   const captionsRunning = captionProgress !== null
   const hasDraftCaptions = Object.values(draftCaptions).some(track => track?.cues.length)
 
-  const hasEdits = Boolean(source && (clips.length || sections.length || projectMusic || hasDraftCaptions ||
+  const hasEdits = Boolean(source && (clips.length || sections.length || projectMusic || projectBookends.intro || projectBookends.outro || hasDraftCaptions ||
     range.start !== 0 || range.end !== source.duration || draftFormat !== 'landscape' ||
     draftQuality !== 'compact' || draftFraming !== 'fill' || Object.values(positions).some(
       position => position.x !== CENTER.x || position.y !== CENTER.y)))
@@ -386,12 +399,13 @@ export function App() {
         version: 1, source, range, clips, sections, format: draftFormat, quality: draftQuality,
         framing: draftFraming, positions, captions: draftCaptions, captionStyle: sharedCaptionStyle.current,
         music: projectMusic,
+        bookends: projectBookends,
       }
       localStorage.setItem(DRAFT_KEY, JSON.stringify(draft))
     } catch {
       setNotice('Draft recovery could not save your latest edits.')
     }
-  }, [source, range, clips, sections, draftFormat, draftQuality, draftFraming, positions, draftCaptions, projectMusic])
+  }, [source, range, clips, sections, draftFormat, draftQuality, draftFraming, positions, draftCaptions, projectMusic, projectBookends])
 
   const loadVideo = useCallback(async (path: string, draft?: Draft) => {
     if (exportLock.current || importLock.current) return
@@ -439,6 +453,7 @@ export function App() {
       setPlaying(false)
       setClips(draft?.clips ?? [])
       setProjectMusic(draft?.music ?? null)
+      setProjectBookends(draft?.bookends ?? {})
       setClipActions(null)
       nextId.current = Math.max(0, ...(draft?.clips.map(clip => clip.id) ?? [])) + 1
       setSections(draft?.sections ?? [])
@@ -1084,7 +1099,7 @@ export function App() {
       const original = clips[replaced]
       const title = original?.title
       return { ...part, id: nextId.current++, title: title ? `${title} - Part ${index + 1}` : undefined,
-        captions: captionSlice(activeCaptions, part), music: original?.music }
+        captions: captionSlice(activeCaptions, part), music: original?.music, bookends: original?.bookends }
     })
     setClips(replaced < 0 ? [...clips, ...added] : [...clips.slice(0, replaced), ...added, ...clips.slice(replaced + 1)])
     setSections([])
@@ -1252,7 +1267,7 @@ export function App() {
         const captionOverlay = captions && await prepareCaptionOverlay(captions, options.format, clip.end - clip.start, () => cancelRequested.current)
         if (captionOverlay) overlays.push(captionOverlay)
         prepared.push({ start: clip.start, end: clip.end, title: clip.title, captionOverlay,
-          music: effectiveMusic(projectMusic, clip.music) })
+          music: effectiveMusic(projectMusic, clip.music), bookends: effectiveBookends(projectBookends, clip.bookends) })
       }
       if (hasCaptionArtwork) setNotice('')
       const states = cancelRequested.current ? batch.map(() => ({ status: 'canceled' as const })) : await invoke<ExportState[]>('export_clips', {
@@ -1494,10 +1509,13 @@ export function App() {
         <button className="icon-button settings-trigger" aria-label="Settings" title="Settings"
           aria-pressed={settingsOpen} onClick={() => setSettingsOpen(open => !open)}><SettingsIcon size={16} /></button>
         <div className="export-toolbar">
-          <MusicMenu key={musicSourceRevision} project={projectMusic}
+          <MusicMenu key={`music-${musicSourceRevision}`} project={projectMusic}
             clip={selectedClip ? { music: selectedClip.music, title: selectedClip.title || 'Selected clip' } : null}
             disabled={disabled || busy} canPreview={canMixPreview && Boolean(musicPath) && validRange(range, duration)}
             playing={playing} onPreview={playMusicMix} onChange={changeMusic} />
+          <BookendsMenu key={`bookends-${musicSourceRevision}`} project={projectBookends}
+            clip={selectedClip ? { bookends: selectedClip.bookends, title: selectedClip.title || 'Selected clip' } : null}
+            disabled={disabled || busy} videoExtensions={EXTENSIONS} onChange={changeBookend} />
           {busy && <div className="export-ring" role="progressbar" aria-label="Export progress"
             aria-valuenow={summary?.percent ?? 0} title={`Exporting · ${summary?.percent ?? 0}%`}>
             <svg viewBox="0 0 24 24" aria-hidden="true">

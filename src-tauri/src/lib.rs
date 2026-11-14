@@ -1,8 +1,10 @@
+mod bookends;
 mod caption_overlay;
 mod caption_render;
 mod captions;
 mod export_batch;
 mod models;
+mod music_library;
 mod titles;
 mod video;
 
@@ -27,6 +29,9 @@ pub fn run() {
             caption_overlay::discard_caption_overlays,
             video::open_video,
             video::open_music,
+            bookends::inspect_bookend,
+            music_library::music_library,
+            music_library::download_music,
             video::thumbnails,
             video::clip_thumbnail,
             video::prepare_preview,

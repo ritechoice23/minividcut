@@ -39,7 +39,6 @@
       "binaries/ffprobe"
     ],
     "resources": {
-      "music/*.ogg": "music/",
       "../LICENSE": "licenses/MiniVidCut-LICENSE.txt",
       "../docs/third-party-notices.txt": "licenses/third-party-notices.txt",
       "binaries/ffmpeg-COPYING.txt": "licenses/ffmpeg-COPYING.txt"

@@ -27,8 +27,8 @@ contains checksums for the archives, including both parts and the joined ZIP.
 The upstream build and original dependency source cache are recorded at:
 https://github.com/FFmpeg-Builds/FFmpeg-Builds/actions/runs/43422726593
 
-Bundled background music
-------------------------
+Downloadable background music
+-----------------------------
 A Brand New Wisdom, Just Saying Tho, Winter Dust, and Swinging Sweet
 by hernandack, from Short Loops Background Music Pack.
 Source: https://opengameart.org/content/short-loops-background-music-pack

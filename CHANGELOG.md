@@ -3,7 +3,8 @@
 ## Unreleased
 
 - Add background music to all clips or choose a different track for an individual clip. Preview the mix and adjust its volume. Tracks loop automatically through the end of each export.
-- Choose from four built-in CC0 tracks or import a local audio file.
+- Download four optional CC0 tracks from the music library for offline use, or import a local audio file.
+- Add custom intro and outro videos to all clips or to individual clips. Choose a cut, crossfade, or slide for each end.
 
 ## 0.5.0 — 2026-11-14
 

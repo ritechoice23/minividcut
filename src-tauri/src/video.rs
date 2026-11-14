@@ -1,4 +1,5 @@
 use crate::{
+    bookends::{self, Assembly, AssetCache, Bookends},
     caption_overlay::{CaptionOverlays, Overlay},
     export_batch::{self, Update},
 };
@@ -15,7 +16,7 @@ use std::{
     },
     time::Duration,
 };
-use tauri::{ipc::Channel, path::BaseDirectory, AppHandle, Manager};
+use tauri::{ipc::Channel, AppHandle, Manager};
 use tauri_plugin_opener::OpenerExt;
 
 const MIN_CLIP: f64 = 0.05;
@@ -24,7 +25,7 @@ const EXTENSIONS: &[&str] = &[
     "mp4", "mov", "mkv", "webm", "avi", "m4v", "mts", "m2ts", "wmv", "mpg", "mpeg", "ts", "3gp",
 ];
 
-type Result<T> = std::result::Result<T, String>;
+pub(crate) type Result<T> = std::result::Result<T, String>;
 
 #[derive(Default)]
 pub struct PreviewFiles(Mutex<PreviewState>);
@@ -73,7 +74,7 @@ pub struct VideoInfo {
     frame_rate: f64,
     path: PathBuf,
     name: String,
-    duration: f64,
+    pub(crate) duration: f64,
     width: u64,
     height: u64,
 }
@@ -95,6 +96,8 @@ pub struct ExportClip {
     #[serde(skip)]
     overlay: Option<Overlay>,
     music: Option<MusicSettings>,
+    #[serde(default)]
+    bookends: Bookends,
 }
 
 #[derive(Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
@@ -351,7 +354,7 @@ fn output(cmd: &mut Command, tool: &str, context: &str) -> Result<Output> {
     }
 }
 
-fn source(path: &Path) -> Result<PathBuf> {
+pub(crate) fn source(path: &Path) -> Result<PathBuf> {
     if !path.is_absolute() || !path.is_file() {
         return Err("Choose an existing video file.".into());
     }
@@ -366,7 +369,7 @@ fn source(path: &Path) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
-fn probe(path: PathBuf) -> Result<VideoInfo> {
+pub(crate) fn probe(path: PathBuf) -> Result<VideoInfo> {
     let output = output(
         command("ffprobe")
             .args([
@@ -513,13 +516,13 @@ fn ffmpeg() -> Command {
     cmd
 }
 
-fn input<'a>(cmd: &'a mut Command, path: &Path) -> &'a mut Command {
+pub(crate) fn input<'a>(cmd: &'a mut Command, path: &Path) -> &'a mut Command {
     cmd.args(["-protocol_whitelist", "file", "-i"]).arg(path)
 }
 
 const MUSIC_FORMATS: &str = "mp3,wav,flac,ogg,opus,aac,mov,mp4,m4a,3gp,3g2,mj2";
 
-#[derive(Deserialize)]
+#[derive(Deserialize, PartialEq, Eq, Hash)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum MusicTrack {
     Library { id: String },
@@ -529,18 +532,7 @@ pub enum MusicTrack {
 impl MusicTrack {
     fn path(&self, app: &AppHandle) -> Result<PathBuf> {
         let path = match self {
-            Self::Library { id } => {
-                let filename = match id.as_str() {
-                    "a-brand-new-wisdom" => "a-brand-new-wisdom.ogg",
-                    "just-saying-tho" => "just-saying-tho.ogg",
-                    "winter-dust" => "winter-dust.ogg",
-                    "swinging-sweet" => "swinging-sweet.ogg",
-                    _ => return Err("This track is no longer in the music library.".into()),
-                };
-                app.path()
-                    .resolve(Path::new("music").join(filename), BaseDirectory::Resource)
-                    .map_err(|error| error.to_string())?
-            }
+            Self::Library { id } => crate::music_library::downloaded_path(app, id)?,
             Self::File { path } => {
                 let extension = path
                     .extension()
@@ -562,7 +554,7 @@ impl MusicTrack {
     }
 }
 
-fn audio_stream(path: &Path, formats: Option<&str>) -> Result<bool> {
+pub(crate) fn audio_stream(path: &Path, formats: Option<&str>) -> Result<bool> {
     let mut cmd = command("ffprobe");
     if let Some(formats) = formats {
         cmd.args(["-format_whitelist", formats]);
@@ -884,6 +876,7 @@ fn encode_clip(
         destination,
         captions,
         None,
+        None,
         &AtomicBool::new(false),
         on_progress,
     )
@@ -897,6 +890,7 @@ fn encode_with(
     destination: &Path,
     captions: CaptionLayers<'_>,
     music: Option<&MusicMix>,
+    assembly: Option<(&Assembly, &str)>,
     cancel: &AtomicBool,
     on_progress: impl Fn(f64),
 ) -> Result<()> {
@@ -943,7 +937,9 @@ fn encode_with(
     ]);
     input(&mut cmd, path);
     let mut graph = Vec::new();
+    let mut next_input = 1;
     if let Some(overlay) = captions.overlay {
+        next_input += 1;
         graph.push(format!("[0:V:0]{filter}[video];[video][1:v]overlay=x={}:y={}:eof_action=pass:repeatlast=0[captioned]", overlay.x, overlay.y));
         cmd.current_dir(overlay.directory.path()).args([
             "-f",
@@ -957,7 +953,8 @@ fn encode_with(
         ]);
     }
     if let Some(music) = music {
-        let index = if captions.overlay.is_some() { 2 } else { 1 };
+        let index = next_input;
+        next_input += 1;
         let gain = f64::from(music.volume) / 100.0;
         cmd.args(["-stream_loop", "-1", "-format_whitelist", MUSIC_FORMATS]);
         input(&mut cmd, &music.path);
@@ -971,6 +968,25 @@ fn encode_with(
             graph.push(format!("{level}[mixed]"));
         }
     }
+    let duration = if let Some((assembly, fit)) = assembly {
+        let main_video = if captions.overlay.is_some() {
+            "[captioned]"
+        } else {
+            graph.push(format!("[0:V:0]{filter}[framed]"));
+            "[framed]"
+        };
+        assembly.append(
+            &mut cmd,
+            &mut graph,
+            next_input,
+            duration,
+            main_video,
+            music.is_some(),
+            fit,
+        )
+    } else {
+        duration
+    };
     if !graph.is_empty() {
         cmd.args([
             "-filter_complex_threads",
@@ -979,7 +995,9 @@ fn encode_with(
             &graph.join(";"),
         ]);
     }
-    if captions.overlay.is_some() {
+    if assembly.is_some() {
+        cmd.args(["-map", "[final_v]"]);
+    } else if captions.overlay.is_some() {
         cmd.args(["-map", "[captioned]"]);
     } else {
         cmd.args(["-map", "0:V:0", "-vf", filter]);
@@ -988,7 +1006,13 @@ fn encode_with(
         "-t",
         &format!("{duration:.6}"),
         "-map",
-        if music.is_some() { "[mixed]" } else { "0:a:0?" },
+        if assembly.is_some() {
+            "[final_a]"
+        } else if music.is_some() {
+            "[mixed]"
+        } else {
+            "0:a:0?"
+        },
         "-sn",
         "-dn",
         "-map_metadata",
@@ -1140,18 +1164,26 @@ fn export_name(title: Option<&str>, stem: &str, index: usize) -> String {
     }
 }
 
+#[derive(Default)]
+struct ClipMedia {
+    music: Option<MusicMix>,
+    assembly: Option<Assembly>,
+}
+
 fn encode_batch(
     path: &Path,
     folder: &Path,
     clips: &[ExportClip],
     options: ExportOptions,
-    music: Option<&[Result<Option<MusicMix>>]>,
+    media: Option<&[Result<ClipMedia>]>,
     encoders: &EncoderCache,
     cancel: &AtomicBool,
     workers: usize,
     mut progress: impl FnMut(Progress),
 ) -> Result<Vec<ClipExport>> {
     let filter = filter(options.format, options.framing, options.position)?;
+    let bookend_filter =
+        self::filter(options.format, Framing::Fit, FramePosition { x: 50, y: 50 })?;
     let stem: String = path
         .file_stem()
         .unwrap_or_default()
@@ -1176,9 +1208,10 @@ fn encode_batch(
         |index, report| -> Result<(u64, &'static str)> {
             check_export(cancel)?;
             let clip = &clips[index];
-            let mix = match music {
-                Some(mixes) => mixes[index].as_ref().map_err(Clone::clone)?.as_ref(),
-                None => None,
+            let empty = ClipMedia::default();
+            let media = match media {
+                Some(media) => media[index].as_ref().map_err(Clone::clone)?,
+                None => &empty,
             };
             let output = tempfile::Builder::new()
                 .prefix(".minividcut-")
@@ -1198,7 +1231,11 @@ fn encode_batch(
                     args,
                     output.path(),
                     captions,
-                    mix,
+                    media.music.as_ref(),
+                    media
+                        .assembly
+                        .as_ref()
+                        .map(|assembly| (assembly, bookend_filter.as_str())),
                     cancel,
                     |fraction| {
                         if fraction > furthest.get() {
@@ -1310,27 +1347,38 @@ pub async fn export_clips(
         }
         let cpus = std::thread::available_parallelism().map_or(1, usize::from);
         let workers = export_batch::worker_count(clips.len(), cpus);
-        let source_audio = clips
-            .iter()
-            .any(|clip| clip.music.as_ref().is_some_and(|music| music.volume > 0))
-            && audio_stream(&video.path, None)?;
-        let music = clips
+        let source_audio = clips.iter().any(|clip| {
+            clip.bookends.configured() || clip.music.as_ref().is_some_and(|music| music.volume > 0)
+        }) && audio_stream(&video.path, None)?;
+        let mut assets = AssetCache::default();
+        let mut music_paths = HashMap::new();
+        let media = clips
             .iter()
             .map(|clip| {
-                let Some(music) = &clip.music else {
-                    return Ok(None);
-                };
-                if music.volume == 0 {
-                    return Ok(None);
-                }
-                if music.volume > 100 {
-                    return Err("Music volume must be between 0 and 100%.".into());
-                }
-                Ok(Some(MusicMix {
-                    path: music.track.path(&app)?,
-                    volume: music.volume,
-                    source_audio,
-                }))
+                check_export(&cancel)?;
+                let music = clip
+                    .music
+                    .as_ref()
+                    .filter(|music| music.volume > 0)
+                    .map(|music| -> Result<MusicMix> {
+                        if music.volume > 100 {
+                            return Err("Music volume must be between 0 and 100%.".into());
+                        }
+                        let path = music_paths
+                            .entry(&music.track)
+                            .or_insert_with(|| music.track.path(&app))
+                            .clone()?;
+                        Ok(MusicMix {
+                            path,
+                            volume: music.volume,
+                            source_audio,
+                        })
+                    })
+                    .transpose()?;
+                Ok(ClipMedia {
+                    music,
+                    assembly: bookends::resolve(&clip.bookends, &mut assets, source_audio)?,
+                })
             })
             .collect::<Vec<_>>();
         let results = encode_batch(
@@ -1338,7 +1386,7 @@ pub async fn export_clips(
             &folder,
             &clips,
             options,
-            Some(&music),
+            Some(&media),
             &exports.encoders,
             &cancel,
             workers,
@@ -1578,8 +1626,17 @@ mod tests {
             FramePosition { x: 50, y: 50 },
         )
         .unwrap();
+        let music_path = folder.path().join("music.wav");
+        output(
+            ffmpeg()
+                .args(["-f", "lavfi", "-i", "sine=frequency=880", "-t", "0.25"])
+                .arg(&music_path),
+            "ffmpeg",
+            "Could not create test music",
+        )
+        .unwrap();
         let music = MusicMix {
-            path: Path::new(env!("CARGO_MANIFEST_DIR")).join("music/a-brand-new-wisdom.ogg"),
+            path: music_path,
             volume: 15,
             source_audio: false,
         };
@@ -1594,6 +1651,7 @@ mod tests {
                 overlay: Some(&overlay),
             },
             Some(&music),
+            None,
             &AtomicBool::new(false),
             |_| {},
         )
@@ -1787,6 +1845,7 @@ mod tests {
                     volume: 25,
                     source_audio,
                 }),
+                None,
                 &AtomicBool::new(false),
                 |_| {},
             )
@@ -1828,6 +1887,83 @@ mod tests {
     }
 
     #[test]
+    fn assembles_intro_main_and_outro_with_an_audio_crossfade_and_a_silent_segment() {
+        let directory = tempfile::tempdir().unwrap();
+        let make_video = |name: &str, color: &str, audio: bool| {
+            let path = directory.path().join(name);
+            let mut fixture = ffmpeg();
+            fixture.args(["-f", "lavfi", "-i", color]);
+            if audio {
+                fixture.args(["-f", "lavfi", "-i", "sine=frequency=660"]);
+            }
+            output(
+                fixture.args(["-t", "1", "-c:v", "libx264"]).arg(&path),
+                "ffmpeg",
+                "Could not make test video",
+            )
+            .unwrap();
+            path
+        };
+        let intro = make_video("intro clip.mp4", "color=red:s=128x72:r=24", true);
+        let main = make_video("main.mp4", "color=green:s=160x90:r=30", false);
+        let outro = make_video("outro clip.mp4", "color=blue:s=128x96:r=25", true);
+        let mut cache = AssetCache::default();
+        for (effect, expected) in [("cut", 3.0), ("fade", 2.0), ("slide", 2.0)] {
+            let settings = serde_json::from_value(serde_json::json!({
+                "intro": { "path": intro, "transition": effect },
+                "outro": { "path": outro, "transition": effect }
+            }))
+            .unwrap();
+            let assembly = bookends::resolve(&settings, &mut cache, false)
+                .unwrap()
+                .unwrap();
+            let destination = directory.path().join(format!("{effect}.mp4"));
+            encode_with(
+                &main,
+                Clip {
+                    start: 0.0,
+                    end: 1.0,
+                },
+                "null",
+                Quality::Compatible.args(),
+                &destination,
+                CaptionLayers {
+                    legacy: None,
+                    overlay: None,
+                },
+                None,
+                Some((&assembly, "scale=160:90")),
+                &AtomicBool::new(false),
+                |_| {},
+            )
+            .unwrap();
+            let duration = probe(destination.clone()).unwrap().duration;
+            assert!((duration - expected).abs() <= 0.034, "{effect}: {duration}");
+            assert!(audio_stream(&destination, None).unwrap());
+            for (time, dominant) in [("0.1".to_owned(), 0), ((expected - 0.1).to_string(), 2)] {
+                let mut sample = ffmpeg();
+                sample.args(["-ss", &time]);
+                let pixel = output(
+                    input(&mut sample, &destination).args([
+                        "-vf",
+                        "scale=2:2,format=rgb24",
+                        "-frames:v",
+                        "1",
+                        "-f",
+                        "rawvideo",
+                        "pipe:1",
+                    ]),
+                    "ffmpeg",
+                    "Could not sample the exported video",
+                )
+                .unwrap()
+                .stdout;
+                assert!(pixel[dominant] > 200, "{effect}, {time}: {pixel:?}");
+            }
+        }
+    }
+
+    #[test]
     fn exports_ten_compact_clips_in_order_and_reports_their_sizes() {
         let folder = tempfile::tempdir().unwrap();
         let source = folder.path().join("test source.mp4");
@@ -1861,6 +1997,7 @@ mod tests {
                     overlay_id: None,
                     overlay: None,
                     music: None,
+                    bookends: Bookends::default(),
                 }
             })
             .collect();
@@ -1965,6 +2102,7 @@ mod tests {
                 overlay_id: None,
                 overlay: None,
                 music: None,
+                bookends: Bookends::default(),
             })
             .collect();
         let cancel = AtomicBool::new(false);
@@ -2049,6 +2187,7 @@ mod tests {
                 legacy: None,
                 overlay: None,
             },
+            None,
             None,
             &cancel,
             |_| cancel.store(true, Ordering::Relaxed),
@@ -2149,6 +2288,7 @@ mod tests {
                 overlay_id: None,
                 overlay: None,
                 music: None,
+                bookends: Bookends::default(),
             }],
             ExportOptions {
                 format: Format::Portrait,

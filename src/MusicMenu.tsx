@@ -1,9 +1,10 @@
 import { useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+import { Channel, invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { Music2, Pause, Play } from 'lucide-react'
 import { DEFAULT_MUSIC_VOLUME, effectiveMusic, MUSIC_LIBRARY } from './music'
 import type { Music, MusicTrack } from './music'
+import { fileSize } from './export-progress'
 
 type Props = {
   project: Music | null
@@ -16,17 +17,52 @@ type Props = {
 }
 
 const AUDIO_EXTENSIONS = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus']
+type TrackStatus = { id: string; installed: boolean; bytes: number }
 
 export function MusicMenu({ project, clip, disabled, canPreview, playing, onPreview, onChange }: Props) {
   const [scope, setScope] = useState<'project' | 'clip'>('clip')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
+  const [libraryOpen, setLibraryOpen] = useState(false)
+  const [library, setLibrary] = useState<TrackStatus[]>([])
+  const [loadingLibrary, setLoadingLibrary] = useState(false)
+  const [download, setDownload] = useState<{ id: string; fraction: number } | null>(null)
   const target = clip ? scope : 'project'
   const current = target === 'project' ? project : clip?.music
   const active = effectiveMusic(project, clip?.music)
   const canAudition = active && (target === 'clip' || active === project)
   const value = current === undefined ? 'inherit' : current === null ? 'off'
     : current.track.kind === 'library' ? current.track.id : 'file'
+
+  async function toggleLibrary(open: boolean) {
+    setLibraryOpen(open)
+    if (!open || loadingLibrary) return
+    setLoadingLibrary(true)
+    setError('')
+    try {
+      setLibrary(await invoke<TrackStatus[]>('music_library'))
+    } catch (error) {
+      setError(String(error))
+    } finally {
+      setLoadingLibrary(false)
+    }
+  }
+
+  async function downloadTrack(id: string) {
+    setError('')
+    setDownload({ id, fraction: 0 })
+    const progress = new Channel<number>(fraction => {
+      setDownload(current => current?.id === id ? { id, fraction } : current)
+    })
+    try {
+      await invoke('download_music', { id, progress })
+      setLibrary(items => items.map(track => track.id === id ? { ...track, installed: true } : track))
+    } catch (error) {
+      setError(String(error))
+    } finally {
+      setDownload(null)
+    }
+  }
 
   async function select(value: string) {
     setError('')
@@ -57,7 +93,7 @@ export function MusicMenu({ project, clip, disabled, canPreview, playing, onPrev
 
   return <>
     <button type="button" className="icon-button music-trigger" title="Background music" aria-label="Background music"
-      aria-haspopup="dialog" popoverTarget="music-menu" data-active={Boolean(active)} disabled={disabled}>
+      aria-haspopup="dialog" popoverTarget="music-menu" data-active={Boolean(active)}>
       <Music2 size={17} />
     </button>
     <div id="music-menu" className="music-menu media-menu panel" popover="auto" role="dialog"
@@ -78,9 +114,8 @@ export function MusicMenu({ project, clip, disabled, canPreview, playing, onPrev
           <option value="off">No music</option>
           {current?.track.kind === 'file' && <option value="file" disabled>{current.track.name}</option>}
           <option value="browse">Choose an audio file…</option>
-          <optgroup label="Built-in tracks · CC0">
-            {MUSIC_LIBRARY.map(track => <option key={track.id} value={track.id}>{track.name}</option>)}
-          </optgroup>
+          {MUSIC_LIBRARY.filter(track => track.id === value || library.some(item => item.id === track.id && item.installed))
+            .map(track => <option key={track.id} value={track.id}>{track.name}</option>)}
         </select>
       </label>
       {current && <label>
@@ -90,6 +125,26 @@ export function MusicMenu({ project, clip, disabled, canPreview, playing, onPrev
       </label>}
       {canAudition && <button type="button" className="button outline small" disabled={!canPreview || pending || disabled}
         onClick={onPreview}>{playing ? <Pause size={13} /> : <Play size={13} />}{playing ? 'Pause preview' : 'Preview mix'}</button>}
+      <button type="button" className="text-button media-library-trigger" aria-expanded={libraryOpen}
+        aria-controls="music-library" onClick={() => void toggleLibrary(!libraryOpen)}>Music library</button>
+      {libraryOpen && <div id="music-library" className="music-library">
+        <small>CC0 · No attribution required</small>
+        {loadingLibrary && <small role="status">Checking downloads…</small>}
+        {library.map(item => {
+          const track = MUSIC_LIBRARY.find(track => track.id === item.id)
+          if (!track) return null
+          const downloading = download?.id === item.id
+          return <div className="music-library-row" key={item.id}>
+            <span>{track.name}<small>{item.installed ? 'Downloaded' : fileSize(item.bytes)}</small></span>
+            <button type="button" className="button outline small" disabled={(item.installed && disabled) || pending || Boolean(download)}
+              aria-label={item.installed ? `Use ${track.name}` : `Download ${track.name}`}
+              onClick={() => void (item.installed ? select(item.id) : downloadTrack(item.id))}>
+              {downloading ? `${Math.round(download.fraction * 100)}%` : item.installed ? 'Use' : 'Download'}
+            </button>
+          </div>
+        })}
+        {download && <small role="status">Downloading {MUSIC_LIBRARY.find(track => track.id === download.id)?.name}…</small>}
+      </div>}
       {pending && <small role="status">Opening track…</small>}
       {error && <small role="alert">{error}</small>}
     </div>

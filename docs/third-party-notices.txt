@@ -15,3 +15,14 @@ https://github.com/FFmpeg-Builds/FFmpeg-Builds/tree/c9fe5114060e507409f7ee07edfd
 
 Corresponding source downloads for the Windows installer:
 https://github.com/ritechoice23/minividcut/releases/tag/v0.5.0
+
+The dependency source cache is split into two release assets. In Command
+Prompt, join them in order to restore the original ZIP:
+
+copy /b ffmpeg-dependency-sources.zip.001+ffmpeg-dependency-sources.zip.002 ffmpeg-dependency-sources.zip
+
+Extract the ZIP to obtain cache.tar.gz. SHA256SUMS.txt on the release page
+contains checksums for the archives, including both parts and the joined ZIP.
+
+The upstream build and original dependency source cache are recorded at:
+https://github.com/FFmpeg-Builds/FFmpeg-Builds/actions/runs/43422726593

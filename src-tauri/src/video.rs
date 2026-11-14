@@ -116,8 +116,8 @@ pub enum Framing {
 
 #[derive(Clone, Copy, Deserialize)]
 pub struct FramePosition {
-    x: u8,
-    y: u8,
+    pub(crate) x: u8,
+    pub(crate) y: u8,
 }
 
 #[derive(Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
@@ -307,7 +307,7 @@ pub struct ExportOptions {
     quality: Quality,
 }
 
-fn command(tool: &str) -> Command {
+pub(crate) fn command(tool: &str) -> Command {
     let executable = std::env::current_exe().expect("Could not locate the MiniVidCut executable");
     let directory = executable
         .parent()
@@ -345,7 +345,7 @@ fn process_error(context: &str, stderr: &[u8]) -> String {
     format!("{context}. {details}")
 }
 
-fn output(cmd: &mut Command, tool: &str, context: &str) -> Result<Output> {
+pub(crate) fn output(cmd: &mut Command, tool: &str, context: &str) -> Result<Output> {
     let output = cmd.output().map_err(|error| launch_error(tool, error))?;
     if output.status.success() {
         Ok(output)
@@ -830,7 +830,7 @@ fn validate_clips(clips: &mut [Clip], duration: f64) -> Result<()> {
     Ok(())
 }
 
-fn filter(format: Format, framing: Framing, position: FramePosition) -> Result<String> {
+pub(crate) fn filter(format: Format, framing: Framing, position: FramePosition) -> Result<String> {
     let FramePosition { x, y } = position;
     if x > 100 || y > 100 {
         return Err("Frame position must be between 0% and 100%.".into());
@@ -890,7 +890,7 @@ fn encode_with(
     destination: &Path,
     captions: CaptionLayers<'_>,
     music: Option<&MusicMix>,
-    assembly: Option<(&Assembly, &str)>,
+    assembly: Option<&Assembly>,
     cancel: &AtomicBool,
     on_progress: impl Fn(f64),
 ) -> Result<()> {
@@ -968,7 +968,7 @@ fn encode_with(
             graph.push(format!("{level}[mixed]"));
         }
     }
-    let duration = if let Some((assembly, fit)) = assembly {
+    let duration = if let Some(assembly) = assembly {
         let main_video = if captions.overlay.is_some() {
             "[captioned]"
         } else {
@@ -982,7 +982,6 @@ fn encode_with(
             duration,
             main_video,
             music.is_some(),
-            fit,
         )
     } else {
         duration
@@ -1182,8 +1181,6 @@ fn encode_batch(
     mut progress: impl FnMut(Progress),
 ) -> Result<Vec<ClipExport>> {
     let filter = filter(options.format, options.framing, options.position)?;
-    let bookend_filter =
-        self::filter(options.format, Framing::Fit, FramePosition { x: 50, y: 50 })?;
     let stem: String = path
         .file_stem()
         .unwrap_or_default()
@@ -1232,10 +1229,7 @@ fn encode_batch(
                     output.path(),
                     captions,
                     media.music.as_ref(),
-                    media
-                        .assembly
-                        .as_ref()
-                        .map(|assembly| (assembly, bookend_filter.as_str())),
+                    media.assembly.as_ref(),
                     cancel,
                     |fraction| {
                         if fraction > furthest.get() {
@@ -1377,7 +1371,12 @@ pub async fn export_clips(
                     .transpose()?;
                 Ok(ClipMedia {
                     music,
-                    assembly: bookends::resolve(&clip.bookends, &mut assets, source_audio)?,
+                    assembly: bookends::resolve(
+                        &clip.bookends,
+                        &mut assets,
+                        source_audio,
+                        options.format,
+                    )?,
                 })
             })
             .collect::<Vec<_>>();
@@ -1914,7 +1913,7 @@ mod tests {
                 "outro": { "path": outro, "transition": effect }
             }))
             .unwrap();
-            let assembly = bookends::resolve(&settings, &mut cache, false)
+            let assembly = bookends::resolve(&settings, &mut cache, false, Format::Landscape)
                 .unwrap()
                 .unwrap();
             let destination = directory.path().join(format!("{effect}.mp4"));
@@ -1924,7 +1923,7 @@ mod tests {
                     start: 0.0,
                     end: 1.0,
                 },
-                "null",
+                "scale=1920:1080",
                 Quality::Compatible.args(),
                 &destination,
                 CaptionLayers {
@@ -1932,7 +1931,7 @@ mod tests {
                     overlay: None,
                 },
                 None,
-                Some((&assembly, "scale=160:90")),
+                Some(&assembly),
                 &AtomicBool::new(false),
                 |_| {},
             )
@@ -1960,6 +1959,96 @@ mod tests {
                 .stdout;
                 assert!(pixel[dominant] > 200, "{effect}, {time}: {pixel:?}");
             }
+        }
+    }
+
+    #[test]
+    fn exports_still_bookends_at_the_configured_duration_and_position() {
+        let directory = tempfile::tempdir().unwrap();
+        let image = directory.path().join("title %03d.png");
+        let main = directory.path().join("main.mp4");
+        output(
+            ffmpeg()
+                .args([
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=red:s=90x160",
+                    "-frames:v",
+                    "1",
+                    "-update",
+                    "1",
+                ])
+                .arg(&image),
+            "ffmpeg",
+            "Could not create a test image",
+        )
+        .unwrap();
+        output(
+            ffmpeg()
+                .args(["-f", "lavfi", "-i", "color=green:s=160x90:r=30", "-t", "1"])
+                .arg(&main),
+            "ffmpeg",
+            "Could not create a test video",
+        )
+        .unwrap();
+        let settings = serde_json::from_value(serde_json::json!({
+            "intro": {"path": image, "transition": "cut", "duration": 0.5, "position": {"x": 0, "y": 50}},
+            "outro": {"path": image, "transition": "fade", "duration": 1, "position": {"x": 100, "y": 50}}
+        })).unwrap();
+        let assembly = bookends::resolve(
+            &settings,
+            &mut AssetCache::default(),
+            false,
+            Format::Landscape,
+        )
+        .unwrap()
+        .unwrap();
+        let destination = directory.path().join("images.mp4");
+        encode_with(
+            &main,
+            Clip {
+                start: 0.0,
+                end: 1.0,
+            },
+            "scale=1920:1080",
+            Quality::Compatible.args(),
+            &destination,
+            CaptionLayers {
+                legacy: None,
+                overlay: None,
+            },
+            None,
+            Some(&assembly),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+        assert!((probe(destination.clone()).unwrap().duration - 2.0).abs() < 0.035);
+        for (time, x, should_be_red) in [
+            ("0.2", 32, true),
+            ("0.2", 1840, false),
+            ("1.8", 32, false),
+            ("1.8", 1840, true),
+        ] {
+            let mut sample = ffmpeg();
+            sample.args(["-ss", time]);
+            let bytes = output(
+                input(&mut sample, &destination).args([
+                    "-vf",
+                    &format!("crop=2:2:{x}:500,format=rgb24"),
+                    "-frames:v",
+                    "1",
+                    "-f",
+                    "rawvideo",
+                    "pipe:1",
+                ]),
+                "ffmpeg",
+                "Could not sample image position",
+            )
+            .unwrap()
+            .stdout;
+            assert_eq!(bytes[0] > 200, should_be_red, "{time}, {x}: {bytes:?}");
         }
     }
 

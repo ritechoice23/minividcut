@@ -1,10 +1,11 @@
-use crate::video::{self, Result};
-use serde::Deserialize;
+use crate::video::{self, Format, FramePosition, Framing, Result};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     process::Command,
 };
+use tauri::{AppHandle, Manager};
 
 const FPS: f64 = 30.0;
 const MAX_TRANSITION_FRAMES: u32 = 15;
@@ -21,6 +22,8 @@ enum Transition {
 struct Bookend {
     path: PathBuf,
     transition: Transition,
+    duration: Option<f64>,
+    position: Option<FramePosition>,
 }
 
 #[derive(Default, Deserialize)]
@@ -34,29 +37,62 @@ struct Segment {
     path: PathBuf,
     frames: u32,
     audio: bool,
+    image: bool,
 }
 
 pub struct Assembly {
-    intro: Option<(Segment, Transition)>,
-    outro: Option<(Segment, Transition)>,
+    intro: Option<PreparedBookend>,
+    outro: Option<PreparedBookend>,
     source_audio: bool,
+}
+
+struct PreparedBookend {
+    segment: Segment,
+    transition: Transition,
+    filter: String,
 }
 
 pub fn resolve(
     bookends: &Bookends,
     cache: &mut AssetCache,
     source_audio: bool,
+    format: Format,
 ) -> Result<Option<Assembly>> {
-    let mut resolve = |bookend: &Bookend| {
+    let mut resolve = |bookend: &Bookend| -> Result<PreparedBookend> {
         let segment = cache.0.entry(bookend.path.clone()).or_insert_with(|| {
-            let info = video::probe(video::source(&bookend.path)?)?;
+            let image = is_image(&bookend.path);
+            let (duration, audio) = if image {
+                inspect_image(&bookend.path)?;
+                (0.0, false)
+            } else {
+                let info = video::probe(video::source(&bookend.path)?)?;
+                (info.duration, video::audio_stream(&bookend.path, None)?)
+            };
             Ok(Segment {
-                frames: frame_count(info.duration),
-                audio: video::audio_stream(&bookend.path, None)?,
+                frames: frame_count(duration),
+                audio,
+                image,
                 path: bookend.path.clone(),
             })
         });
-        segment.clone().map(|segment| (segment, bookend.transition))
+        let mut segment = segment.clone()?;
+        if segment.image {
+            let duration = bookend.duration.unwrap_or(2.0);
+            if !duration.is_finite() || !(0.5..=30.0).contains(&duration) {
+                return Err("Image duration must be between 0.5 and 30 seconds.".into());
+            }
+            segment.frames = frame_count(duration);
+        }
+        let filter = video::filter(
+            format,
+            Framing::Fit,
+            bookend.position.unwrap_or(FramePosition { x: 50, y: 50 }),
+        )?;
+        Ok(PreparedBookend {
+            segment,
+            transition: bookend.transition,
+            filter,
+        })
     };
     let intro = bookends.intro.as_ref().map(&mut resolve).transpose()?;
     let outro = bookends.outro.as_ref().map(resolve).transpose()?;
@@ -105,7 +141,6 @@ impl Assembly {
         duration: f64,
         main_video: &str,
         mixed_music: bool,
-        fit: &str,
     ) -> f64 {
         let main_frames = frame_count(duration);
         graph.push(video_filter(main_video, main_frames, "main_v"));
@@ -119,28 +154,28 @@ impl Assembly {
         let mut frames = main_frames;
         let mut video = "main_v";
         let mut audio = "main_a";
-        if let Some((intro, transition)) = &self.intro {
-            add_segment(cmd, graph, index, intro, fit, "intro");
+        if let Some(intro) = &self.intro {
+            add_segment(cmd, graph, index, intro, "intro");
             index += 1;
             frames = join(
                 graph,
-                ("intro_v", "intro_a", intro.frames),
+                ("intro_v", "intro_a", intro.segment.frames),
                 (video, audio, main_frames),
-                *transition,
-                overlap(*transition, intro.frames, main_frames),
+                intro.transition,
+                overlap(intro.transition, intro.segment.frames, main_frames),
                 ("joined_v", "joined_a"),
             );
             video = "joined_v";
             audio = "joined_a";
         }
-        if let Some((outro, transition)) = &self.outro {
-            add_segment(cmd, graph, index, outro, fit, "outro");
+        if let Some(outro) = &self.outro {
+            add_segment(cmd, graph, index, outro, "outro");
             frames = join(
                 graph,
                 (video, audio, frames),
-                ("outro_v", "outro_a", outro.frames),
-                *transition,
-                overlap(*transition, main_frames, outro.frames),
+                ("outro_v", "outro_a", outro.segment.frames),
+                outro.transition,
+                overlap(outro.transition, main_frames, outro.segment.frames),
                 ("final_v", "final_a"),
             );
         } else {
@@ -155,17 +190,34 @@ fn add_segment(
     cmd: &mut Command,
     graph: &mut Vec<String>,
     index: usize,
-    segment: &Segment,
-    fit: &str,
+    bookend: &PreparedBookend,
     name: &str,
 ) {
+    let segment = &bookend.segment;
     cmd.args(["-threads:v", "1"]);
+    if segment.image {
+        cmd.args([
+            "-f",
+            "image2",
+            "-pattern_type",
+            "none",
+            "-framerate",
+            "30",
+            "-format_whitelist",
+            "image2",
+        ]);
+    }
     video::input(cmd, &segment.path);
-    graph.push(video_filter(
-        &format!("[{index}:V:0]{fit},"),
-        segment.frames,
-        &format!("{name}_v"),
-    ));
+    let fit = &bookend.filter;
+    if segment.image {
+        graph.push(format!("[{index}:v:0]trim=end_frame=1,{fit},setsar=1,format=yuv420p,tpad=stop_mode=clone:stop={},settb=1/30,setpts=N[{name}_v]", segment.frames - 1));
+    } else {
+        graph.push(video_filter(
+            &format!("[{index}:V:0]{fit},"),
+            segment.frames,
+            &format!("{name}_v"),
+        ));
+    }
     let input = format!("[{index}:a:0]");
     graph.push(audio_filter(
         segment.audio.then_some(input.as_str()),
@@ -212,7 +264,68 @@ fn join(
     first_frames + second_frames - overlap
 }
 
+fn is_image(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            ["png", "jpg", "jpeg", "webp", "bmp"]
+                .iter()
+                .any(|allowed| ext.eq_ignore_ascii_case(allowed))
+        })
+}
+
+fn inspect_image(path: &Path) -> Result<()> {
+    if !path.is_absolute() || !path.is_file() {
+        return Err("Choose an existing image file.".into());
+    }
+    video::output(
+        video::command("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-nostdin",
+                "-xerror",
+                "-f",
+                "image2",
+                "-pattern_type",
+                "none",
+                "-format_whitelist",
+                "image2",
+            ])
+            .args(["-protocol_whitelist", "file", "-i"])
+            .arg(path)
+            .args(["-map", "0:v:0", "-frames:v", "1", "-f", "null", "-"]),
+        "ffmpeg",
+        "Could not read this image",
+    )?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+pub struct BookendInfo {
+    image: bool,
+    path: PathBuf,
+    name: String,
+}
+
 #[tauri::command]
-pub async fn inspect_bookend(path: PathBuf) -> Result<video::VideoInfo> {
-    video::background(move || video::probe(video::source(Path::new(&path))?)).await
+pub async fn inspect_bookend(app: AppHandle, path: PathBuf) -> Result<BookendInfo> {
+    video::background(move || {
+        let image = is_image(&path);
+        if image {
+            inspect_image(&path)?;
+            app.asset_protocol_scope()
+                .allow_file(&path)
+                .map_err(|error| error.to_string())?;
+        } else {
+            video::probe(video::source(&path)?)?;
+        }
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        Ok(BookendInfo { image, path, name })
+    })
+    .await
 }

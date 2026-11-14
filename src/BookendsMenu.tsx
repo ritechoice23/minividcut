@@ -1,7 +1,8 @@
-import { useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+import { useEffect, useRef, useState } from 'react'
+import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import { Clapperboard } from 'lucide-react'
+import { X } from 'lucide-react'
+import { CENTER, frameTravel, panPosition } from './framing'
 import { effectiveBookends, TRANSITIONS } from './bookends'
 import type { Bookend, Bookends } from './bookends'
 
@@ -10,10 +11,15 @@ type Props = {
   clip: { bookends?: Bookends; title: string } | null
   disabled: boolean
   videoExtensions: string[]
+  aspect: number
+  open: boolean
+  onClose: () => void
   onChange: (scope: 'project' | 'clip', end: keyof Bookends, value: Bookend | null | undefined) => void
 }
 
-export function BookendsMenu({ project, clip, disabled, videoExtensions, onChange }: Props) {
+const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp', 'bmp']
+
+export function BookendsMenu({ project, clip, disabled, videoExtensions, aspect, open: visible, onClose, onChange }: Props) {
   const [scope, setScope] = useState<'project' | 'clip'>('clip')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
@@ -29,10 +35,11 @@ export function BookendsMenu({ project, clip, disabled, videoExtensions, onChang
     }
     setPending(true)
     try {
-      const path = await open({ title: `Choose an ${end} video`, filters: [{ name: 'Video files', extensions: videoExtensions }] })
+      const path = await open({ title: `Choose ${end} media`,
+        filters: [{ name: 'Images and videos', extensions: [...IMAGE_EXTENSIONS, ...videoExtensions] }] })
       if (!path) return
-      const info = await invoke<{ path: string; name: string }>('inspect_bookend', { path })
-      onChange(target, end, { path: info.path, name: info.name, transition: active[end]?.transition ?? 'cut' })
+      const info = await invoke<Pick<Bookend, 'path' | 'name' | 'image'>>('inspect_bookend', { path })
+      onChange(target, end, { ...info, transition: active[end]?.transition ?? 'cut' })
     } catch (error) {
       setError(String(error))
     } finally {
@@ -40,14 +47,16 @@ export function BookendsMenu({ project, clip, disabled, videoExtensions, onChang
     }
   }
 
-  return <>
-    <button type="button" className="icon-button bookends-trigger" title="Intro and outro" aria-label="Intro and outro"
-      aria-haspopup="dialog" popoverTarget="bookends-menu" data-active={Boolean(active.intro || active.outro)} disabled={disabled}>
-      <Clapperboard size={17} />
-    </button>
-    <div id="bookends-menu" className="bookends-menu media-menu panel" popover="auto" role="dialog"
-      aria-label="Intro and outro" onKeyDown={event => event.stopPropagation()}>
-      <strong>Intro and outro</strong>
+  return <section id="bookends-menu" className="moment-panel editor-media-panel panel" hidden={!visible}
+      aria-labelledby="bookends-title" onKeyDown={event => {
+        event.stopPropagation()
+        if (event.key === 'Escape') onClose()
+      }}>
+      <header className="caption-style-heading">
+        <h2 id="bookends-title">Intro / Outro</h2>
+        <button type="button" className="icon-button compact" aria-label="Close intro and outro" onClick={onClose}><X size={16} /></button>
+      </header>
+      {visible && <div className="editor-media-fields">
       {clip && <label>Apply to
         <select aria-label="Apply to" value={target} disabled={disabled || pending}
           onChange={event => setScope(event.target.value === 'clip' ? 'clip' : 'project')}>
@@ -66,7 +75,7 @@ export function BookendsMenu({ project, clip, disabled, videoExtensions, onChang
               {target === 'clip' && <option value="inherit">Use project {end}</option>}
               <option value="off">No {end}</option>
               {selected && <option value="file" disabled>{selected.name}</option>}
-              <option value="browse">Choose a video…</option>
+              <option value="browse">Choose an image or video…</option>
             </select>
           </label>
           {transitionVideo && <label>{label} transition
@@ -78,11 +87,69 @@ export function BookendsMenu({ project, clip, disabled, videoExtensions, onChang
               {TRANSITIONS.map(item => <option key={item.value} value={item.value}>{item.name}</option>)}
             </select>
           </label>}
+          {transitionVideo?.image && <ImagePlacement key={transitionVideo.path} image={transitionVideo}
+            label={label} aspect={aspect} disabled={disabled || pending}
+            onChange={image => onChange(target, end, image)} />}
         </div>
       })}
       <small>Added when you export.</small>
       {pending && <small role="status">Opening video…</small>}
       {error && <small role="alert">{error}</small>}
+      </div>}
+    </section>
+}
+
+function ImagePlacement({ image, label, aspect, disabled, onChange }: {
+  image: Bookend; label: string; aspect: number; disabled: boolean; onChange: (image: Bookend) => void
+}) {
+  const [ready, setReady] = useState(false)
+  const [imageAspect, setImageAspect] = useState(0)
+  const [error, setError] = useState('')
+  const drag = useRef<{ x: number; y: number; position: typeof CENTER } | null>(null)
+  const path = image.path
+  const position = image.position ?? CENTER
+  const travel = imageAspect ? frameTravel(aspect, 1, imageAspect, 'fit') : { x: 0, y: 0 }
+  const axis = Math.abs(travel.x) > 0.001 ? 'x' : Math.abs(travel.y) > 0.001 ? 'y' : null
+
+  useEffect(() => {
+    let current = true
+    void invoke('inspect_bookend', { path }).then(() => {
+      if (current) setReady(true)
+    }).catch(error => {
+      if (current) setError(String(error))
+    })
+    return () => { current = false }
+  }, [path])
+
+  return <>
+    <div className="bookend-image" style={{ aspectRatio: aspect, maxWidth: `${175 * aspect}px` }} data-draggable={Boolean(axis && !disabled)}
+      onPointerDown={event => {
+        if (disabled || !axis || event.button !== 0) return
+        drag.current = { x: event.clientX, y: event.clientY, position }
+        event.currentTarget.setPointerCapture(event.pointerId)
+      }}
+      onPointerMove={event => {
+        const start = drag.current
+        if (disabled || !start || !event.currentTarget.hasPointerCapture(event.pointerId)) return
+        const height = event.currentTarget.clientHeight
+        if (!height) return
+        onChange({ ...image, position: panPosition(start.position, travel, (event.clientX - start.x) / height, (event.clientY - start.y) / height) })
+      }} onLostPointerCapture={() => { drag.current = null }}>
+      {ready && <img src={convertFileSrc(path)} alt={`${label} placement preview`} draggable={false}
+        style={{ objectPosition: `${position.x}% ${position.y}%` }} onLoad={event => {
+          setImageAspect(event.currentTarget.naturalWidth / event.currentTarget.naturalHeight)
+        }} onError={() => setError('Could not display the image preview.')} />}
     </div>
+    {axis && <label>{axis === 'x' ? 'Horizontal position' : 'Vertical position'}
+      <input aria-label={`${label} position`} type="range" min={0} max={100} value={position[axis]} disabled={disabled}
+        onChange={event => onChange({ ...image, position: { ...position, [axis]: event.target.valueAsNumber } })} />
+    </label>}
+    <label>Image duration
+      <select aria-label={`${label} image duration`} value={image.duration ?? 2} disabled={disabled}
+        onChange={event => onChange({ ...image, duration: Number(event.target.value) })}>
+        {[0.5, 1, 2, 3, 5, 8, 10].map(seconds => <option key={seconds} value={seconds}>{seconds} s</option>)}
+      </select>
+    </label>
+    {error && <small role="alert">{error}</small>}
   </>
 }

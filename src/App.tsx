@@ -6,7 +6,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { confirm, open } from '@tauri-apps/plugin-dialog'
 import {
   ArrowDownToLine, Check, ChevronDown, ChevronLeft, ChevronRight, Clapperboard, Copy, Ellipsis, FastForward, Film, FolderOpen, Rewind,
-  Keyboard, LoaderCircle, Minus, Monitor, Move, Pause, Pencil, Play, Plus, RotateCcw, Scissors, Smartphone, Square,
+  Keyboard, LoaderCircle, Minus, Monitor, Move, Music2, Pause, Pencil, Play, Plus, RotateCcw, Scissors, Smartphone, Square,
   ScissorsLineDashed, Settings as SettingsIcon, Sparkles, Split, Subtitles, Trash2, Volume2, VolumeX, X, ZoomIn, ZoomOut,
 } from 'lucide-react'
 import { clipDuration, cutRange, MAX_CLIPS, moveBoundary, parseTime, rangesOverlap, splitRange, stamp, validRange } from './clip'
@@ -173,6 +173,7 @@ export function App() {
   const [sections, setSections] = useState<Range[]>([])
   const [momentsOpen, setMomentsOpen] = useState(false)
   const [styleDockKey, setStyleDockKey] = useState<string | null>(null)
+  const [mediaDock, setMediaDock] = useState<'music' | 'bookends' | null>(null)
   const [wideWorkspace, setWideWorkspace] = useState(() => matchMedia('(min-width: 1120px)').matches)
   const momentsTrigger = useRef<HTMLButtonElement>(null)
   const [moments, setMoments] = useState<Moment[]>([])
@@ -425,6 +426,7 @@ export function App() {
       setMomentStatus('')
       setMomentsOpen(false)
       setStyleDockKey(null)
+      setMediaDock(current => draft ? null : current)
       playingMoment.current = null
       setRecovery(null)
       if (captionJob.current && !captionJob.current.cancelled) {
@@ -1480,7 +1482,16 @@ export function App() {
     : reviewed ? `Section ${(reviewIndex ?? 0) + 1}` : 'Current range'
   const showCaptionEditor = captionsOpen && !trimDisabled && canSaveRange
   const styleDockOpen = showCaptionEditor && styleDockKey === captionKey && Boolean(activeCaptions?.cues.length)
-  const dockOpen = styleDockOpen || momentsOpen
+  const dockOpen = styleDockOpen || momentsOpen || Boolean(mediaDock)
+  const openMediaDock = (dock: 'music' | 'bookends') => {
+    setMomentsOpen(false)
+    setStyleDockKey(null)
+    setMediaDock(current => current === dock ? null : dock)
+  }
+  const closeMediaDock = (dock: 'music' | 'bookends') => {
+    setMediaDock(null)
+    requestAnimationFrame(() => document.getElementById(`${dock}-trigger`)?.focus())
+  }
   const closeStyleDock = () => {
     setStyleDockKey(null)
     requestAnimationFrame(() => document.getElementById('caption-style-trigger')?.focus())
@@ -1509,13 +1520,14 @@ export function App() {
         <button className="icon-button settings-trigger" aria-label="Settings" title="Settings"
           aria-pressed={settingsOpen} onClick={() => setSettingsOpen(open => !open)}><SettingsIcon size={16} /></button>
         <div className="export-toolbar">
-          <MusicMenu key={`music-${musicSourceRevision}`} project={projectMusic}
-            clip={selectedClip ? { music: selectedClip.music, title: selectedClip.title || 'Selected clip' } : null}
-            disabled={disabled || busy} canPreview={canMixPreview && Boolean(musicPath) && validRange(range, duration)}
-            playing={playing} onPreview={playMusicMix} onChange={changeMusic} />
-          <BookendsMenu key={`bookends-${musicSourceRevision}`} project={projectBookends}
-            clip={selectedClip ? { bookends: selectedClip.bookends, title: selectedClip.title || 'Selected clip' } : null}
-            disabled={disabled || busy} videoExtensions={EXTENSIONS} onChange={changeBookend} />
+          <button id="music-trigger" className="button outline small media-trigger" aria-controls="music-menu"
+            aria-expanded={mediaDock === 'music'} onClick={() => openMediaDock('music')}>
+            <Music2 size={14} /> Background music
+          </button>
+          <button id="bookends-trigger" className="button outline small media-trigger" aria-controls="bookends-menu"
+            aria-expanded={mediaDock === 'bookends'} disabled={disabled || busy} onClick={() => openMediaDock('bookends')}>
+            <Clapperboard size={14} /> Intro / Outro
+          </button>
           {busy && <div className="export-ring" role="progressbar" aria-label="Export progress"
             aria-valuenow={summary?.percent ?? 0} title={`Exporting · ${summary?.percent ?? 0}%`}>
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1719,7 +1731,7 @@ export function App() {
               <Subtitles size={16} /> Captions {captionsRunning && <LoaderCircle size={13} className="spin" aria-label="Generating captions" />}
             </button>
             {!wideWorkspace && <button type="button" role="tab" aria-selected={false} tabIndex={-1}
-              disabled={!source || loading} aria-controls="moment-panel" onClick={() => setMomentsOpen(true)}>Smart Split</button>}
+              disabled={!source || loading} aria-controls="moment-panel" onClick={() => { setMediaDock(null); setMomentsOpen(true) }}>Smart Split</button>}
           </div>
           <div className="sidebar-content" id="captions-panel" role="tabpanel" aria-labelledby="captions-tab" hidden={!captionsOpen}>
             {showCaptionEditor ? <CaptionEditor key={captionKey} label={captionLabel} range={range} track={activeCaptions}
@@ -1729,6 +1741,7 @@ export function App() {
             if (styleDockOpen) closeStyleDock()
             else {
               setMomentsOpen(false)
+              setMediaDock(null)
               setStyleDockKey(captionKey)
               requestAnimationFrame(() => document.getElementById('caption-style-title')?.focus())
             }
@@ -1834,6 +1847,12 @@ export function App() {
                     <Sparkles size={15} /> {clip.title ? 'Retitle with AI' : 'Title with AI'}
                   </button>
                   <button onClick={() => { setClipActions(null); setRenaming(clip.id) }}><Pencil size={14} /> Edit title</button>
+                  <button disabled={busy || clips.length >= MAX_CLIPS} onClick={() => {
+                    const copy = { ...clip, id: nextId.current++, title: clip.title ? `${clip.title.slice(0, 73)} (copy)` : undefined }
+                    setClips(items => items.flatMap(item => item.id === clip.id ? [item, copy] : [item]))
+                    setClipActions(null)
+                    selectClip(copy)
+                  }}><Copy size={14} /> Duplicate clip</button>
                   <button disabled={captionJob.current?.keys.has(`clip-${clip.id}`)} onClick={() => {
                     setClipActions(null)
                     setClips(items => items.filter(item => item.id !== clip.id))
@@ -1845,6 +1864,15 @@ export function App() {
             })}</ol>}
           </div>
         </aside>
+          <MusicMenu key={`music-${musicSourceRevision}`} project={projectMusic}
+            clip={selectedClip ? { music: selectedClip.music, title: selectedClip.title || 'Selected clip' } : null}
+            open={mediaDock === 'music'} onClose={() => closeMediaDock('music')}
+            disabled={disabled || busy} canPreview={canMixPreview && Boolean(musicPath) && validRange(range, duration)}
+            playing={playing} onPreview={playMusicMix} onChange={changeMusic} />
+          <BookendsMenu key={`bookends-${musicSourceRevision}`} project={projectBookends}
+            clip={selectedClip ? { bookends: selectedClip.bookends, title: selectedClip.title || 'Selected clip' } : null}
+            open={mediaDock === 'bookends'} onClose={() => closeMediaDock('bookends')}
+            aspect={activeFormat.aspect} disabled={disabled || busy} videoExtensions={EXTENSIONS} onChange={changeBookend} />
           {styleDockOpen && activeCaptions && <CaptionStylePanel key={captionKey} style={activeCaptions.style}
             format={format} editing={editingCaptionJob} canApplyStyle={!busy && !captionsRunning}
             onStyle={saveCaptionStyle} onApplyStyle={applyCaptionStyle} onClose={closeStyleDock} />}
@@ -1925,7 +1953,7 @@ export function App() {
             </div>
             <button ref={momentsTrigger} className="button outline small smart-split" disabled={disabled}
               aria-expanded={momentsOpen} aria-controls="moment-panel"
-              onClick={() => { setSplitOpen(false); setStyleDockKey(null); setMomentsOpen(open => !open) }}><Sparkles size={14} /> Smart Split</button>
+              onClick={() => { setSplitOpen(false); setStyleDockKey(null); setMediaDock(null); setMomentsOpen(open => !open) }}><Sparkles size={14} /> Smart Split</button>
             <div className="split">
               <button className="button outline small" disabled={trimDisabled || !canSaveRange || editingCaptionJob} onClick={() => setSplitOpen(!splitOpen)} aria-expanded={splitOpen}><Split size={15} /> Split range <ChevronDown size={13} /></button>
               {splitOpen && canSaveRange && !trimDisabled && <div className="split-menu">

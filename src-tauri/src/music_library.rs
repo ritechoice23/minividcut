@@ -2,6 +2,14 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{fs, io::Write, path::PathBuf, time::Duration};
 use tauri::{ipc::Channel, AppHandle, Manager};
+use tauri_plugin_opener::OpenerExt;
+
+#[tauri::command]
+pub fn browse_mixkit(app: AppHandle) -> Result<()> {
+    app.opener()
+        .open_url("https://mixkit.co/free-stock-music/", None::<&str>)
+        .map_err(|error| error.to_string())
+}
 
 type Result<T> = std::result::Result<T, String>;
 

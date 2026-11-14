@@ -32,6 +32,7 @@ pub fn run() {
             bookends::inspect_bookend,
             music_library::music_library,
             music_library::download_music,
+            music_library::browse_mixkit,
             video::thumbnails,
             video::clip_thumbnail,
             video::prepare_preview,

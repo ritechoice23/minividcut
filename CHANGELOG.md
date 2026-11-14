@@ -5,6 +5,9 @@
 - Add background music to all clips or choose a different track for an individual clip. Preview the mix and adjust its volume. Tracks loop automatically through the end of each export.
 - Download four optional CC0 tracks from the music library for offline use, or import a local audio file.
 - Add custom intro and outro videos to all clips or to individual clips. Choose a cut, crossfade, or slide for each end.
+- Use a still image for an intro or outro, choose its duration, and position it in a preview of the output frame.
+- Open Background music and Intro / Outro beside the player. Browse Mixkit in your browser and import downloaded tracks.
+- Duplicate clips from the clip actions menu.
 
 ## 0.5.0 — 2026-11-14
 

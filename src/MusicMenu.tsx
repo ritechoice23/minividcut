@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Channel, invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import { Music2, Pause, Play } from 'lucide-react'
+import { ExternalLink, Pause, Play, X } from 'lucide-react'
 import { DEFAULT_MUSIC_VOLUME, effectiveMusic, MUSIC_LIBRARY } from './music'
 import type { Music, MusicTrack } from './music'
 import { fileSize } from './export-progress'
@@ -12,6 +12,8 @@ type Props = {
   disabled: boolean
   canPreview: boolean
   playing: boolean
+  open: boolean
+  onClose: () => void
   onPreview: () => void
   onChange: (scope: 'project' | 'clip', music: Music | null | undefined, path?: string) => void
 }
@@ -19,7 +21,7 @@ type Props = {
 const AUDIO_EXTENSIONS = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus']
 type TrackStatus = { id: string; installed: boolean; bytes: number }
 
-export function MusicMenu({ project, clip, disabled, canPreview, playing, onPreview, onChange }: Props) {
+export function MusicMenu({ project, clip, disabled, canPreview, playing, open: visible, onClose, onPreview, onChange }: Props) {
   const [scope, setScope] = useState<'project' | 'clip'>('clip')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
@@ -91,14 +93,16 @@ export function MusicMenu({ project, clip, disabled, canPreview, playing, onPrev
     }
   }
 
-  return <>
-    <button type="button" className="icon-button music-trigger" title="Background music" aria-label="Background music"
-      aria-haspopup="dialog" popoverTarget="music-menu" data-active={Boolean(active)}>
-      <Music2 size={17} />
-    </button>
-    <div id="music-menu" className="music-menu media-menu panel" popover="auto" role="dialog"
-      aria-label="Background music" onKeyDown={event => event.stopPropagation()}>
-      <strong>Background music</strong>
+  return <section id="music-menu" className="moment-panel editor-media-panel panel" hidden={!visible}
+      aria-labelledby="music-title" onKeyDown={event => {
+        event.stopPropagation()
+        if (event.key === 'Escape') onClose()
+      }}>
+      <header className="caption-style-heading">
+        <h2 id="music-title">Background music</h2>
+        <button type="button" className="icon-button compact" aria-label="Close background music" onClick={onClose}><X size={16} /></button>
+      </header>
+      <div className="editor-media-fields">
       {clip && <label>Apply to
         <select aria-label="Apply to" value={target} disabled={pending} onChange={event => {
           setScope(event.target.value === 'clip' ? 'clip' : 'project')
@@ -144,9 +148,13 @@ export function MusicMenu({ project, clip, disabled, canPreview, playing, onPrev
           </div>
         })}
         {download && <small role="status">Downloading {MUSIC_LIBRARY.find(track => track.id === download.id)?.name}…</small>}
+        <button type="button" className="text-button media-library-trigger" onClick={() => {
+          void invoke('browse_mixkit').catch(error => setError(String(error)))
+        }}><ExternalLink size={13} /> Browse Mixkit</button>
+        <small>Download on Mixkit, then choose the audio file here.</small>
       </div>}
       {pending && <small role="status">Opening track…</small>}
       {error && <small role="alert">{error}</small>}
-    </div>
-  </>
+      </div>
+    </section>
 }

@@ -36,6 +36,8 @@ struct PreviewState {
     frame_rate: f64,
     request: u64,
     folder: Option<tempfile::TempDir>,
+    sequence: Option<(String, Arc<AtomicBool>)>,
+    sequence_folder: Option<tempfile::TempDir>,
 }
 
 #[derive(Default)]
@@ -465,6 +467,10 @@ pub async fn open_video(
         preview.source = Some(video.path.clone());
         preview.frame_rate = video.frame_rate;
         preview.folder = None;
+        if let Some((_, cancel)) = preview.sequence.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        preview.sequence_folder = None;
         Ok(video)
     })
     .await
@@ -522,7 +528,7 @@ pub(crate) fn input<'a>(cmd: &'a mut Command, path: &Path) -> &'a mut Command {
 
 const MUSIC_FORMATS: &str = "mp3,wav,flac,ogg,opus,aac,mov,mp4,m4a,3gp,3g2,mj2";
 
-#[derive(Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Deserialize, PartialEq, Eq, Hash)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum MusicTrack {
     Library { id: String },
@@ -892,7 +898,7 @@ fn encode_with(
     destination: &Path,
     captions: CaptionLayers<'_>,
     music: Option<&MusicMix>,
-    assembly: Option<&Assembly>,
+    assembly: Option<(&Assembly, Option<&str>)>,
     cancel: &AtomicBool,
     on_progress: impl Fn(f64),
 ) -> Result<()> {
@@ -970,21 +976,25 @@ fn encode_with(
             graph.push(format!("{level}[mixed]"));
         }
     }
-    let duration = if let Some(assembly) = assembly {
+    let duration = if let Some((assembly, preview_scale)) = assembly {
         let main_video = if captions.overlay.is_some() {
             "[captioned]"
         } else {
             graph.push(format!("[0:V:0]{filter}[framed]"));
             "[framed]"
         };
-        assembly.append(
+        let assembled_duration = assembly.append(
             &mut cmd,
             &mut graph,
             next_input,
             duration,
             main_video,
             music.is_some(),
-        )
+        );
+        if let Some(scale) = preview_scale {
+            graph.push(format!("[final_v]{scale}[preview_v]"));
+        }
+        assembled_duration
     } else {
         duration
     };
@@ -996,8 +1006,15 @@ fn encode_with(
             &graph.join(";"),
         ]);
     }
-    if assembly.is_some() {
-        cmd.args(["-map", "[final_v]"]);
+    if let Some((_, preview_scale)) = assembly {
+        cmd.args([
+            "-map",
+            if preview_scale.is_some() {
+                "[preview_v]"
+            } else {
+                "[final_v]"
+            },
+        ]);
     } else if captions.overlay.is_some() {
         cmd.args(["-map", "[captioned]"]);
     } else {
@@ -1171,6 +1188,137 @@ struct ClipMedia {
     assembly: Option<Assembly>,
 }
 
+fn resolve_clip_media(
+    app: &AppHandle,
+    clip: &ExportClip,
+    assets: &mut AssetCache,
+    music_paths: &mut HashMap<MusicTrack, Result<PathBuf>>,
+    source_audio: bool,
+    format: Format,
+) -> Result<ClipMedia> {
+    let music = clip
+        .music
+        .as_ref()
+        .filter(|music| music.volume > 0)
+        .map(|music| -> Result<MusicMix> {
+            if music.volume > 100 {
+                return Err("Music volume must be between 0 and 100%.".into());
+            }
+            let path = music_paths
+                .entry(music.track.clone())
+                .or_insert_with(|| music.track.path(app))
+                .clone()?;
+            Ok(MusicMix {
+                path,
+                volume: music.volume,
+                source_audio,
+            })
+        })
+        .transpose()?;
+    let assembly = bookends::resolve(&clip.bookends, assets, source_audio, format)?;
+    Ok(ClipMedia { music, assembly })
+}
+
+#[tauri::command]
+pub async fn prepare_sequence_preview(
+    app: AppHandle,
+    path: PathBuf,
+    mut clip: ExportClip,
+    options: ExportOptions,
+    request: String,
+) -> Result<PathBuf> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let previews = app.state::<PreviewFiles>();
+        let mut state = previews.0.lock().map_err(|error| error.to_string())?;
+        if state.source.as_ref() != Some(&path) {
+            return Err("The source video changed.".into());
+        }
+        if let Some((_, previous)) = state.sequence.replace((request.clone(), cancel.clone())) {
+            previous.store(true, Ordering::Relaxed);
+        }
+    }
+    background(move || {
+        let result = (|| -> Result<(tempfile::TempDir, PathBuf)> {
+            check_export(&cancel)?;
+            let info = probe(source(&path)?)?;
+            validate_clips(std::slice::from_mut(&mut clip.range), info.duration)?;
+            let framed = filter(options.format, options.framing, options.position)?;
+            let media = resolve_clip_media(
+                &app,
+                &clip,
+                &mut AssetCache::default(),
+                &mut HashMap::new(),
+                audio_stream(&path, None)?,
+                options.format,
+            )?;
+            let overlay = clip
+                .overlay_id
+                .as_deref()
+                .map(|id| app.state::<CaptionOverlays>().take(id))
+                .transpose()?;
+            let (width, height) = match options.format {
+                Format::Landscape => (1920, 1080),
+                Format::Portrait => (1080, 1920),
+            };
+            if overlay
+                .as_ref()
+                .is_some_and(|overlay| !overlay.fits(width, height))
+            {
+                return Err("Caption artwork falls outside the preview frame.".into());
+            }
+            let folder = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let destination = folder.path().join("clip-preview.mp4");
+            let size = format!("scale={}:{}", width / 2, height / 2);
+            encode_with(
+                &path,
+                clip.range,
+                &framed,
+                &["-c:v", "libx264", "-preset", "ultrafast", "-crf", "25"],
+                &destination,
+                CaptionLayers {
+                    legacy: None,
+                    overlay: overlay.as_ref(),
+                },
+                media.music.as_ref(),
+                media
+                    .assembly
+                    .as_ref()
+                    .map(|assembly| (assembly, Some(size.as_str()))),
+                &cancel,
+                |_| {},
+            )?;
+            app.asset_protocol_scope()
+                .allow_file(&destination)
+                .map_err(|error| error.to_string())?;
+            Ok((folder, destination))
+        })();
+        let previews = app.state::<PreviewFiles>();
+        let mut state = previews.0.lock().map_err(|error| error.to_string())?;
+        if state.sequence.as_ref().is_none_or(|(id, _)| id != &request) {
+            return Err("The clip preview changed.".into());
+        }
+        state.sequence = None;
+        check_export(&cancel)?;
+        let (folder, path) = result?;
+        state.sequence_folder = Some(folder);
+        Ok(path)
+    })
+    .await
+}
+
+#[tauri::command]
+pub fn cancel_sequence_preview(app: AppHandle, request: String) -> Result<()> {
+    let previews = app.state::<PreviewFiles>();
+    let state = previews.0.lock().map_err(|error| error.to_string())?;
+    if let Some((id, cancel)) = &state.sequence {
+        if id == &request {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
+    Ok(())
+}
+
 fn encode_batch(
     path: &Path,
     folder: &Path,
@@ -1231,7 +1379,7 @@ fn encode_batch(
                     output.path(),
                     captions,
                     media.music.as_ref(),
-                    media.assembly.as_ref(),
+                    media.assembly.as_ref().map(|assembly| (assembly, None)),
                     cancel,
                     |fraction| {
                         if fraction > furthest.get() {
@@ -1352,34 +1500,14 @@ pub async fn export_clips(
             .iter()
             .map(|clip| {
                 check_export(&cancel)?;
-                let music = clip
-                    .music
-                    .as_ref()
-                    .filter(|music| music.volume > 0)
-                    .map(|music| -> Result<MusicMix> {
-                        if music.volume > 100 {
-                            return Err("Music volume must be between 0 and 100%.".into());
-                        }
-                        let path = music_paths
-                            .entry(&music.track)
-                            .or_insert_with(|| music.track.path(&app))
-                            .clone()?;
-                        Ok(MusicMix {
-                            path,
-                            volume: music.volume,
-                            source_audio,
-                        })
-                    })
-                    .transpose()?;
-                Ok(ClipMedia {
-                    music,
-                    assembly: bookends::resolve(
-                        &clip.bookends,
-                        &mut assets,
-                        source_audio,
-                        options.format,
-                    )?,
-                })
+                resolve_clip_media(
+                    &app,
+                    clip,
+                    &mut assets,
+                    &mut music_paths,
+                    source_audio,
+                    options.format,
+                )
             })
             .collect::<Vec<_>>();
         let results = encode_batch(
@@ -1933,7 +2061,7 @@ mod tests {
                     overlay: None,
                 },
                 None,
-                Some(&assembly),
+                Some((&assembly, None)),
                 &AtomicBool::new(false),
                 |_| {},
             )
@@ -2021,7 +2149,7 @@ mod tests {
                 overlay: None,
             },
             None,
-            Some(&assembly),
+            Some((&assembly, Some("scale=960:540"))),
             &AtomicBool::new(false),
             |_| {},
         )
@@ -2029,16 +2157,16 @@ mod tests {
         assert!((probe(destination.clone()).unwrap().duration - 2.0).abs() < 0.035);
         for (time, x, should_be_red) in [
             ("0.2", 32, true),
-            ("0.2", 1840, false),
+            ("0.2", 920, false),
             ("1.8", 32, false),
-            ("1.8", 1840, true),
+            ("1.8", 920, true),
         ] {
             let mut sample = ffmpeg();
             sample.args(["-ss", time]);
             let bytes = output(
                 input(&mut sample, &destination).args([
                     "-vf",
-                    &format!("crop=2:2:{x}:500,format=rgb24"),
+                    &format!("crop=2:2:{x}:250,format=rgb24"),
                     "-frames:v",
                     "1",
                     "-f",

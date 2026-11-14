@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import { X } from 'lucide-react'
+import { Play, X } from 'lucide-react'
 import { CENTER, frameTravel, panPosition } from './framing'
 import { effectiveBookends, TRANSITIONS } from './bookends'
 import type { Bookend, Bookends } from './bookends'
@@ -13,13 +13,15 @@ type Props = {
   videoExtensions: string[]
   aspect: number
   open: boolean
+  canPreview: boolean
+  onPreview: () => void
   onClose: () => void
   onChange: (scope: 'project' | 'clip', end: keyof Bookends, value: Bookend | null | undefined) => void
 }
 
 const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp', 'bmp']
 
-export function BookendsMenu({ project, clip, disabled, videoExtensions, aspect, open: visible, onClose, onChange }: Props) {
+export function BookendsMenu({ project, clip, disabled, videoExtensions, aspect, open: visible, canPreview, onPreview, onClose, onChange }: Props) {
   const [scope, setScope] = useState<'project' | 'clip'>('clip')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
@@ -78,22 +80,26 @@ export function BookendsMenu({ project, clip, disabled, videoExtensions, aspect,
               <option value="browse">Choose an image or video…</option>
             </select>
           </label>
-          {transitionVideo && <label>{label} transition
-            <select aria-label={`${label} transition`} value={transitionVideo.transition}
-              disabled={disabled || pending} onChange={event => {
+          <label>Transition
+            <select aria-label={`${label} transition`} value={transitionVideo?.transition ?? 'cut'}
+              disabled={disabled || pending || !transitionVideo} onChange={event => {
                 const transition = TRANSITIONS.find(item => item.value === event.target.value)?.value
-                if (transition) onChange(target, end, { ...transitionVideo, transition })
+                if (transition && transitionVideo) onChange(target, end, { ...transitionVideo, transition })
               }}>
               {TRANSITIONS.map(item => <option key={item.value} value={item.value}>{item.name}</option>)}
             </select>
-          </label>}
+          </label>
           {transitionVideo?.image && <ImagePlacement key={transitionVideo.path} image={transitionVideo}
             label={label} aspect={aspect} disabled={disabled || pending}
             onChange={image => onChange(target, end, image)} />}
         </div>
       })}
-      <small>Added when you export.</small>
-      {pending && <small role="status">Opening video…</small>}
+      <div className="bookend-actions">
+        <button type="button" className="button outline small" disabled={!canPreview || disabled || pending}
+          onClick={onPreview}><Play size={14} /> Preview full clip</button>
+        <button type="button" className="button primary small" onClick={onClose}>Done</button>
+      </div>
+      {pending && <small role="status">Opening media…</small>}
       {error && <small role="alert">{error}</small>}
       </div>}
     </section>
@@ -121,7 +127,7 @@ function ImagePlacement({ image, label, aspect, disabled, onChange }: {
     return () => { current = false }
   }, [path])
 
-  return <>
+  return <div className="bookend-placement">
     <div className="bookend-image" style={{ aspectRatio: aspect, maxWidth: `${175 * aspect}px` }} data-draggable={Boolean(axis && !disabled)}
       onPointerDown={event => {
         if (disabled || !axis || event.button !== 0) return
@@ -140,16 +146,18 @@ function ImagePlacement({ image, label, aspect, disabled, onChange }: {
           setImageAspect(event.currentTarget.naturalWidth / event.currentTarget.naturalHeight)
         }} onError={() => setError('Could not display the image preview.')} />}
     </div>
-    {axis && <label>{axis === 'x' ? 'Horizontal position' : 'Vertical position'}
-      <input aria-label={`${label} position`} type="range" min={0} max={100} value={position[axis]} disabled={disabled}
-        onChange={event => onChange({ ...image, position: { ...position, [axis]: event.target.valueAsNumber } })} />
-    </label>}
+    <div className="bookend-adjustments">
     <label>Image duration
       <select aria-label={`${label} image duration`} value={image.duration ?? 2} disabled={disabled}
         onChange={event => onChange({ ...image, duration: Number(event.target.value) })}>
         {[0.5, 1, 2, 3, 5, 8, 10].map(seconds => <option key={seconds} value={seconds}>{seconds} s</option>)}
       </select>
     </label>
+    {axis && <label>{axis === 'x' ? 'Horizontal position' : 'Vertical position'}
+      <input aria-label={`${label} position`} type="range" min={0} max={100} value={position[axis]} disabled={disabled}
+        onChange={event => onChange({ ...image, position: { ...position, [axis]: event.target.valueAsNumber } })} />
+    </label>}
+    </div>
     {error && <small role="alert">{error}</small>}
-  </>
+  </div>
 }

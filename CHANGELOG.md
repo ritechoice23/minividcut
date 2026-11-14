@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preview the full clip with its intro, outro, transitions, captions, and music. Playback places Play/Pause between the seek buttons and groups preview volume with mute.
+
 - Search Kaino's CC0 music catalog and download individual tracks on demand. Reuse downloads offline or remove them from the music panel.
 
 - Add background music to all clips or choose a different track for an individual clip. Preview the mix and adjust its volume. Tracks loop automatically through the end of each export.

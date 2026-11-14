@@ -31,6 +31,7 @@ import { effectiveMusic, musicPosition } from './music'
 import type { Music, MusicTrack } from './music'
 import { BookendsMenu } from './BookendsMenu'
 import { effectiveBookends } from './bookends'
+import { useSequencePreview } from './sequence-preview'
 import type { Bookend, Bookends } from './bookends'
 
 type VideoInfo = { path: string; name: string; duration: number; width: number; height: number; bytes: number }
@@ -140,6 +141,9 @@ export function App() {
   const timelineBody = useRef<HTMLDivElement>(null)
   const [playing, setPlaying] = useState(false)
   const [muted, setMuted] = useState(false)
+  const [previewVolume, setPreviewVolume] = useState(100)
+  const [sequenceClock, setSequenceClock] = useState({ time: 0, duration: 0 })
+  const [sequencePlaying, setSequencePlaying] = useState(false)
   const [projectMusic, setProjectMusic] = useState<Music | null>(null)
   const [musicCacheRevision, setMusicCacheRevision] = useState(0)
   const [projectBookends, setProjectBookends] = useState<Bookends>({})
@@ -357,7 +361,7 @@ export function App() {
     const audio = musicPlayer.current
     const player = video.current
     if (!audio || !player) return
-    audio.volume = (activeMusic?.volume ?? 0) / 100
+    audio.volume = (activeMusic?.volume ?? 0) * previewVolume / 10_000
     audio.muted = muted
     if (audio.readyState === 0) return
     const target = musicPosition(player.currentTime, range.start, audio.duration)
@@ -371,7 +375,7 @@ export function App() {
         if (error?.name !== 'AbortError') setNotice('Could not play the music preview.')
       })
     }
-  }, [activeMusic?.volume, muted, range.start, range.end])
+  }, [activeMusic?.volume, muted, previewVolume, range.start, range.end])
 
   useEffect(() => {
     syncMusic()
@@ -398,6 +402,21 @@ export function App() {
   const captionKey = selectedClip ? `clip-${selectedClip.id}` : reviewed ? `section-${reviewed.start}-${reviewed.end}` : 'range'
   const currentCaptions = selectedClip ? selectedClip.captions : draftCaptions[captionKey]
   const activeCaptions = useMemo(() => captionSlice(currentCaptions, range), [currentCaptions, range])
+  const bookends = useMemo(() => effectiveBookends(projectBookends, selectedClip?.bookends), [projectBookends, selectedClip?.bookends])
+  const sequenceKey = useMemo(() => source && (bookends.intro || bookends.outro)
+    ? JSON.stringify([musicSourceRevision, selectedId, range.start, range.end, format, framing, position, activeCaptions, activeMusic, bookends, musicCacheRevision])
+    : '', [source, musicSourceRevision, selectedId, range.start, range.end, format, framing, position, activeCaptions, activeMusic, bookends, musicCacheRevision])
+  const sequence = useSequencePreview(sequenceKey, setNotice)
+  const stopSequence = sequence.stop
+  const sequenceActive = Boolean(sequence.path || sequence.preparing)
+  const playerPlaying = sequence.path ? sequencePlaying : playing
+  useEffect(() => {
+    if (loading || settingsOpen) stopSequence()
+  }, [loading, settingsOpen, stopSequence])
+  useEffect(() => {
+    if (video.current) video.current.volume = previewVolume / 100
+    if (sequence.player.current) sequence.player.current.volume = previewVolume / 100
+  }, [previewVolume, previewPath, sequence.path, sequence.player])
   const captionsRunning = captionProgress !== null
   const hasDraftCaptions = Object.values(draftCaptions).some(track => track?.cues.length)
 
@@ -572,11 +591,12 @@ export function App() {
 
   const seek = useCallback((position: number) => {
     if (!source) return
+    stopSequence()
     const next = Math.min(duration, Math.max(0, position))
     const player = video.current
     if (player && player.readyState > 0) player.currentTime = Math.min(next, player.duration)
     setTime(next)
-  }, [source, duration])
+  }, [source, duration, stopSequence])
 
   const refreshCaptionModel = useCallback(async () => {
     const info = await invoke<CaptionModel>('caption_model')
@@ -814,7 +834,39 @@ export function App() {
 
   const captionPlayhead = useCallback(() => video.current?.currentTime ?? range.start, [range.start])
 
+  const playSequence = () => {
+    if (!source || !validRange(range, duration) || !sequenceKey) return
+    video.current?.pause()
+    musicPlayer.current?.pause()
+    setSequenceClock({ time: 0, duration: 0 })
+    setSequencePlaying(false)
+    setNotice('')
+    void sequence.play({
+      path: source.path, range, captions: currentCaptions, music: activeMusic, bookends,
+      options: { format, framing, position },
+    })
+  }
+
+  const toggleSequence = () => {
+    if (sequence.preparing) {
+      stopSequence()
+      return
+    }
+    const player = sequence.player.current
+    if (!player) return
+    if (player.paused) void player.play().catch(error => setNotice(message(error)))
+    else player.pause()
+  }
+
   const togglePlay = () => {
+    if (sequenceActive) {
+      toggleSequence()
+      return
+    }
+    if (sequenceKey && validRange(range, duration) && !loading) {
+      playSequence()
+      return
+    }
     const player = video.current
     if (!player || !source || loading) return
     if (!player.paused) {
@@ -840,6 +892,10 @@ export function App() {
   }
 
   const playMusicMix = () => {
+    if (sequenceActive || sequenceKey) {
+      togglePlay()
+      return
+    }
     const player = video.current
     if (!player) return
     if (!player.paused) {
@@ -851,6 +907,13 @@ export function App() {
     void player.play().catch(error => {
       if (error?.name !== 'AbortError') setNotice(message(error))
     })
+  }
+
+  const seekPlayback = (offset: number) => {
+    const player = sequence.player.current
+    if (player && player.readyState > 0) {
+      player.currentTime = Math.max(0, Math.min(player.duration, player.currentTime + offset))
+    } else if (!sequence.preparing) seek(time + offset)
   }
 
   function stopMomentSearch() {
@@ -1382,7 +1445,7 @@ export function App() {
       if (key === 'arrowleft' || key === 'arrowright') {
         if (!target?.closest('input[type="range"]')) {
           event.preventDefault()
-          seek(time + (key === 'arrowleft' ? -1 : 1) * (event.shiftKey ? 5 : 1))
+          seekPlayback((key === 'arrowleft' ? -1 : 1) * (event.shiftKey ? 5 : 1))
         }
         return
       }
@@ -1391,9 +1454,9 @@ export function App() {
       }
     }
     const playbackShortcut = (event: KeyboardEvent) => {
-      if ((event.key !== ' ' && event.code !== 'Space') || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || !video.current) return
+      if ((event.key !== ' ' && event.code !== 'Space') || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || !source || settingsOpen) return
       const target = event.target instanceof Element ? event.target : null
-      if (isTextEditing(target)) return
+      if (isTextEditing(target) || target?.closest('button, select, input[type="range"], a')) return
       event.preventDefault()
       event.stopPropagation()
       if (!event.repeat) togglePlay()
@@ -1606,15 +1669,15 @@ export function App() {
             {hasSource ? (
               <>
                 <div className={`canvas ${format} ${canPosition ? 'can-pan' : ''} ${panning ? 'panning' : ''}`}
-                  onPointerDown={startPan} onPointerMove={movePan} onLostPointerCapture={endPan}>
+                  onPointerDown={sequenceActive ? undefined : startPan} onPointerMove={movePan} onLostPointerCapture={endPan}>
                   {preview !== 'preparing' && preview !== 'unavailable' && (
                     <video key={`${sourceRequest.current}:${previewPath}`} ref={video} className={framing} src={convertFileSrc(previewPath)} muted={muted}
-                      preload="auto" playsInline style={{ objectPosition }}
+                      preload="auto" playsInline hidden={Boolean(sequence.path)} style={{ objectPosition }}
                       onClick={canPosition ? undefined : togglePlay}
                       onLoadedMetadata={event => {
                         const { videoWidth, videoHeight } = event.currentTarget
                         setPreviewAspect(videoHeight > 0 ? videoWidth / videoHeight : 0)
-                        seek(time)
+                        event.currentTarget.currentTime = Math.min(time, event.currentTarget.duration)
                       }}
                       onTimeUpdate={event => {
                         const player = event.currentTarget
@@ -1637,13 +1700,31 @@ export function App() {
                     src={convertFileSrc(musicPath)} preload="metadata" loop
                     onLoadedMetadata={() => syncMusic(true)}
                     onError={() => setNotice('This track could not play in preview. You can still export it.')} />}
-                  {activeCaptions && activeCaptions.cues.length > 0 && preview !== 'preparing' && preview !== 'unavailable' &&
+                  {!sequence.path && activeCaptions && activeCaptions.cues.length > 0 && preview !== 'preparing' && preview !== 'unavailable' &&
                     <CaptionPreview key={previewPath} track={activeCaptions} format={format} video={video} time={time}
                       editable={showCaptionEditor && !editingCaptionJob} onStyle={saveCaptionStyle} />}
+                  {sequence.path && <video key={sequence.path} ref={sequence.player} className="sequence-video fit"
+                    src={convertFileSrc(sequence.path)} autoPlay playsInline muted={muted} onClick={toggleSequence}
+                    aria-label="Full clip preview" onLoadedMetadata={event => {
+                      const player = event.currentTarget
+                      player.volume = previewVolume / 100
+                      setSequenceClock({ time: 0, duration: player.duration })
+                    }} onTimeUpdate={event => {
+                      const player = event.currentTarget
+                      setSequenceClock({ time: player.currentTime, duration: player.duration })
+                    }} onPlay={() => setSequencePlaying(true)} onPause={() => setSequencePlaying(false)}
+                    onEnded={() => setSequencePlaying(false)} onError={() => {
+                      stopSequence()
+                      setNotice('Could not play the full clip preview.')
+                    }} />}
                 </div>
-                {(preview === 'preparing' || preview === 'unavailable') && <div className="stage-message">
+                {!sequenceActive && (preview === 'preparing' || preview === 'unavailable') && <div className="stage-message">
                   {preview === 'preparing' && <LoaderCircle size={24} className="spin" />}
                   {preview === 'preparing' ? 'Preparing a playable preview…' : 'Preview unavailable. You can still set times and export.'}
+                </div>}
+                {sequence.preparing && <div className="stage-message" role="status">
+                  <LoaderCircle size={22} className="spin" /> Preparing full clip preview…
+                  <button className="button outline small" onClick={stopSequence}>Cancel</button>
                 </div>}
               </>
             ) : (
@@ -1665,17 +1746,18 @@ export function App() {
             {dragging && <div className="drop-overlay"><FolderOpen size={28} /> Drop to open video</div>}
           </div>
           <div className="transport">
-            <div className="transport-playback">
-            <button className="icon-button play" aria-label={playing ? 'Pause' : 'Play'} title="Play / pause (Space)" onClick={togglePlay} disabled={!source || preview === 'preparing' || preview === 'unavailable'}>
-              {playing ? <Pause size={19} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
+            <div className="transport-playback" role="group" aria-label="Playback">
+            <button className="icon-button compact" aria-label="Seek back 5 seconds" title="Back 5 seconds" disabled={disabled} onClick={() => seekPlayback(-5)}><Rewind size={15} /></button>
+            <button className="icon-button compact" aria-label="Seek back 1 second" title="Back 1 second" disabled={disabled} onClick={() => seekPlayback(-1)}><ChevronLeft size={16} /></button>
+            <button className="icon-button play" aria-label={sequence.preparing ? 'Cancel clip preview' : playerPlaying ? 'Pause' : 'Play'} title="Play / pause (Space)"
+              onClick={togglePlay} disabled={!source || (!sequenceKey && !canMixPreview)}>
+              {sequence.preparing ? <Square size={14} /> : playerPlaying ? <Pause size={19} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
             </button>
-            <span className="clock"><strong>{stamp(time, true)}</strong><span>/</span>{stamp(duration)}</span>
+            <button className="icon-button compact" aria-label="Seek forward 1 second" title="Forward 1 second" disabled={disabled} onClick={() => seekPlayback(1)}><ChevronRight size={16} /></button>
+            <button className="icon-button compact" aria-label="Seek forward 5 seconds" title="Forward 5 seconds" disabled={disabled} onClick={() => seekPlayback(5)}><FastForward size={15} /></button>
             </div>
+            <span className="clock"><strong>{stamp(sequence.path ? sequenceClock.time : time, true)}</strong><span>/</span>{stamp(sequence.path ? sequenceClock.duration : duration)}</span>
           <div className="trim-bar" role="group" aria-label="Trim range">
-            <button className="icon-button compact" aria-label="Seek back 5 seconds" title="Back 5 seconds" disabled={disabled} onClick={() => seek(time - 5)}><Rewind size={15} /></button>
-            <button className="icon-button compact" aria-label="Seek back 1 second" title="Back 1 second" disabled={disabled} onClick={() => seek(time - 1)}><ChevronLeft size={16} /></button>
-            <button className="icon-button compact" aria-label="Seek forward 1 second" title="Forward 1 second" disabled={disabled} onClick={() => seek(time + 1)}><ChevronRight size={16} /></button>
-            <button className="icon-button compact" aria-label="Seek forward 5 seconds" title="Forward 5 seconds" disabled={disabled} onClick={() => seek(time + 5)}><FastForward size={15} /></button>
             <TimeField label="In" value={range.start} disabled={trimDisabled} onChange={value => editBoundary('start', value)} onMark={() => editBoundary('start', time)} />
             <TimeField label="Out" value={range.end} disabled={trimDisabled} onChange={value => editBoundary('end', value)} onMark={() => editBoundary('end', time)} />
             <button className="icon-button compact" title="Reset trim range" aria-label="Reset trim range" onClick={resetRange} disabled={trimDisabled}><RotateCcw size={15} /></button>
@@ -1685,6 +1767,8 @@ export function App() {
               onClick={selectedLocked ? resetRange : addClip}>{selectedLocked || selectedId === null ? <Plus size={16} /> : <Check size={16} />}</button>
           </div>
             <div className="transport-tools">
+            {sequence.path && <button className="icon-button compact" title="Return to source preview" aria-label="Return to source preview"
+              onClick={stopSequence}><X size={16} /></button>}
             {canPosition && positionAxis && <>
               <button className="icon-button compact position-trigger" aria-label="Frame position" title="Frame position" popoverTarget="frame-position"
                 aria-haspopup="dialog"><Move size={16} /></button>
@@ -1697,14 +1781,19 @@ export function App() {
               </label>
               <button className="button outline small" title="Center picture in frame" onClick={() => setFramePosition(CENTER)}>Center</button>
             </div></>}
-            <button className="icon-button compact mute" aria-label={muted ? 'Unmute' : 'Mute'} title={muted ? 'Unmute' : 'Mute'} disabled={!source} onClick={() => setMuted(!muted)}>
-              {muted ? <VolumeX size={18} /> : <Volume2 size={18} />}
-            </button>
             {hasSource && <button className={`icon-button compact caption-toggle${activeCaptions?.cues.length ? ' has-captions' : ''}`}
               title="Captions" aria-label="Captions" aria-expanded={captionsOpen} aria-controls="captions-panel"
               onClick={() => captionsOpen ? closeCaptions() : openCaptions()}>
               {captionsRunning ? <LoaderCircle size={17} className="spin" /> : <Subtitles size={18} />}
             </button>}
+            <div className="transport-audio" role="group" aria-label="Preview audio">
+              <button className="icon-button compact mute" aria-label={muted ? 'Unmute' : 'Mute'} title={muted ? 'Unmute' : 'Mute'} disabled={!source} onClick={() => setMuted(!muted)}>
+                {muted || !previewVolume ? <VolumeX size={17} /> : <Volume2 size={17} />}
+              </button>
+              <input aria-label="Preview volume" title="Preview volume" type="range" min={0} max={100}
+                value={muted ? 0 : previewVolume} disabled={!source}
+                onChange={event => { setPreviewVolume(event.target.valueAsNumber); setMuted(false) }} />
+            </div>
             </div>
           </div>
           <div className="output-bar">
@@ -1881,11 +1970,12 @@ export function App() {
             clip={selectedClip ? { music: selectedClip.music, title: selectedClip.title || 'Selected clip' } : null}
             open={mediaDock === 'music'} onClose={() => closeMediaDock('music')}
             disabled={disabled || busy} canPreview={canMixPreview && Boolean(musicPath) && validRange(range, duration)}
-            playing={playing} onPreview={playMusicMix} onChange={changeMusic} onKainoCacheChange={refreshKainoTrack} />
+            playing={playerPlaying} onPreview={playMusicMix} onChange={changeMusic} onKainoCacheChange={refreshKainoTrack} />
           <BookendsMenu key={`bookends-${musicSourceRevision}`} project={projectBookends}
             clip={selectedClip ? { bookends: selectedClip.bookends, title: selectedClip.title || 'Selected clip' } : null}
             open={mediaDock === 'bookends'} onClose={() => closeMediaDock('bookends')}
-            aspect={activeFormat.aspect} disabled={disabled || busy} videoExtensions={EXTENSIONS} onChange={changeBookend} />
+            aspect={activeFormat.aspect} disabled={disabled || busy} videoExtensions={EXTENSIONS} onChange={changeBookend}
+            canPreview={Boolean(sequenceKey && validRange(range, duration))} onPreview={playSequence} />
           {styleDockOpen && activeCaptions && <CaptionStylePanel key={captionKey} style={activeCaptions.style}
             format={format} editing={editingCaptionJob} canApplyStyle={!busy && !captionsRunning}
             onStyle={saveCaptionStyle} onApplyStyle={applyCaptionStyle} onClose={closeStyleDock} />}

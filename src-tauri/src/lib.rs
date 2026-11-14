@@ -41,6 +41,8 @@ pub fn run() {
             video::thumbnails,
             video::clip_thumbnail,
             video::prepare_preview,
+            video::prepare_sequence_preview,
+            video::cancel_sequence_preview,
             video::export_clips,
             video::cancel_export,
             video::open_export_folder

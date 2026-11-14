@@ -5,18 +5,20 @@ import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { confirm, open } from '@tauri-apps/plugin-dialog'
 import {
-  ArrowDownToLine, Check, ChevronDown, Clapperboard, Copy, Ellipsis, Film, FolderOpen,
+  ArrowDownToLine, Check, ChevronDown, ChevronLeft, ChevronRight, Clapperboard, Copy, Ellipsis, FastForward, Film, FolderOpen, Rewind,
   Keyboard, LoaderCircle, Minus, Monitor, Move, Pause, Pencil, Play, Plus, RotateCcw, Scissors, Smartphone, Square,
-  Sparkles, Split, Subtitles, Trash2, Volume2, VolumeX, X, ZoomIn, ZoomOut,
+  ScissorsLineDashed, Settings as SettingsIcon, Sparkles, Split, Subtitles, Trash2, Volume2, VolumeX, X, ZoomIn, ZoomOut,
 } from 'lucide-react'
-import { cutRange, MAX_CLIPS, moveBoundary, parseTime, rangesOverlap, splitRange, stamp, validRange } from './clip'
+import { clipDuration, cutRange, MAX_CLIPS, moveBoundary, parseTime, rangesOverlap, splitRange, stamp, validRange } from './clip'
 import type { Clip, Range } from './clip'
-import { MAX_TIMELINE_ZOOM, panTimeline, timelineTime, timelineWindow, zoomTimeline } from './timeline'
+import { MAX_TIMELINE_ZOOM, panTimeline, timelineFrames, timelineOverlaps, timelineTime, timelineWindow, zoomTimeline } from './timeline'
 import { CENTER, frameTravel, panPosition } from './framing'
 import type { FramePosition, Framing } from './framing'
 import { fileSize, summarizeExport } from './export-progress'
 import type { ExportProgress, ExportState } from './export-progress'
-import { CaptionEditor } from './CaptionEditor'
+import { ClipActions } from './ClipActions'
+import { Settings } from './Settings'
+import { CaptionEditor, CaptionStylePanel, progressLabel } from './CaptionEditor'
 import { CaptionPreview } from './CaptionPreview'
 import { prepareCaptionOverlay } from './caption-export'
 import type { CaptionModel, CaptionProgress } from './CaptionEditor'
@@ -74,6 +76,9 @@ function ExportBadge({ state }: { state: ExportState }) {
   </span>
 }
 
+const CLIP_COLORS = ['#78bfff', '#d4a0ff', '#f5bb70', '#7fe0b6', '#ff9db4', '#a6c9ff', '#e8d982', '#9bdfec', '#efad87', '#c3e887', '#e7a4e9', '#a5a8ff']
+const clipColor = (id: number) => CLIP_COLORS[Math.max(0, id - 1) % CLIP_COLORS.length]
+
 function TimeField({ label, value, onChange, onMark, disabled }: {
   label: string; value: number; onChange: (time: number) => boolean; onMark: () => void; disabled: boolean
 }) {
@@ -102,6 +107,7 @@ function TimeField({ label, value, onChange, onMark, disabled }: {
 }
 
 export function App() {
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [recovery, setRecovery] = useState(readDraft)
   const [cancelingExport, setCancelingExport] = useState(false)
   const cancelRequested = useRef(false)
@@ -109,7 +115,8 @@ export function App() {
   const [source, setSource] = useState<VideoInfo | null>(null)
   const [previewPath, setPreviewPath] = useState('')
   const [preview, setPreview] = useState<'direct' | 'preparing' | 'proxy' | 'unavailable'>('direct')
-  const [frames, setFrames] = useState<string[]>([])
+  const [frames, setFrames] = useState<Record<string, string>>({})
+  const timelineScroll = useRef<HTMLDivElement>(null)
   const [loading, setLoading] = useState(false)
   const [dragging, setDragging] = useState(false)
   const [range, setRange] = useState<Range>({ start: 0, end: 0 })
@@ -130,7 +137,10 @@ export function App() {
   const [positions, setPositions] = useState({ landscape: CENTER, portrait: CENTER })
   const [previewAspect, setPreviewAspect] = useState(0)
   const [panning, setPanning] = useState(false)
+  const exportMenu = useRef<HTMLFormElement>(null)
+  const [selectedExportOnly, setSelectedExportOnly] = useState(false)
   const [notice, setNotice] = useState('')
+  const [editStatus, setEditStatus] = useState('')
   const [autoTitles, setAutoTitles] = useState(() => localStorage.getItem(AUTO_TITLES_KEY) === 'on')
   const [titleProgress, setTitleProgress] = useState('')
   const [titleError, setTitleError] = useState('')
@@ -144,15 +154,25 @@ export function App() {
   const [splitMode, setSplitMode] = useState<'mark' | 'add'>('mark')
   const [sections, setSections] = useState<Range[]>([])
   const [momentsOpen, setMomentsOpen] = useState(false)
+  const [styleDockKey, setStyleDockKey] = useState<string | null>(null)
+  const [wideWorkspace, setWideWorkspace] = useState(() => matchMedia('(min-width: 1120px)').matches)
+  const momentsTrigger = useRef<HTMLButtonElement>(null)
   const [moments, setMoments] = useState<Moment[]>([])
   const [momentStatus, setMomentStatus] = useState('')
   const [momentRunning, setMomentRunning] = useState(false)
+  const [momentProgress, setMomentProgress] = useState<number | null>(null)
+  const [momentStopping, setMomentStopping] = useState(false)
   const momentJob = useRef<{ canceled: boolean; transcribing: boolean } | null>(null)
-  const momentCache = useRef<{ revision: number; batches: { range: Range; cues: CaptionCue[] }[] }>({ revision: 0, batches: [] })
+  const momentCache = useRef<{
+    revision: number
+    batches: { range: Range; cues: CaptionCue[] }[]
+    matches: Map<string, number | null>
+  }>({ revision: 0, batches: [], matches: new Map() })
   const playingMoment = useRef<Moment | null>(null)
   const [reviewIndex, setReviewIndex] = useState<number | null>(null)
   const [renaming, setRenaming] = useState<number | null>(null)
   const [clipActions, setClipActions] = useState<number | null>(null)
+  const closeClipActions = useCallback(() => setClipActions(null), [])
   const renameClick = useRef<number | null>(null)
   const [clipFrames, setClipFrames] = useState<Record<number, string>>({})
   const [captionsOpen, setCaptionsOpen] = useState(false)
@@ -186,7 +206,6 @@ export function App() {
   const lockedOptions = selectedLocked ? exportBatch?.options : undefined
   const format = lockedOptions?.format ?? draftFormat
   const framing = lockedOptions?.framing ?? draftFraming
-  const quality = lockedOptions?.quality ?? draftQuality
   const activeFormat = FORMATS[format]
   const position = lockedOptions?.position ?? positions[format]
   const objectPosition = `${position.x}% ${position.y}%`
@@ -196,6 +215,32 @@ export function App() {
   const visibleTime = timelineWindow(duration, timelineZoom, timelineStart)
   const pct = (value: number) => visibleTime.span
     ? Math.max(0, Math.min(100, 100 * (value - visibleTime.start) / visibleTime.span)) : 0
+  const filmTiles = timelineFrames(duration, timelineZoom, visibleTime.start)
+  const overviewTiles = timelineFrames(duration, 1, 0)
+  const tileTimes = filmTiles.map(tile => tile.time).join(',')
+  const overlaps = useMemo(() => timelineOverlaps(clips), [clips])
+  useEffect(() => {
+    if (!source || !tileTimes) return
+    const times = tileTimes.split(',').map(Number).filter(time => !(time in frames))
+    if (!times.length) return
+    let active = true
+    const timer = window.setTimeout(() => {
+      void invoke<string[]>('thumbnails', { path: source.path, duration: source.duration, times })
+        .then(images => {
+          if (!active) return
+          setFrames(previous => Object.fromEntries([
+            ...Object.entries(previous).slice(-240), ...times.map((time, index) => [time, images[index] ?? '']),
+          ]))
+        }).catch(() => {})
+    }, 140)
+    return () => { active = false; window.clearTimeout(timer) }
+  }, [source, tileTimes, frames])
+  useEffect(() => {
+    const bar = timelineScroll.current
+    if (!bar || !visibleTime.maxStart) return
+    const left = (bar.scrollWidth - bar.clientWidth) * visibleTime.start / visibleTime.maxStart
+    if (Math.abs(bar.scrollLeft - left) > 1) bar.scrollLeft = left
+  }, [visibleTime.start, visibleTime.maxStart, timelineZoom])
   const inView = (value: number) => value >= visibleTime.start - 0.000001 && value <= visibleTime.end + 0.000001
   const zoomTimelineTo = (requested: number) => {
     const zoom = Math.max(1, Math.min(MAX_TIMELINE_ZOOM, requested))
@@ -208,6 +253,13 @@ export function App() {
     timelinePanned.current = false
     if (!inView(point)) setTimelineStart(zoomTimeline(duration, timelineZoom, point))
   }
+
+  useEffect(() => {
+    const layout = matchMedia('(min-width: 1120px)')
+    const update = () => setWideWorkspace(layout.matches)
+    layout.addEventListener('change', update)
+    return () => layout.removeEventListener('change', update)
+  }, [])
 
   useEffect(() => {
     if (!isTauri()) return
@@ -282,16 +334,14 @@ export function App() {
       })) return
       setLoading(true)
       setNotice('')
-      const info = await invoke<VideoInfo>('open_video', { path })
-      if (draft && (info.duration !== draft.source.duration || info.width !== draft.source.width ||
-        info.height !== draft.source.height || info.bytes !== draft.source.bytes)) {
-        throw new Error('This file differs from the saved draft source. Choose the original video.')
-      }
-      const request = ++sourceRequest.current
+      setEditStatus('')
+      const info = await invoke<VideoInfo>('open_video', { path, expected: draft?.source })
+      ++sourceRequest.current
       stopMomentSearch()
       setMoments([])
       setMomentStatus('')
       setMomentsOpen(false)
+      setStyleDockKey(null)
       playingMoment.current = null
       setRecovery(null)
       if (captionJob.current && !captionJob.current.cancelled) {
@@ -324,6 +374,9 @@ export function App() {
       setSections(draft?.sections ?? [])
       setReviewIndex(null)
       setRenaming(null)
+      setRequestedTitle(null)
+      setTitleError('')
+      titledClips.current.clear()
       frameCache.current.clear()
       setClipFrames({})
       setSelectedId(null)
@@ -331,12 +384,9 @@ export function App() {
       setCaptionStatus(null)
       setDraftCaptions(draft?.captions ?? {})
       sharedCaptionStyle.current = draft?.captionStyle ?? null
-      setFrames([])
+      setFrames({})
       setExportBatch(null)
       setSplitOpen(false)
-      void invoke<string[]>('thumbnails', { path: info.path, duration: info.duration })
-        .then(images => { if (request === sourceRequest.current) setFrames(images) })
-        .catch(() => {})
     } catch (error) {
       setNotice(message(error))
     } finally {
@@ -478,7 +528,7 @@ export function App() {
   }
 
   useEffect(() => {
-    if (!source || (!autoTitles && !requestedTitle) || !isTauri() || loading || busy || captionsRunning ||
+    if (settingsOpen || !source || (!autoTitles && !requestedTitle) || !isTauri() || loading || busy || captionsRunning ||
       titleJob.current || captionJob.current || momentJob.current || importLock.current || exportLock.current || titleError) return
     const revision = sourceRequest.current
     const clip = requestedTitle
@@ -535,7 +585,7 @@ export function App() {
       setTitleProgress('')
       if (!stale()) void refreshCaptionModel().catch(() => {})
     })
-  }, [autoTitles, busy, captionsRunning, clips, loading, momentRunning, renaming, requestedTitle, source, titleError, titleProgress, refreshCaptionModel])
+  }, [autoTitles, busy, captionsRunning, clips, loading, momentRunning, renaming, requestedTitle, settingsOpen, source, titleError, titleProgress, refreshCaptionModel])
 
   const openCaptions = (key = captionKey) => {
     setRenaming(null)
@@ -693,22 +743,32 @@ export function App() {
     const job = momentJob.current
     if (!job || job.canceled) return
     job.canceled = true
+    setMomentStopping(true)
+    setMomentStatus('Stopping Smart Split…')
     if (job.transcribing) void invoke('cancel_captions').catch(() => {})
   }
 
-  const searchMoments = async (request: string, maximum: number) => {
+  const searchMoments = async (request: string, maximum: number, maxResults: number) => {
     if (!source || momentJob.current || captionJob.current || titleJob.current || importLock.current) return
     const limit = momentLimit(request, maximum)
-    if (limit < 0.05) { setMomentStatus('Enter a positive maximum clip length.'); return }
+    if (!Number.isFinite(limit) || limit < 0.05 || limit > 120 ||
+      !Number.isInteger(maxResults) || maxResults < 1 || maxResults > MAX_CLIPS) {
+      setMomentStatus('Choose a valid clip length and number of suggestions.')
+      return
+    }
     const revision = sourceRequest.current
     const job = { canceled: false, transcribing: false }
     momentJob.current = job
     setMomentRunning(true)
+    setMomentProgress(null)
+    setMomentStatus('Getting ready to find clips…')
     const current = () => sourceRequest.current === revision
     const active = () => current() && !job.canceled
     const videoRange = { start: 0, end: source.duration }
-    if (momentCache.current.revision !== revision) momentCache.current = { revision, batches: [] }
-    const cache = momentCache.current.batches
+    if (momentCache.current.revision !== revision) {
+      momentCache.current = { revision, batches: [], matches: new Map() }
+    }
+    const { batches: cache, matches } = momentCache.current
     const known: typeof cache = []
     const addKnown = (range: Range, track?: CaptionTrack) => {
       if (!track?.cues.some(cue => cue.text.trim())) return
@@ -729,10 +789,11 @@ export function App() {
       if (!await confirmTitleDownload(false, !missing.length, true)) return
       if (!active()) return
       setMoments([])
-      for (let start = 0; start < source.duration && active(); start += MOMENT_BATCH_SECONDS) {
+      for (let start = 0; start < source.duration && active() && count < maxResults; start += MOMENT_BATCH_SECONDS) {
         const batch = { start, end: Math.min(start + MOMENT_BATCH_SECONDS, source.duration) }
-        const status = () => `Searching ${stamp(batch.start)}–${stamp(batch.end)} of ${stamp(source.duration)}…`
+        const status = () => `Searching ${stamp(batch.start)}–${stamp(batch.end)} · ${count} of ${maxResults} found`
         setMomentStatus(status())
+        setMomentProgress(start / source.duration)
         const cues = known.filter(item => item.range.start >= batch.start && item.range.start < batch.end).flatMap(item => item.cues)
         const includeGenerated = (generated: CaptionCue[]) => {
           const existing = cues.slice()
@@ -748,10 +809,17 @@ export function App() {
           while (active() && captionJob.current) await new Promise(resolve => setTimeout(resolve, 100))
           if (!active()) break
           job.transcribing = true
+          setMomentStatus('Listening for moments in this part of the video…')
           try {
             const progress = new Channel<CaptionProgress>()
             progress.onmessage = update => {
-              if (active() && update.stage === 'downloading') setMomentStatus(`Downloading speech model… ${Math.round(update.fraction * 100)}%`)
+              if (!active()) return
+              if (update.stage === 'downloading') setMomentStatus(`Downloading speech tools · ${Math.round(update.fraction * 100)}%`)
+              else if (update.stage === 'transcribing') {
+                setMomentStatus('Listening for moments in this part of the video…')
+                const scanned = gap.start - batch.start + (gap.end - gap.start) * update.fraction
+                setMomentProgress(previous => Math.max(previous ?? 0, (batch.start + scanned * 0.8) / source.duration))
+              }
             }
             const result = await invoke<CaptionCue[]>('generate_captions', {
               request: { path: source.path, range: gap, allowDownload: true }, progress,
@@ -767,24 +835,38 @@ export function App() {
         setMomentStatus(status())
         const unique = [...new Map(cues.map(cue => [`${cue.start}:${cue.end}`, cue])).values()].sort((a, b) => a.start - b.start)
         const candidates = momentCandidates(unique, { ...batch, end: Math.min(source.duration, batch.end + limit) }, limit)
-        for (let index = 0; index < candidates.length && active(); index += 4) {
+        for (let index = 0; index < candidates.length && active() && count < maxResults; index += 4) {
           const group = candidates.slice(index, index + 4)
-          const progress = new Channel<string>()
-          progress.onmessage = text => { if (active()) setMomentStatus(text) }
-          const match = await invoke<number | null>('select_moment', { request, excerpts: group.map(item => item.text), progress })
+          const excerpts = group.map(item => item.text)
+          const key = JSON.stringify([request, excerpts])
+          let match = matches.get(key)
+          if (match === undefined) {
+            const progress = new Channel<string>()
+            progress.onmessage = () => { if (active()) setMomentStatus('Preparing Smart Split for first use…') }
+            match = await invoke<number | null>('select_moment', { request, excerpts, progress })
+            if (matches.size >= 500) matches.clear()
+            matches.set(key, match)
+          }
           if (active() && match !== null && group[match]) {
             count++
             setMoments(items => [...items, group[match]])
+          }
+          if (active()) {
+            setMomentStatus(status())
+            setMomentProgress((batch.start + (batch.end - batch.start) * (0.8 + 0.2 * Math.min(1, (index + 4) / candidates.length))) / source.duration)
           }
         }
       }
       if (active()) setMomentStatus(count ? `Review ${count} suggested ${count === 1 ? 'moment' : 'moments'}.` : 'No matching moments found.')
     } catch (error) {
-      if (active()) setMomentStatus(message(error))
+      if (active()) setMomentStatus(message(error) === 'This video has no audio track to caption.'
+        ? 'This video has no audio to search.' : 'Smart Split couldn’t finish. You can retry or review the suggestions already found.')
     } finally {
       if (current() && job.canceled) setMomentStatus('Search stopped. Suggestions found so far are kept.')
       momentJob.current = null
       setMomentRunning(false)
+      setMomentStopping(false)
+      setMomentProgress(null)
       if (current()) void refreshCaptionModel().catch(() => {})
     }
   }
@@ -968,12 +1050,33 @@ export function App() {
 
   const trimSection = () => {
     if (!canTrim) return
-    const draftTargets = selectedClip ? [selectedClip] : sections.length ? sections : [{ start: 0, end: duration }]
+    if (selectedClip) {
+      const parts = cutRange(selectedClip, range)
+      if (clips.length - 1 + parts.length > MAX_CLIPS) {
+        setNotice(`Keep at most ${MAX_CLIPS} clips.`)
+        return
+      }
+      const kept = parts.map((part, index) => ({
+        ...selectedClip, ...part, id: index === 0 ? selectedClip.id : nextId.current++,
+        captions: captionSlice(selectedClip.captions, part),
+      }))
+      setClips(items => items.flatMap(clip => clip.id === selectedClip.id ? kept : [clip]))
+      const next = kept.find(clip => clip.start >= range.end) ?? kept[0]
+      if (next) selectClip(next)
+      else {
+        video.current?.pause()
+        setSelectedId(null)
+        setReviewIndex(null)
+        setRange({ start: range.start, end: range.start })
+        seek(range.start)
+      }
+      setNotice('')
+      setEditStatus(kept.length === 2 ? 'Cut removed. Both remaining clips were kept.' : kept.length ? 'Clip trimmed.' : 'Clip removed.')
+      return
+    }
+    const draftTargets = sections.length ? sections : [{ start: 0, end: duration }]
     const parts = draftTargets.flatMap(section => cutRange(section, range))
-    const remaining = selectedClip
-      ? [...new Map([...sections, ...parts].map(section => [`${section.start}-${section.end}`, section])).values()]
-        .sort((first, second) => first.start - second.start || first.end - second.end)
-      : parts
+    const remaining = parts
     if (remaining.length > MAX_CLIPS) {
       setNotice(`Keep at most ${MAX_CLIPS} marked sections.`)
       return
@@ -981,10 +1084,9 @@ export function App() {
 
     setDraftCaptions(current => {
       const updated = { ...current }
-      if (!selectedClip) for (const key of Object.keys(updated)) if (key.startsWith('section-')) delete updated[key]
+      for (const key of Object.keys(updated)) if (key.startsWith('section-')) delete updated[key]
       for (const section of draftTargets) {
-        const track = selectedClip ? selectedClip.captions
-          : sections.length ? current[`section-${section.start}-${section.end}`] : current.range
+        const track = sections.length ? current[`section-${section.start}-${section.end}`] : current.range
         for (const part of cutRange(section, range)) {
           if (track) updated[`section-${part.start}-${part.end}`] = captionSlice(track, part)
         }
@@ -1004,6 +1106,7 @@ export function App() {
       video.current?.pause()
     }
     setNotice('')
+    setEditStatus('Cut removed from the marked ranges.')
   }
 
   const renameClip = (id: number, title: string) => {
@@ -1022,6 +1125,7 @@ export function App() {
     if (!batch.every(clip => validRange(clip, duration))) return
     exportLock.current = true
     setNotice('')
+    setEditStatus('')
     cancelRequested.current = false
     exportReady.current = null
     const request = ++exportRequest.current
@@ -1117,6 +1221,7 @@ export function App() {
     }
 
     const shortcutsHandler = (event: KeyboardEvent) => {
+      if (document.querySelector('.settings-page:not([hidden])')) return
       const key = event.key.toLowerCase()
       const target = event.target instanceof Element ? event.target : null
 
@@ -1234,7 +1339,7 @@ export function App() {
       return
     }
     const delta = drag.x - event.clientX
-    if (!drag.moved && Math.abs(delta) < 4) return
+    if (!drag.moved && Math.abs(delta) < (event.pointerType === 'mouse' ? 5 : 10)) return
     drag.moved = true
     setGrabbingTimeline(true)
     timelinePanned.current = true
@@ -1242,17 +1347,25 @@ export function App() {
   }
 
   const finishTrackDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (timelineDrag.current && !timelineDrag.current.moved && event.currentTarget.hasPointerCapture(event.pointerId)) {
+    const drag = timelineDrag.current
+    if (drag && !drag.moved && event.currentTarget.hasPointerCapture(event.pointerId)) {
       video.current?.pause()
-      scrub(event)
+      const rect = event.currentTarget.getBoundingClientRect()
+      seek(timelineTime(drag.start, visibleTime.span, (drag.x - rect.left) / rect.width))
     }
+  }
+
+  const seekFromRuler = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!source || loading || event.button !== 0) return
+    video.current?.pause()
+    scrub(event)
   }
 
   const disabled = !hasSource || loading
   const trimDisabled = disabled || selectedLocked
   const canSaveRange = validRange(range, duration)
   const editingCaptionJob = captionsRunning && Boolean(captionJob.current?.keys.has(captionKey))
-  const canTrim = !trimDisabled && canSaveRange && !captionJob.current && (
+  const canTrim = !trimDisabled && canSaveRange && !captionsRunning && !captionJob.current && (
     selectedClip ? rangesOverlap(selectedClip, range)
       : sections.length ? sections.some(section => rangesOverlap(section, range))
         : range.start > 0 || range.end < duration
@@ -1264,6 +1377,24 @@ export function App() {
   const captionLabel = selectedClip ? selectedClip.title || `Clip ${clips.indexOf(selectedClip) + 1}`
     : reviewed ? `Section ${(reviewIndex ?? 0) + 1}` : 'Current range'
   const showCaptionEditor = captionsOpen && !trimDisabled && canSaveRange
+  const styleDockOpen = showCaptionEditor && styleDockKey === captionKey && Boolean(activeCaptions?.cues.length)
+  const dockOpen = styleDockOpen || momentsOpen
+  const closeStyleDock = () => {
+    setStyleDockKey(null)
+    requestAnimationFrame(() => document.getElementById('caption-style-trigger')?.focus())
+  }
+  const backgroundStatus = [
+    loading ? 'Opening video…' : preview === 'preparing' ? 'Preparing video preview…' : '',
+    busy ? cancelingExport ? 'Canceling export…' : notice === 'Preparing caption artwork…'
+      ? notice : `Exporting clips · ${summary?.percent ?? 0}%` : '',
+    captionProgress ? progressLabel(captionProgress) + ('fraction' in captionProgress ? ` ${Math.round(captionProgress.fraction * 100)}%` : '') : '',
+    titleProgress,
+    momentRunning ? momentStatus || 'Preparing Smart Split…' : '',
+  ].filter(Boolean).join('  ·  ')
+  const status = backgroundStatus || notice || editStatus || (summary
+    ? `Saved ${summary.saved} of ${summary.total} clips` : hasSource
+      ? `${clips.length} ${clips.length === 1 ? 'clip' : 'clips'} · ${stamp(duration)} source`
+      : 'Ready to open a video')
   const runWindowAction = (action: 'minimize' | 'toggleMaximize' | 'close') => {
     void getCurrentWindow()[action]().catch(error => setNotice(message(error)))
   }
@@ -1273,6 +1404,43 @@ export function App() {
       <header className="topbar">
         <div className="brand" data-tauri-drag-region><span className="brand-mark"><Scissors size={19} /></span><span>MiniVidCut</span></div>
         <div className="titlebar-space" data-tauri-drag-region />
+        <button className="icon-button settings-trigger" aria-label="Settings" title="Settings"
+          aria-pressed={settingsOpen} onClick={() => setSettingsOpen(open => !open)}><SettingsIcon size={16} /></button>
+        <div className="export-toolbar">
+          {busy && <div className="export-ring" role="progressbar" aria-label="Export progress"
+            aria-valuenow={summary?.percent ?? 0} title={`Exporting · ${summary?.percent ?? 0}%`}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" />
+              <circle cx="12" cy="12" r="9" pathLength="100" strokeDasharray={`${summary?.percent ?? 0} 100`} />
+            </svg>
+          </div>}
+          <button type="button" className="button primary small" popoverTarget="export-menu"
+            aria-haspopup="dialog" disabled={disabled || busy || captionsRunning || Boolean(titleProgress) || renaming !== null || !batchCount || (!clips.length && !canSaveRange)}
+            onClick={() => setSelectedExportOnly(false)}>
+            <ArrowDownToLine size={14} /> Export <ChevronDown size={12} />
+          </button>
+          <form ref={exportMenu} id="export-menu" className="export-menu panel" popover="auto" role="dialog" aria-label="Export settings"
+            onKeyDown={event => event.stopPropagation()} onSubmit={event => {
+              event.preventDefault()
+              exportMenu.current?.hidePopover()
+              void exportVideos(selectedExportOnly ? selectedClip : undefined)
+            }}>
+            <label>Clips
+              <select aria-label="Clips" value={selectedExportOnly && selectedClip ? 'selected' : 'all'} onChange={event => setSelectedExportOnly(event.target.value === 'selected')}>
+                <option value="all">{clips.length ? `All clips (${clips.length})` : 'Current range'}</option>
+                {selectedClip && <option value="selected">Selected clip</option>}
+              </select>
+            </label>
+            <label>Export quality
+              <select aria-label="Export quality" value={draftQuality} onChange={event => setQuality(event.target.value as Quality)}>
+                <option value="compact">Compact (H.265)</option>
+                <option value="compatible">Compatible (H.264)</option>
+                <option value="lossless">Lossless (larger file)</option>
+              </select>
+            </label>
+            <button className="button primary small" type="submit"><ArrowDownToLine size={14} /> Export</button>
+          </form>
+        </div>
         {isTauri() && <div className="window-controls" role="group" aria-label="Window controls">
           <button aria-label="Minimize" title="Minimize" onClick={() => runWindowAction('minimize')}><Minus size={15} /></button>
           <button aria-label={maximized ? 'Restore' : 'Maximize'} title={maximized ? 'Restore' : 'Maximize'} onClick={() => runWindowAction('toggleMaximize')}>
@@ -1282,12 +1450,19 @@ export function App() {
         </div>}
       </header>
 
-      <main className={`workspace ${sections.length ? 'reviewing' : ''} ${timelineZoom > 1 ? 'timeline-zoomed' : ''}`}>
+      <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} onModelsChanged={(removed) => {
+        if (removed) {
+          localStorage.removeItem(TITLE_DOWNLOAD_KEY)
+          localStorage.removeItem(AUTO_TITLES_KEY)
+          setAutoTitles(false)
+        }
+        void refreshCaptionModel().catch(() => {})
+      }} />
+      <main hidden={settingsOpen} className={`workspace ${sections.length ? 'reviewing' : ''} ${dockOpen && wideWorkspace ? 'with-moments' : ''} ${timelineZoom > 1 ? 'timeline-zoomed' : ''}`}>
         <section className="viewer panel" aria-label="Video preview">
           <div className="panel-heading">
             <div className="source-line"><Film size={17} /><span title={source?.name}>{source?.name ?? 'Preview'}</span></div>
             <div className="viewer-actions">
-              <span className="resolution">{activeFormat.ratio} <span>·</span> {activeFormat.size}</span>
               {!busy && Boolean(summary?.saved) && <button className="icon-button compact" title="Open export folder" aria-label="Open export folder"
                 onClick={() => void invoke('open_export_folder').catch(error => setNotice(message(error)))}><FolderOpen size={15} /></button>}
               <button className="button outline small" onClick={() => void chooseVideo()} disabled={busy || loading}><FolderOpen size={15} /> Open video</button>
@@ -1347,11 +1522,30 @@ export function App() {
             {dragging && <div className="drop-overlay"><FolderOpen size={28} /> Drop to open video</div>}
           </div>
           <div className="transport">
+            <div className="transport-playback">
             <button className="icon-button play" aria-label={playing ? 'Pause' : 'Play'} title="Play / pause (Space)" onClick={togglePlay} disabled={!source || preview === 'preparing' || preview === 'unavailable'}>
               {playing ? <Pause size={19} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
             </button>
             <span className="clock"><strong>{stamp(time, true)}</strong><span>/</span>{stamp(duration)}</span>
-            {canPosition && positionAxis && <div className="position-controls">
+            </div>
+          <div className="trim-bar" role="group" aria-label="Trim range">
+            <button className="icon-button compact" aria-label="Seek back 5 seconds" title="Back 5 seconds" disabled={disabled} onClick={() => seek(time - 5)}><Rewind size={15} /></button>
+            <button className="icon-button compact" aria-label="Seek back 1 second" title="Back 1 second" disabled={disabled} onClick={() => seek(time - 1)}><ChevronLeft size={16} /></button>
+            <button className="icon-button compact" aria-label="Seek forward 1 second" title="Forward 1 second" disabled={disabled} onClick={() => seek(time + 1)}><ChevronRight size={16} /></button>
+            <button className="icon-button compact" aria-label="Seek forward 5 seconds" title="Forward 5 seconds" disabled={disabled} onClick={() => seek(time + 5)}><FastForward size={15} /></button>
+            <TimeField label="In" value={range.start} disabled={trimDisabled} onChange={value => editBoundary('start', value)} onMark={() => editBoundary('start', time)} />
+            <TimeField label="Out" value={range.end} disabled={trimDisabled} onChange={value => editBoundary('end', value)} onMark={() => editBoundary('end', time)} />
+            <button className="icon-button compact" title="Reset trim range" aria-label="Reset trim range" onClick={resetRange} disabled={trimDisabled}><RotateCcw size={15} /></button>
+            <button className="icon-button compact clip-commit" disabled={!selectedLocked && (trimDisabled || !canSaveRange || editingCaptionJob)}
+              aria-label={selectedLocked ? 'New clip' : selectedId === null ? 'Add clip' : 'Update clip'}
+              title={selectedLocked ? 'New clip' : selectedId === null ? 'Add clip' : 'Update clip'}
+              onClick={selectedLocked ? resetRange : addClip}>{selectedLocked || selectedId === null ? <Plus size={16} /> : <Check size={16} />}</button>
+          </div>
+            <div className="transport-tools">
+            {canPosition && positionAxis && <>
+              <button className="icon-button compact position-trigger" aria-label="Frame position" title="Frame position" popoverTarget="frame-position"
+                aria-haspopup="dialog"><Move size={16} /></button>
+              <div id="frame-position" className="position-controls panel" popover="auto" role="dialog" aria-label="Frame position">
               <label title="Drag the preview or use the slider to position every exported clip"><Move size={15} />
                 <span>Position</span>
                 <input aria-label={positionAxis === 'x' ? 'Horizontal frame position' : 'Vertical frame position'}
@@ -1359,15 +1553,16 @@ export function App() {
                   onChange={event => setFramePosition({ ...position, [positionAxis]: Number(event.target.value) })} />
               </label>
               <button className="button outline small" title="Center picture in frame" onClick={() => setFramePosition(CENTER)}>Center</button>
-            </div>}
-            <button className="icon-button mute" aria-label={muted ? 'Unmute' : 'Mute'} title={muted ? 'Unmute' : 'Mute'} disabled={!source} onClick={() => setMuted(!muted)}>
+            </div></>}
+            <button className="icon-button compact mute" aria-label={muted ? 'Unmute' : 'Mute'} title={muted ? 'Unmute' : 'Mute'} disabled={!source} onClick={() => setMuted(!muted)}>
               {muted ? <VolumeX size={18} /> : <Volume2 size={18} />}
             </button>
-            {hasSource && <button className={`icon-button caption-toggle${activeCaptions?.cues.length ? ' has-captions' : ''}`}
+            {hasSource && <button className={`icon-button compact caption-toggle${activeCaptions?.cues.length ? ' has-captions' : ''}`}
               title="Captions" aria-label="Captions" aria-expanded={captionsOpen} aria-controls="captions-panel"
               onClick={() => captionsOpen ? closeCaptions() : openCaptions()}>
               {captionsRunning ? <LoaderCircle size={17} className="spin" /> : <Subtitles size={18} />}
             </button>}
+            </div>
           </div>
           <div className="output-bar">
             <div className="segmented format-options" role="group" aria-label="Output format">
@@ -1381,53 +1576,21 @@ export function App() {
               <button aria-pressed={framing === 'fill'} title="Crop to fill the frame" disabled={selectedLocked} onClick={() => setFraming('fill')}>Fill</button>
               <button aria-pressed={framing === 'fit'} title="Keep the full image with black borders" disabled={selectedLocked} onClick={() => setFraming('fit')}>Fit</button>
             </div>
-            <label className="file-size">
-              <span>Export quality</span>
-              <select value={quality} disabled={selectedLocked} onChange={event => setQuality(event.target.value as Quality)}>
-                <option value="compact">Compact (H.265)</option>
-                <option value="compatible">Compatible (H.264)</option>
-                <option value="lossless">Lossless video (large)</option>
-              </select>
-            </label>
+            <span className="resolution">{activeFormat.ratio} <span>·</span> {activeFormat.size}</span>
           </div>
-          <section className="moment-panel" aria-label="Smart Split suggestions" hidden={!momentsOpen}>
-            <form className="moment-controls" onSubmit={event => {
-              event.preventDefault()
-              const fields = new FormData(event.currentTarget)
-              void searchMoments(String(fields.get('prompt') || '').trim() || DEFAULT_MOMENT_QUERY, Number(fields.get('maximum')))
-            }}>
-              <input type="text" name="prompt" maxLength={240} aria-label="Describe the moments to find" placeholder="Most important takeaways" />
-              <label>Max <input type="number" name="maximum" min={1} max={120} defaultValue={30} required aria-label="Maximum seconds per clip" /> s</label>
-              <button className="button outline small" disabled={momentRunning || captionsRunning || Boolean(titleProgress) || loading} type="submit"><Sparkles size={14} /> Find</button>
-              {momentRunning && <button className="text-button" type="button" onClick={stopMomentSearch}>Stop</button>}
-              <button className="icon-button compact" type="button" aria-label="Hide Smart Split" title="Hide Smart Split" onClick={() => setMomentsOpen(false)}><X size={16} /></button>
-            </form>
-            {momentStatus && <p className="moment-status" role="status">{momentStatus}</p>}
-            {moments.length > 0 && <ol className="moment-results">
-              {moments.map(moment => {
-                const added = clips.some(clip => clip.start === moment.start && clip.end === moment.end)
-                return <li key={`${moment.start}:${moment.end}`}>
-                  <button className="icon-button compact" title="Play suggestion" aria-label={`Play suggestion at ${stamp(moment.start, true)}`}
-                    disabled={preview !== 'direct' && preview !== 'proxy'} onClick={() => previewMoment(moment)}><Play size={14} /></button>
-                  <span><small>{stamp(moment.start, true)} – {stamp(moment.end, true)}</small><strong title={moment.text}>{moment.text}</strong></span>
-                  <button className="button outline small" disabled={added || busy || clips.length >= MAX_CLIPS}
-                    onClick={() => addMoment(moment)}>{added ? <Check size={14} /> : <Plus size={14} />}{added ? 'Added' : 'Add clip'}</button>
-                </li>
-              })}
-            </ol>}
-          </section>
         </section>
 
-        <aside className="editor-sidebar panel" aria-label="Clips and captions">
+        <aside className="editor-sidebar panel" aria-label="Clips and captions" hidden={dockOpen && !wideWorkspace}>
           <div className="sidebar-tabs" role="tablist" aria-label="Editor sidebar" onKeyDown={event => {
             if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
             event.preventDefault()
             event.stopPropagation()
-            const captions = event.key === 'End' || (event.key !== 'Home' && !captionsOpen)
-            if (captions) {
-              openCaptions()
-              captionsTab.current?.focus()
-            } else closeCaptions()
+            const tabs = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'))
+            const current = tabs.indexOf(document.activeElement as HTMLButtonElement)
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+              : (current + tabs.length + (event.key === 'ArrowLeft' ? -1 : 1)) % tabs.length
+            tabs[next]?.focus()
+            tabs[next]?.click()
           }}>
             <button ref={clipsTab} type="button" role="tab" id="clips-tab" aria-selected={!captionsOpen} aria-controls="clips-panel"
               tabIndex={captionsOpen ? -1 : 0} onClick={() => setCaptionsOpen(false)}>
@@ -1437,13 +1600,22 @@ export function App() {
               tabIndex={captionsOpen ? 0 : -1} onClick={() => openCaptions()}>
               <Subtitles size={16} /> Captions {captionsRunning && <LoaderCircle size={13} className="spin" aria-label="Generating captions" />}
             </button>
+            {!wideWorkspace && <button type="button" role="tab" aria-selected={false} tabIndex={-1}
+              disabled={!source || loading} aria-controls="moment-panel" onClick={() => setMomentsOpen(true)}>Smart Split</button>}
           </div>
           <div className="sidebar-content" id="captions-panel" role="tabpanel" aria-labelledby="captions-tab" hidden={!captionsOpen}>
             {showCaptionEditor ? <CaptionEditor key={captionKey} label={captionLabel} range={range} track={activeCaptions}
           model={captionModel} progress={captionProgress} status={captionStatus?.key === captionKey || captionStatus?.key === 'batch' ? captionStatus.text : ''}
-          format={format} editing={editingCaptionJob} canGenerate={!titleProgress} canApplyStyle={!busy && !captionsRunning}
-          defaultStyle={sharedCaptionStyle.current ?? undefined} onApplyStyle={applyCaptionStyle}
-          onChange={saveCaptions} onStyle={saveCaptionStyle} onGenerate={generateCaptions} onCancel={cancelCaptions}
+          editing={editingCaptionJob} canGenerate={!titleProgress} styleOpen={styleDockOpen}
+          defaultStyle={sharedCaptionStyle.current ?? undefined} onOpenStyle={() => {
+            if (styleDockOpen) closeStyleDock()
+            else {
+              setMomentsOpen(false)
+              setStyleDockKey(captionKey)
+              requestAnimationFrame(() => document.getElementById('caption-style-title')?.focus())
+            }
+          }}
+          onChange={saveCaptions} onGenerate={generateCaptions} onCancel={cancelCaptions}
           onSeek={captionSeek} getTime={captionPlayhead} /> : <div className="empty-queue">
             <Subtitles size={21} />
             <p>{!hasSource ? 'Open a video to add captions.' : selectedLocked ? 'This clip is locked while it exports.' : 'Select a range to add captions.'}</p>
@@ -1455,10 +1627,6 @@ export function App() {
               onClick={() => void toggleAutoTitles()}><Sparkles size={14} /> Auto-title</button>
             <button className="button outline small" title="Generate captions for clips without captions" disabled={disabled || busy || captionsRunning || Boolean(titleProgress) || !clipsNeedingCaptions(clips).length}
               onClick={captionStack}><Subtitles size={14} /> Caption all</button>
-            {selectedClip && !busy
-              ? <button className="button outline small" disabled={disabled || captionsRunning || Boolean(titleProgress) || renaming !== null}
-                title="Export selected clip" aria-label="Export selected clip" onClick={() => void exportVideos(selectedClip)}><ArrowDownToLine size={13} /> Selected</button>
-              : null}
           </div>}
           {(titleProgress || titleError) && <div className="export-detail title-status" role="status">{titleProgress || titleError}
             {titleError && autoTitles && <button className="text-button" onClick={() => {
@@ -1528,19 +1696,19 @@ export function App() {
                       ? <img alt="" src={clipFrames[clip.start]} style={{ objectFit: (clipOptions?.framing ?? framing) === 'fill' ? 'cover' : 'contain', objectPosition: `${thumbPosition.x}% ${thumbPosition.y}%` }} />
                       : <Film size={15} />}
                   </span>
-                  <span><strong>{title}</strong><small>{stamp(clip.start, true)} – {stamp(clip.end, true)}</small></span>
+                  <span className="clip-details">
+                    <span className="clip-title-line"><strong>{title}</strong>
+                      <span className="clip-length" style={{ color: clipColor(clip.id) }}
+                        title={`Duration · ${stamp(clip.end - clip.start, true)}`}>{clipDuration(clip.end - clip.start)}</span>
+                    </span>
+                    <small>{stamp(clip.start, true)} – {stamp(clip.end, true)}</small>
+                  </span>
                 </button>}
                 {state && <ExportBadge state={state} />}
                 {!locked && !editing && <button className="icon-button compact clip-more" aria-label={`Actions for ${title}`} title="Clip actions"
                   aria-expanded={clipActions === clip.id} aria-controls={clipActions === clip.id ? `clip-actions-${clip.id}` : undefined}
                   disabled={disabled} onClick={() => setClipActions(current => current === clip.id ? null : clip.id)}><Ellipsis size={17} /></button>}
-                {!locked && !editing && clipActions === clip.id && <div className="clip-actions" id={`clip-actions-${clip.id}`} role="group" aria-label={`Actions for ${title}`}
-                  onKeyDown={event => {
-                    if (event.key !== 'Escape') return
-                    event.stopPropagation()
-                    event.currentTarget.parentElement?.querySelector<HTMLButtonElement>('.clip-more')?.focus()
-                    setClipActions(null)
-                  }}>
+                {!locked && !editing && clipActions === clip.id && <ClipActions id={`clip-actions-${clip.id}`} label={`Actions for ${title}`} onClose={closeClipActions}>
                   <button disabled={busy || captionsRunning || Boolean(titleProgress)} onClick={() => { setClipActions(null); captionClip(clip) }}>
                     <Subtitles size={15} /> {clipsNeedingCaptions([clip]).length ? 'Generate captions' : 'Edit captions'}
                   </button>
@@ -1553,22 +1721,82 @@ export function App() {
                     setClips(items => items.filter(item => item.id !== clip.id))
                     if (selectedId === clip.id) setSelectedId(null)
                   }}><Trash2 size={14} /> Remove clip</button>
-                </div>}
+                </ClipActions>}
                 {state?.status === 'encoding' && <div className="clip-meter" aria-hidden="true"><span style={{ width: `${state.fraction * 100}%` }} /></div>}
               </li>
             })}</ol>}
-          <div className="clips-footer">
-            <button className="button primary export" onClick={() => void exportVideos()} disabled={disabled || busy || captionsRunning || Boolean(titleProgress) || renaming !== null || !batchCount || (!clips.length && !canSaveRange)}>
-              {busy ? <LoaderCircle size={16} className="spin" /> : <ArrowDownToLine size={17} />}
-              {busy ? `Exporting ${summary?.percent ?? 0}%` : batchCount > 1 ? `Export all ${batchCount} clips` : 'Export clip'}
-            </button>
-          </div>
           </div>
         </aside>
+          {styleDockOpen && activeCaptions && <CaptionStylePanel key={captionKey} style={activeCaptions.style}
+            format={format} editing={editingCaptionJob} canApplyStyle={!busy && !captionsRunning}
+            onStyle={saveCaptionStyle} onApplyStyle={applyCaptionStyle} onClose={closeStyleDock} />}
+          <section className="moment-panel panel" id="moment-panel" aria-label="Smart Split suggestions" hidden={!momentsOpen}>
+            {!wideWorkspace && <div className="sidebar-tabs" role="tablist" aria-label="Editor sidebar">
+              <button role="tab" aria-selected={false} aria-controls="clips-panel" onClick={() => {
+                setMomentsOpen(false)
+                setCaptionsOpen(false)
+                requestAnimationFrame(() => clipsTab.current?.focus())
+              }}>Clips</button>
+              <button role="tab" aria-selected={false} aria-controls="captions-panel" onClick={() => {
+                setMomentsOpen(false)
+                openCaptions()
+                requestAnimationFrame(() => captionsTab.current?.focus())
+              }}>Captions</button>
+              <button role="tab" aria-selected aria-controls="moment-panel" onKeyDown={event => {
+                const tabs = event.currentTarget.parentElement?.querySelectorAll('button')
+                if (event.key === 'ArrowLeft' || event.key === 'End') tabs?.[1].click()
+                else if (event.key === 'ArrowRight' || event.key === 'Home' || event.key === 'Escape') tabs?.[0].click()
+                else return
+                event.preventDefault()
+                event.stopPropagation()
+              }}>Smart Split</button>
+            </div>}
+            {wideWorkspace && <header className="moment-heading">
+              <h2><Sparkles size={15} /> Smart Split</h2>
+              <button className="icon-button compact" type="button" aria-label="Close Smart Split" title="Close Smart Split" onClick={() => {
+                setMomentsOpen(false)
+                momentsTrigger.current?.focus()
+              }}><X size={16} /></button>
+            </header>}
+            <form className="moment-controls" onSubmit={event => {
+              event.preventDefault()
+              const fields = new FormData(event.currentTarget)
+              void searchMoments(String(fields.get('prompt') || '').trim() || DEFAULT_MOMENT_QUERY,
+                Number(fields.get('maximum')), Number(fields.get('maxResults')))
+            }}>
+              <input type="text" name="prompt" maxLength={240} aria-label="Describe the moments to find" placeholder="Most important takeaways" />
+              <div className="moment-controls-row">
+              <label><span>Max length</span><span className="moment-limit"><input type="number" name="maximum" min={1} max={120} defaultValue={30} required aria-label="Maximum seconds per clip" /> s</span></label>
+              <label><span>Max clips</span><input type="number" name="maxResults" min={1} max={MAX_CLIPS} defaultValue={5} required aria-label="Maximum suggested clips" /></label>
+              <button className="button outline small" disabled={momentRunning || captionsRunning || Boolean(titleProgress) || loading} type="submit"><Sparkles size={14} /> Find</button>
+              </div>
+            </form>
+            {momentRunning ? <div className="moment-progress">
+              <div className="moment-progress-heading">
+                <p role="status">{momentStatus}</p>
+                <button className="button outline small" type="button" onClick={stopMomentSearch} disabled={momentStopping}>{momentStopping ? 'Stopping…' : 'Stop'}</button>
+              </div>
+              <progress aria-label="Smart Split progress" max={1} value={momentProgress ?? undefined} />
+            </div> : momentStatus && <p className="moment-status" role="status">{momentStatus}</p>}
+            {moments.length > 0 && <ol className="moment-results">
+              {moments.map(moment => {
+                const added = clips.some(clip => clip.start === moment.start && clip.end === moment.end)
+                return <li key={`${moment.start}:${moment.end}`}>
+                  <button className="icon-button compact" title="Play suggestion" aria-label={`Play suggestion at ${stamp(moment.start, true)}`}
+                    disabled={preview !== 'direct' && preview !== 'proxy'} onClick={() => previewMoment(moment)}><Play size={14} /></button>
+                  <span><small>{stamp(moment.start, true)} – {stamp(moment.end, true)}</small><strong title={moment.text}>{moment.text}</strong></span>
+                  <button className="button outline small" disabled={added || busy || clips.length >= MAX_CLIPS}
+                    onClick={() => addMoment(moment)}>{added ? <Check size={14} /> : <Plus size={14} />}{added ? 'Added' : 'Add clip'}</button>
+                </li>
+              })}
+            </ol>}
+          </section>
 
         <section className="timeline panel" aria-label="Timeline">
           <div className="panel-heading timeline-heading">
             <div className="source-line"><Scissors size={17} /><span>Timeline</span></div>
+            <button className="button outline small trim-section" disabled={!canTrim}
+              title="Remove the In–Out selection" onClick={trimSection}><ScissorsLineDashed size={15} /> Trim</button>
             <div className="timeline-zoom" role="group" aria-label="Timeline zoom">
               <button className="icon-button compact" aria-label="Zoom out timeline" title="Zoom out"
                 disabled={disabled || timelineZoom === 1} onClick={() => zoomTimelineTo(timelineZoom / 2)}><ZoomOut size={16} /></button>
@@ -1577,8 +1805,9 @@ export function App() {
               <button className="icon-button compact" aria-label="Zoom in timeline" title="Zoom in"
                 disabled={disabled || timelineZoom === MAX_TIMELINE_ZOOM} onClick={() => zoomTimelineTo(timelineZoom * 2)}><ZoomIn size={16} /></button>
             </div>
-            <button className="button outline small smart-split" disabled={!source || loading} aria-expanded={momentsOpen}
-              onClick={() => setMomentsOpen(open => !open)}><Sparkles size={15} /> Smart Split</button>
+            <button ref={momentsTrigger} className="button outline small smart-split" disabled={disabled}
+              aria-expanded={momentsOpen} aria-controls="moment-panel"
+              onClick={() => { setSplitOpen(false); setStyleDockKey(null); setMomentsOpen(open => !open) }}><Sparkles size={14} /> Smart Split</button>
             <div className="split">
               <button className="button outline small" disabled={trimDisabled || !canSaveRange || editingCaptionJob} onClick={() => setSplitOpen(!splitOpen)} aria-expanded={splitOpen}><Split size={15} /> Split range <ChevronDown size={13} /></button>
               {splitOpen && canSaveRange && !trimDisabled && <div className="split-menu">
@@ -1592,7 +1821,7 @@ export function App() {
             </div>
           </div>
           <div className="timeline-body" ref={timelineBody}>
-            <div className="ruler" aria-hidden="true">{[0, 1, 2, 3, 4, 5].map(step => <span key={step}>{duration
+            <div className={`ruler ${hasSource ? 'seekable' : ''}`} aria-hidden="true" onPointerDown={seekFromRuler}>{[0, 1, 2, 3, 4, 5].map(step => <span key={step}>{duration
               ? stamp(timelineTime(visibleTime.start, visibleTime.span, step / 5), visibleTime.span < 5)
               : step === 0 ? '00:00:00' : ''}</span>)}</div>
             <div className={`track ${hasSource ? 'loaded' : ''} ${grabbingTimeline ? 'grabbing' : ''}`} ref={track}
@@ -1600,9 +1829,17 @@ export function App() {
               onLostPointerCapture={() => { timelineDrag.current = null; setGrabbingTimeline(false) }}>
               {hasSource ? (
                 <>
-                  <div className="filmstrip"><div className="frames" style={{
-                    width: `${timelineZoom * 100}%`, left: `${-100 * visibleTime.start / visibleTime.span}%`,
-                  }}>{Array.from({ length: 10 }, (_, index) => frames[index] ? <img draggable={false} alt="" key={index} src={frames[index]} /> : <span key={index} />)}</div></div>
+                  <div className="filmstrip" aria-hidden="true">{filmTiles.map(tile => {
+                    const overview = overviewTiles[Math.min(9, Math.floor(tile.time / duration * 10))]
+                    const frame = frames[tile.time] || frames[overview?.time]
+                    return <div className="frame-tile" key={tile.index} style={{ left: `${tile.left}%` }}>
+                      {frame && <img draggable={false} alt="" src={frame} />}
+                    </div>
+                  })}</div>
+                  {clips.map(clip => pct(clip.end) > pct(clip.start) && <div key={clip.id} className="clip-tint"
+                    style={{ left: `${pct(clip.start)}%`, width: `${pct(clip.end) - pct(clip.start)}%`, backgroundColor: clipColor(clip.id) + '35', borderColor: clipColor(clip.id) }} />)}
+                  {overlaps.map(overlap => pct(overlap.end) > pct(overlap.start) && <div key={overlap.start} className="overlap-line"
+                    title="Overlapping clips" style={{ left: `${pct(overlap.start)}%`, width: `${pct(overlap.end) - pct(overlap.start)}%` }} />)}
                   <div className="range-shade" style={{ width: `${pct(range.start)}%` }} />
                   <div className="range-shade right" style={{ width: `${100 - pct(range.end)}%` }} />
                   <div className="selection" style={{ left: `${pct(range.start)}%`, width: `${pct(range.end) - pct(range.start)}%` }} />
@@ -1640,29 +1877,21 @@ export function App() {
                 title={`Clip ${index + 1} · ${stamp(clip.start, true)} – ${stamp(clip.end, true)}`}
                 aria-label={`Select clip ${index + 1} on timeline`} disabled={disabled}
                 aria-pressed={clip.id === selectedId}
-                style={{ left: `${pct(clip.start)}%`, width: `${pct(clip.end) - pct(clip.start)}%` }}
+                style={{ left: `${pct(clip.start)}%`, width: `${pct(clip.end) - pct(clip.start)}%`, backgroundColor: clipColor(clip.id) }}
                 onClick={() => selectClip(clip)} />)}
             </div>}
             {source && <input className="accessible-scrubber" aria-label="Playhead time" type="range" min={0} max={duration} step="any" value={time} onChange={event => seek(Number(event.target.value))} />}
           </div>
-          {timelineZoom > 1 && <div className="timeline-pan">
-            <input type="range" aria-label="Scroll timeline" title="Drag to scroll left or right"
-              min={0} max={visibleTime.maxStart} step="any" value={visibleTime.start}
-              aria-valuetext={stamp(visibleTime.start, true)}
-              onChange={event => {
-                timelinePanned.current = true
-                setTimelineStart(Number(event.target.value))
-              }} />
-          </div>}
-          <div className="trim-bar" role="group" aria-label="Trim range">
-            <TimeField label="In" value={range.start} disabled={trimDisabled} onChange={value => editBoundary('start', value)} onMark={() => editBoundary('start', time)} />
-            <TimeField label="Out" value={range.end} disabled={trimDisabled} onChange={value => editBoundary('end', value)} onMark={() => editBoundary('end', time)} />
-            <button className="icon-button compact" title="Reset trim range" aria-label="Reset trim range" onClick={resetRange} disabled={trimDisabled}><RotateCcw size={15} /></button>
-            {hasSource && <span className="range-duration" title={canSaveRange ? 'Trim range duration' : 'A clip must be at least 0.05 seconds long'}>{stamp(range.end - range.start, true)}</span>}
-            <button className="button outline small trim-section" disabled={!canTrim}
-              title="Remove the In–Out range and mark the remaining parts on the timeline" onClick={trimSection}><Scissors size={14} /> Trim</button>
-            {selectedLocked ? <button className="button add" onClick={resetRange}><Plus size={16} /> New clip</button> : <button className="button add" disabled={trimDisabled || !canSaveRange || editingCaptionJob} onClick={addClip}>{selectedId === null ? <Plus size={16} /> : <Check size={16} />}{selectedId === null ? 'Add clip' : 'Update clip'}</button>}
-          </div>
+          {timelineZoom > 1 && <div ref={timelineScroll} className="timeline-pan" tabIndex={0} aria-label="Scroll timeline"
+            onScroll={event => {
+              const bar = event.currentTarget
+              const travel = bar.scrollWidth - bar.clientWidth
+              if (!travel) return
+              const start = bar.scrollLeft / travel * visibleTime.maxStart
+              if (Math.abs(start - visibleTime.start) / visibleTime.maxStart <= 1 / travel) return
+              timelinePanned.current = true
+              setTimelineStart(start)
+            }}><div style={{ width: `${timelineZoom * 100}%` }} /></div>}
           {sections.length > 0 && <div className="section-review" role="group" aria-label="Review marked sections">
             <button className="button outline small" disabled={disabled || reviewIndex === 0} onClick={() => reviewSection(sections, reviewIndex === null ? sections.length - 1 : reviewIndex - 1)}>Previous</button>
             <label><span className="sr-only">Marked section</span><select value={reviewIndex ?? ''} disabled={disabled} onChange={event => reviewSection(sections, Number(event.target.value))}>
@@ -1676,8 +1905,8 @@ export function App() {
       </main>
 
       <footer className="statusbar">
-        <div className="status-left" role="status"><span className={`status-dot ${notice ? 'error' : ''}`} />
-          {notice || (loading ? 'Reading video…' : summary ? `Saved ${summary.saved} of ${summary.total} clips` : 'Local editing')}
+        <div className="status-left" role="status"><span aria-hidden="true" className={`status-dot ${backgroundStatus ? 'active' : notice ? 'error' : ''}`} />
+          <span className="status-text" title={status}>{status}</span>
         </div>
         <button className="text-button footer-shortcuts" onClick={() => setShortcuts(true)}><Keyboard size={15} /> Shortcuts</button>
       </footer>

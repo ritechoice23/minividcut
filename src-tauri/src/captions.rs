@@ -18,7 +18,7 @@ use transcribe_cpp::{
 
 type Result<T> = std::result::Result<T, String>;
 const MODEL_FILE: &str = "parakeet-tdt-0.6b-v3-Q8_0.gguf";
-const MODEL_BYTES: u64 = 739_508_576;
+pub(crate) const MODEL_BYTES: u64 = 739_508_576;
 const MODEL_SHA256: &str = "5859f77944efcd8eafa23a6350731960b2b55b2203df51f319665c807d802cc7";
 const MODEL_URL: &str = concat!(
     "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf/resolve/",
@@ -92,16 +92,45 @@ pub struct CaptionRequest {
     allow_download: bool,
 }
 
-fn model_path(app: &AppHandle) -> Result<PathBuf> {
+pub(crate) fn model_path(app: &AppHandle) -> Result<PathBuf> {
     app.path()
         .app_local_data_dir()
         .map(|dir| dir.join("models").join(MODEL_FILE))
         .map_err(|error| error.to_string())
 }
 
-fn installed(path: &Path) -> bool {
+pub(crate) fn installed(path: &Path) -> bool {
     path.metadata()
         .is_ok_and(|file| file.is_file() && file.len() == MODEL_BYTES)
+}
+
+pub(crate) async fn manage_model(
+    app: AppHandle,
+    install: bool,
+    progress: Channel<String>,
+) -> Result<()> {
+    let path = model_path(&app)?;
+    background(move || {
+        let engine = app.state::<CaptionEngine>();
+        let job = engine
+            .begin()
+            .map_err(|_| "Wait for captioning to finish and try again.")?;
+        if install {
+            if !installed(&path) {
+                tauri::async_runtime::block_on(download_model(&path, &job.cancel, &|stage| {
+                    if let CaptionProgress::Downloading { fraction } = stage {
+                        let _ =
+                            progress.send(format!("Downloading • {}%", (fraction * 100.0).floor()));
+                    }
+                }))?;
+            }
+        } else {
+            *lock(&engine.session)? = None;
+            crate::models::remove_file(&path)?;
+        }
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]

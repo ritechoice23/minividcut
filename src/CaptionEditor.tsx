@@ -1,15 +1,15 @@
-import { memo, useState } from 'react'
-import { Copy, Plus, Subtitles, Trash2 } from 'lucide-react'
+import { memo, useId, useState } from 'react'
+import { Clock3, Copy, Plus, SlidersHorizontal, Subtitles, Trash2, X } from 'lucide-react'
 import { parseTime, stamp } from './clip'
 import type { Range } from './clip'
-import { CAPTION_ACCENT, CAPTION_FONTS, CAPTION_STROKE, CAPTION_SYNC_MS, DEFAULT_CAPTION_STYLE, captionStroke, fitCaptionTiming } from './captions'
+import { CAPTION_ACCENT, CAPTION_FONTS, CAPTION_STROKE, DEFAULT_CAPTION_STYLE, captionStroke, fitCaptionTiming } from './captions'
 import type { CaptionFormat, CaptionStyle, CaptionTrack } from './captions'
 
 export type CaptionModel = { installed: boolean; bytes: number }
 export type CaptionProgress = ({ stage: 'preparing' | 'loading' | 'starting' | 'canceling' }
   | { stage: 'downloading' | 'transcribing'; fraction: number }) & { index?: number; total?: number }
 
-function progressLabel(progress: CaptionProgress) {
+export function progressLabel(progress: CaptionProgress) {
   switch (progress.stage) {
     case 'starting':
     case 'preparing': return 'Preparing audio…'
@@ -39,6 +39,29 @@ function CueTime({ label, value, offset, onSave }: {
   />
 }
 
+function StyleNumber({ label, unit, value, min, max, presets, onChange }: {
+  label: string; unit: string; value: number; min: number; max: number
+  presets: number[]; onChange: (value: number) => void
+}) {
+  const id = useId()
+  const [draft, setDraft] = useState<string | null>(null)
+  return <label>{label}
+    <span className="caption-number">
+      <input type="number" list={id} min={min} max={max} step="1" value={draft ?? value}
+        aria-label={`${label} (${unit})`}
+        onChange={event => {
+          const input = event.currentTarget
+          setDraft(input.value)
+          if (input.value && input.validity.valid) onChange(input.valueAsNumber)
+        }}
+        onBlur={() => setDraft(null)}
+        onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} />
+      <span aria-hidden="true">{unit}</span>
+    </span>
+    <datalist id={id}>{presets.map(preset => <option key={preset} value={preset} />)}</datalist>
+  </label>
+}
+
 const STYLE_OPTIONS = {
   preset: { classic: 'Classic', boxed: 'Soft box', serif: 'Editorial serif' },
   mode: { phrase: 'Phrase', highlight: 'Highlight', word: 'Word by word' },
@@ -46,26 +69,19 @@ const STYLE_OPTIONS = {
 }
 
 export const CaptionEditor = memo(function CaptionEditor({
-  label, range, track, model, progress, status, format, editing, canGenerate, canApplyStyle, defaultStyle,
-  onChange, onStyle, onApplyStyle, onGenerate, onCancel, onSeek, getTime,
+  label, range, track, model, progress, status, editing, canGenerate, defaultStyle, styleOpen,
+  onChange, onOpenStyle, onGenerate, onCancel, onSeek, getTime,
 }: {
   label: string; range: Range; track?: CaptionTrack; model: CaptionModel | null; progress: CaptionProgress | null
-  status: string; format: CaptionFormat; editing: boolean; onChange: (track: CaptionTrack) => void
-  canGenerate: boolean; canApplyStyle: boolean; defaultStyle?: CaptionStyle; onApplyStyle: (style: CaptionStyle) => boolean
-  onStyle: (style: CaptionStyle) => void; onGenerate: () => void; onCancel: () => void
+  status: string; editing: boolean; onChange: (track: CaptionTrack) => void
+  canGenerate: boolean; defaultStyle?: CaptionStyle; styleOpen: boolean
+  onOpenStyle: () => void; onGenerate: () => void; onCancel: () => void
   onSeek: (time: number) => void; getTime: () => number
 }) {
   const [feedback, setFeedback] = useState('')
-  const [styleOpen, setStyleOpen] = useState(false)
+  const [openCue, setOpenCue] = useState<number | null>(null)
   const { style, cues } = track ?? { style: defaultStyle ?? DEFAULT_CAPTION_STYLE, cues: [] }
   const update = (next: CaptionTrack) => { setFeedback(''); onChange(next) }
-  const restyle = (changes: Partial<CaptionStyle>) => { setFeedback(''); onStyle({ ...style, ...changes }) }
-  const applyStyle = () => {
-    if (onApplyStyle(style)) {
-      setStyleOpen(false)
-      setFeedback('Style applied to all clips.')
-    }
-  }
   const setTime = (index: number, edge: keyof Range, value: number) => {
     const cue = fitCaptionTiming(cues, index, edge, value, range)
     if (cue) update({ style, cues: cues.map((item, row) => row === index ? cue : item) })
@@ -93,23 +109,68 @@ export const CaptionEditor = memo(function CaptionEditor({
           {model?.installed ? cues.length ? 'Regenerate' : 'Generate captions'
             : model ? `Download & generate · ${Math.round(model.bytes / 1_000_000)} MB` : 'Generate captions'}
         </button>
+        <div className="caption-tools">
+          {cues.length > 0 && <button id="caption-style-trigger" className="icon-button compact" title="Caption style" aria-label="Caption style"
+            aria-expanded={styleOpen} aria-controls="caption-style-panel" disabled={editing} onClick={onOpenStyle}><SlidersHorizontal size={16} /></button>}
         <button className="icon-button compact" title="Add caption at playhead" aria-label="Add caption at playhead" onClick={add}><Plus size={16} /></button>
+        </div>
     </div>
     {(feedback || status) && <p className="caption-feedback" role="status">{feedback || status}</p>}
     {model && !model.installed && !progress && !status && <p className="caption-feedback">One-time download. Transcription runs on this device.</p>}
     {cues.length > 0 && <>
-      <div className="caption-style-bar">
-        <button className="text-button" aria-expanded={styleOpen} aria-controls="caption-style" onClick={() => setStyleOpen(open => !open)}>Style</button>
-        <label><span className="sr-only">Caption behavior</span>
-          <select aria-label="Caption behavior" value={style.mode ?? 'phrase'} disabled={editing}
-            onChange={event => restyle({ mode: event.target.value as CaptionStyle['mode'] })}>
-            {Object.entries(STYLE_OPTIONS.mode).map(([value, title]) => <option key={value} value={value}>{title}</option>)}
-          </select>
-        </label>
-        <button className="text-button caption-apply" disabled={!canApplyStyle} onClick={applyStyle}
-          title="Copy this style to all clips and use it for new captions"><Copy size={12} /> Apply to all clips</button>
-      </div>
-      {styleOpen && <fieldset id="caption-style" className="caption-style" disabled={editing} aria-label="Caption appearance">
+      <ol className="caption-cues">
+        {cues.map((cue, index) => <li key={index}>
+          <fieldset disabled={editing} aria-label={`Caption ${index + 1}`}>
+          <div className="caption-cue-row">
+          <textarea aria-label={`Caption ${index + 1} text`} rows={2} maxLength={180} value={cue.text}
+            onFocus={() => onSeek(cue.start)}
+            onChange={event => update({ style, cues: cues.map((item, row) => row === index ? { ...item, text: event.target.value } : item) })} />
+          <div className="caption-cue-tools">
+          <button type="button" className="icon-button compact" title="Caption timing and actions"
+            aria-label={`Timing and actions for caption ${index + 1}`} aria-expanded={openCue === index}
+            onClick={() => setOpenCue(current => current === index ? null : index)}><Clock3 size={12} /></button>
+            <button type="button" className="icon-button compact" title="Remove caption" aria-label={`Remove caption ${index + 1}`}
+              onClick={() => {
+                setOpenCue(current => current === null || current === index ? null : current > index ? current - 1 : current)
+                update({ style, cues: cues.filter((_, row) => row !== index) })
+              }}><Trash2 size={13} /></button>
+          </div>
+          </div>
+          {openCue === index && <div className="caption-cue-time">
+            <CueTime label={`Caption ${index + 1} start`} value={cue.start} offset={range.start} onSave={value => setTime(index, 'start', value)} />
+            <span aria-hidden="true">–</span>
+            <CueTime label={`Caption ${index + 1} end`} value={cue.end} offset={range.start} onSave={value => setTime(index, 'end', value)} />
+
+          </div>}
+          </fieldset>
+        </li>)}
+      </ol>
+    </>}
+    </>}
+  </section>
+})
+
+export function CaptionStylePanel({ style, format, editing, canApplyStyle, onStyle, onApplyStyle, onClose }: {
+  style: CaptionStyle; format: CaptionFormat; editing: boolean; canApplyStyle: boolean
+  onStyle: (style: CaptionStyle) => void; onApplyStyle: (style: CaptionStyle) => boolean; onClose: () => void
+}) {
+  const restyle = (changes: Partial<CaptionStyle>) => onStyle({ ...style, ...changes })
+  const applyStyle = () => { if (onApplyStyle(style)) onClose() }
+  return <section id="caption-style-panel" className="moment-panel caption-style-panel panel" aria-labelledby="caption-style-title"
+    onKeyDown={event => {
+      if (event.key !== 'Escape') return
+      event.stopPropagation()
+      onClose()
+    }}>
+        <header className="caption-style-heading">
+          <h2 id="caption-style-title" tabIndex={-1}>Caption style</h2>
+          <button className="icon-button compact" aria-label="Close caption style" onClick={() => onClose()}><X size={17} /></button>
+        </header>
+        <fieldset className="caption-style" disabled={editing} aria-label="Caption appearance">
+        <label>Display<select value={style.mode ?? 'phrase'}
+          onChange={event => restyle({ mode: event.target.value as CaptionStyle['mode'] })}>
+          {Object.entries(STYLE_OPTIONS.mode).map(([value, title]) => <option key={value} value={value}>{title}</option>)}
+        </select></label>
         <label>Font<select aria-label="Font" value={style.font ?? (style.preset === 'serif' ? 'Georgia' : 'Arial')}
           onChange={event => restyle({ font: event.target.value as CaptionStyle['font'] })}>
           {CAPTION_FONTS.map(font => <option key={font}>{font}</option>)}
@@ -129,41 +190,22 @@ export const CaptionEditor = memo(function CaptionEditor({
           {style.points?.[format] && <option value="custom" disabled>Custom</option>}
           <option value="top">Top</option><option value="middle">Middle</option><option value="bottom">Bottom</option>
         </select></label>
-        <label>Size<input type="range" aria-label="Caption size" min="0.55" max="2" step="0.01"
-          value={style.scale ?? (style.size === 'small' ? 0.81 : style.size === 'large' ? 1.25 : 1)}
-          onChange={event => restyle({ scale: Number(event.target.value) })} /></label>
+        <StyleNumber label="Text size" unit="%" min={55} max={200}
+          value={Math.round((style.scale ?? (style.size === 'small' ? 0.81 : style.size === 'large' ? 1.25 : 1)) * 100)}
+          presets={[75, 90, 100, 110, 125, 150, 175, 200]} onChange={scale => restyle({ scale: scale / 100 })} />
+        <StyleNumber label="Stroke width" unit="%" min={0} max={30}
+          value={captionStroke(style)} presets={[0, 2, 4, 6, 8, 11, 15, 20, 25, 30]} onChange={stroke => restyle({ stroke })} />
         {style.mode === 'highlight' && <label>Highlight<input type="color" aria-label="Highlight color"
           value={style.accent ?? CAPTION_ACCENT} onChange={event => restyle({ accent: event.target.value })} /></label>}
-        <label>Stroke<input type="range" aria-label="Stroke width" min="0" max="30" step="1"
-          value={captionStroke(style)} onChange={event => restyle({ stroke: Number(event.target.value) })} /></label>
         <label>Stroke color<input type="color" aria-label="Stroke color" value={style.strokeColor ?? CAPTION_STROKE}
           onChange={event => restyle({ strokeColor: event.target.value })} /></label>
-        {style.mode !== 'phrase' && <label>Word sync<input type="number" aria-label="Word sync in milliseconds"
-          title="Positive values move word highlights later" min="-300" max="300" step="10"
-          value={style.syncMs ?? CAPTION_SYNC_MS} onChange={event => restyle({ syncMs: Math.max(-300, Math.min(300, Number(event.target.value))) })} /></label>}
-      </fieldset>}
-      <ol className="caption-cues">
-        {cues.map((cue, index) => <li key={index}>
-          <fieldset disabled={editing} aria-label={`Caption ${index + 1}`}>
-          <div className="caption-cue-time">
-            <button className="text-button" onClick={() => onSeek(cue.start)}
-              aria-label={`Seek to caption ${index + 1}`} title="Seek to caption">{index + 1}</button>
-            <CueTime label={`Caption ${index + 1} start`} value={cue.start} offset={range.start} onSave={value => setTime(index, 'start', value)} />
-            <span aria-hidden="true">–</span>
-            <CueTime label={`Caption ${index + 1} end`} value={cue.end} offset={range.start} onSave={value => setTime(index, 'end', value)} />
-            <button className="icon-button compact" title="Remove caption" aria-label={`Remove caption ${index + 1}`}
-              onClick={() => update({ style, cues: cues.filter((_, row) => row !== index) })}><Trash2 size={13} /></button>
-          </div>
-          <textarea aria-label={`Caption ${index + 1} text`} rows={2} maxLength={180} value={cue.text}
-            onFocus={() => onSeek(cue.start)}
-            onChange={event => update({ style, cues: cues.map((item, row) => row === index ? { ...item, text: event.target.value } : item) })} />
-          </fieldset>
-        </li>)}
-      </ol>
-    </>}
-    </>}
-  </section>
-})
+        </fieldset>
+        <footer className="caption-style-footer">
+          <button className="button outline small" disabled={!canApplyStyle} onClick={applyStyle}><Copy size={14} /> Apply to all clips</button>
+          <button className="button primary small" onClick={() => onClose()}>Done</button>
+        </footer>
+      </section>
+}
 
 export function CaptionJobProgress({ progress, onCancel }: { progress: CaptionProgress; onCancel: () => void }) {
   const fraction = 'fraction' in progress ? progress.fraction : undefined

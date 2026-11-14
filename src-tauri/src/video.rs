@@ -440,9 +440,16 @@ pub(crate) async fn background<T: Send + 'static>(
 }
 
 #[tauri::command]
-pub async fn open_video(app: AppHandle, path: PathBuf) -> Result<VideoInfo> {
+pub async fn open_video(
+    app: AppHandle,
+    path: PathBuf,
+    expected: Option<VideoIdentity>,
+) -> Result<VideoInfo> {
     background(move || {
         let video = probe(source(&path)?)?;
+        if expected.is_some_and(|expected| !expected.matches(&video)) {
+            return Err("This file differs from the saved draft source. Choose the original video.".into());
+        }
         app.asset_protocol_scope()
             .allow_file(&video.path)
             .map_err(|error| error.to_string())?;
@@ -455,6 +462,41 @@ pub async fn open_video(app: AppHandle, path: PathBuf) -> Result<VideoInfo> {
         Ok(video)
     })
     .await
+}
+
+#[derive(Deserialize)]
+pub struct VideoIdentity {
+    duration: f64,
+    width: u64,
+    height: u64,
+    bytes: u64,
+}
+
+impl VideoIdentity {
+    fn matches(&self, video: &VideoInfo) -> bool {
+        self.duration == video.duration
+            && self.width == video.width
+            && self.height == video.height
+            && self.bytes == video.bytes
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn draft_identity_allows_relocation_and_rejects_a_different_file_size() {
+    let expected = VideoIdentity { duration: 5.0, width: 640, height: 360, bytes: 1024 };
+    let mut video = VideoInfo {
+        duration: 5.0,
+        width: 640,
+        height: 360,
+        bytes: 1024,
+        frame_rate: 30.0,
+        path: PathBuf::from("relocated.mp4"),
+        name: "relocated.mp4".into(),
+    };
+    assert!(expected.matches(&video));
+    video.bytes += 1;
+    assert!(!expected.matches(&video));
 }
 
 fn ffmpeg() -> Command {
@@ -553,16 +595,19 @@ pub async fn clip_thumbnail(path: PathBuf, start: f64) -> Result<String> {
 }
 
 #[tauri::command]
-pub async fn thumbnails(path: PathBuf, duration: f64) -> Result<Vec<String>> {
+pub async fn thumbnails(path: PathBuf, duration: f64, times: Option<Vec<f64>>) -> Result<Vec<String>> {
     background(move || {
         let path = source(&path)?;
         if !duration.is_finite() || duration < MIN_CLIP {
             return Err("Invalid video duration.".into());
         }
-        Ok((0..10)
-            .map(|index| {
-                thumbnail_at(&path, duration * (f64::from(index) + 0.35) / 10.0).unwrap_or_default()
-            })
+        let times = times.unwrap_or_else(|| (0..10)
+            .map(|index| duration * (f64::from(index) + 0.35) / 10.0).collect());
+        if times.len() > 12 || times.iter().any(|time| !time.is_finite() || *time < 0.0 || *time >= duration) {
+            return Err("Invalid timeline thumbnail times.".into());
+        }
+        Ok(times.into_iter()
+            .map(|time| thumbnail_at(&path, time).unwrap_or_default())
             .collect())
     })
     .await

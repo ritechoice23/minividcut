@@ -13,6 +13,7 @@ use tauri::{ipc::Channel, AppHandle, Manager};
 
 type Result<T> = std::result::Result<T, String>;
 const MODEL: &str = "LFM2.5-350M-Q4_K_M.gguf";
+pub(crate) const MODEL_BYTES: u64 = 229_312_224;
 const RUNTIME: &str = "llama-b12360";
 const COMPLETION: &str = "llama-completion.exe";
 const MAX_TRANSCRIPT: usize = 6000;
@@ -213,53 +214,109 @@ async fn with_model<T: Send + 'static>(
     progress: Channel<String>,
     run: impl FnOnce(&Path, &Path) -> Result<T> + Send + 'static,
 ) -> Result<T> {
-    let directory = app
-        .path()
-        .app_local_data_dir()
-        .map_err(|error| error.to_string())?
-        .join("models");
+    let directory = model_directory(&app)?;
     background(move || {
         let state = app.state::<TitleEngine>();
-        let _job = state.0.lock().map_err(|_| "Restart MiniVidCut to use automatic titles.")?;
-        let report = |text| { let _ = progress.send(text); };
-        fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-        let runtime = directory.join(RUNTIME);
-        if !runtime.join(COMPLETION).is_file() {
-            let staging = tempfile::tempdir_in(&directory).map_err(|error| error.to_string())?;
-            let archive = staging.path().join("runtime.zip");
-            let unpacked = staging.path().join("runtime");
-            report("Downloading title engine…".into());
-            tauri::async_runtime::block_on(download(
-                "https://github.com/ggml-org/llama.cpp/releases/download/b12360/llama-b12360-bin-win-cpu-x64.zip",
-                25_097_627,
-                "eae1726047e0eaa707b1302929d196c999b96c2f243b21aea6e93bcebacc4e17",
-                &archive,
-                |percent| report(format!("Downloading title engine… {percent}%")),
-            ))?;
-            fs::create_dir(&unpacked).map_err(|error| error.to_string())?;
-            let tar = std::env::var_os("SystemRoot").ok_or("Could not locate Windows tar.")?;
-            if !command(std::path::PathBuf::from(tar).join("System32/tar.exe"))
-                .arg("-xf").arg(&archive).arg("-C").arg(&unpacked)
-                .status().map_err(|error| error.to_string())?.success()
-                || !unpacked.join(COMPLETION).is_file()
-            {
-                return Err("Could not unpack the title engine.".into());
-            }
-            fs::rename(unpacked, &runtime).map_err(|error| error.to_string())?;
-        }
-        let model = directory.join(MODEL);
-        if !model.metadata().is_ok_and(|info| info.is_file() && info.len() == 229_312_224) {
-            report("Downloading title model…".into());
-            tauri::async_runtime::block_on(download(
-                "https://huggingface.co/LiquidAI/LFM2.5-350M-GGUF/resolve/657e078c94084481950a2d555a941481f715536b/LFM2.5-350M-Q4_K_M.gguf",
-                229_312_224,
-                "7e6f72643caafc9a68256686638c4d7916f2cec76d1df478d4c3ddcd95a6aed4",
-                &model,
-                |percent| report(format!("Downloading title model… {percent}%")),
-            ))?;
-        }
+        let _job = state
+            .0
+            .lock()
+            .map_err(|_| "Restart MiniVidCut to use automatic titles.")?;
+        let (runtime, model) = install_model(&directory, &progress)?;
         run(&runtime, &model)
-    }).await
+    })
+    .await
+}
+
+fn model_directory(app: &AppHandle) -> Result<std::path::PathBuf> {
+    app.path()
+        .app_local_data_dir()
+        .map(|directory| directory.join("models"))
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) fn model_installed(app: &AppHandle) -> Result<bool> {
+    let directory = model_directory(app)?;
+    Ok(directory
+        .join(MODEL)
+        .metadata()
+        .is_ok_and(|info| info.is_file() && info.len() == MODEL_BYTES)
+        && directory.join(RUNTIME).join(COMPLETION).is_file())
+}
+
+pub(crate) async fn manage_model(
+    app: AppHandle,
+    install: bool,
+    progress: Channel<String>,
+) -> Result<()> {
+    let directory = model_directory(&app)?;
+    background(move || {
+        let engine = app.state::<TitleEngine>();
+        let _job = engine
+            .0
+            .try_lock()
+            .map_err(|_| "Wait for clip titles or Smart Split to finish and try again.")?;
+        if install {
+            install_model(&directory, &progress)?;
+        } else {
+            crate::models::remove_file(&directory.join(MODEL))?;
+        }
+        Ok(())
+    })
+    .await
+}
+
+fn install_model(
+    directory: &Path,
+    progress: &Channel<String>,
+) -> Result<(std::path::PathBuf, std::path::PathBuf)> {
+    let report = |text| {
+        let _ = progress.send(text);
+    };
+    fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    let runtime = directory.join(RUNTIME);
+    if !runtime.join(COMPLETION).is_file() {
+        let staging = tempfile::tempdir_in(directory).map_err(|error| error.to_string())?;
+        let archive = staging.path().join("runtime.zip");
+        let unpacked = staging.path().join("runtime");
+        report("Downloading title engine…".into());
+        tauri::async_runtime::block_on(download(
+            "https://github.com/ggml-org/llama.cpp/releases/download/b12360/llama-b12360-bin-win-cpu-x64.zip",
+            25_097_627,
+            "eae1726047e0eaa707b1302929d196c999b96c2f243b21aea6e93bcebacc4e17",
+            &archive,
+            |percent| report(format!("Downloading title engine… {percent}%")),
+        ))?;
+        fs::create_dir(&unpacked).map_err(|error| error.to_string())?;
+        let tar = std::env::var_os("SystemRoot").ok_or("Could not locate Windows tar.")?;
+        if !command(std::path::PathBuf::from(tar).join("System32/tar.exe"))
+            .arg("-xf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&unpacked)
+            .status()
+            .map_err(|error| error.to_string())?
+            .success()
+            || !unpacked.join(COMPLETION).is_file()
+        {
+            return Err("Could not unpack the title engine.".into());
+        }
+        fs::rename(unpacked, &runtime).map_err(|error| error.to_string())?;
+    }
+    let model = directory.join(MODEL);
+    if !model
+        .metadata()
+        .is_ok_and(|info| info.is_file() && info.len() == MODEL_BYTES)
+    {
+        report("Downloading title model…".into());
+        tauri::async_runtime::block_on(download(
+            "https://huggingface.co/LiquidAI/LFM2.5-350M-GGUF/resolve/657e078c94084481950a2d555a941481f715536b/LFM2.5-350M-Q4_K_M.gguf",
+            MODEL_BYTES,
+            "7e6f72643caafc9a68256686638c4d7916f2cec76d1df478d4c3ddcd95a6aed4",
+            &model,
+            |percent| report(format!("Downloading title model… {percent}%")),
+        ))?;
+    }
+    Ok((runtime, model))
 }
 
 #[cfg(test)]

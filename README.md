@@ -11,13 +11,15 @@ Add automatic captions on your device and export all your clips in one batch.
 
 Enable **Auto-title** in the Clips panel to name clips from their transcripts. The first title downloads a 229 MB language model and a 25 MB CPU runtime. Clips without captions also use the existing speech model. Double-click a clip title to edit it.
 
-Use **Smart Split** above the timeline to find moments by description, such as “the funniest moments, no more than 30 seconds.” The search reuses available captions and transcribes missing portions in the background. Suggestions appear below the player and on the timeline as the search runs. Preview a suggestion or add it to the clip list.
+Open **Smart Split** beside **Split range** above the timeline. Describe the moments to find, such as “the funniest moments, no more than 30 seconds.” The search reuses available captions and transcribes missing portions in the background. Suggestions appear in Smart Split and on the timeline as the search runs. Preview a suggestion or add it to the clip list.
 
 ## Built with
 
 React, TypeScript, and Vite for the interface, Tauri and Rust for the desktop app, and FFmpeg for video processing.
 
 ## Run on Windows
+
+[↗](https://github.com/ritechoice23/minividcut/releases/latest) **Download MiniVidCut for Windows x64**
 
 The Windows x64 installer includes FFmpeg and FFprobe with the libraries needed for video export and subtitle rendering. Install and open MiniVidCut to start cutting videos. MiniVidCut uses the Windows WebView2 runtime.
 
@@ -32,7 +34,7 @@ npm run tauri -- dev
 
 Build a Windows installer with `npm run tauri -- build`. Run the trim and export tests with `npm test` and `cargo test --manifest-path src-tauri/Cargo.toml`.
 
-The first Rust build downloads and verifies a pinned static FFmpeg archive and caches the tools in `src-tauri/binaries`. The installer includes the FFmpeg license. [↗](https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/tag/autobuild-2026-11-13-12-43) **FFmpeg binary release** · [↗](https://github.com/FFmpeg/FFmpeg/tree/f1acb0a266) **FFmpeg source revision** · [↗](https://github.com/FFmpeg-Builds/FFmpeg-Builds/tree/c9fe5114060e507409f7ee07edfd82efaf25d767) **Build scripts**
+The first Rust build downloads and verifies a pinned static FFmpeg archive and caches the tools in `src-tauri/binaries`. The installer includes the FFmpeg license. The release page provides the corresponding source downloads. [↗](https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/tag/autobuild-2026-11-13-12-43) **FFmpeg binary release** · [↗](https://github.com/FFmpeg/FFmpeg/tree/f1acb0a266) **FFmpeg source revision** · [↗](https://github.com/FFmpeg-Builds/FFmpeg-Builds/tree/c9fe5114060e507409f7ee07edfd82efaf25d767) **Build scripts**
 
 MiniVidCut saves one local recovery draft. Use **Resume draft** after restarting or **Locate video** if you moved the original. **Cancel export** stops the batch and keeps clips that have already been saved.
 

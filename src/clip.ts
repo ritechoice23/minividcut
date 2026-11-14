@@ -14,6 +14,15 @@ export function stamp(seconds: number, precision = false) {
   return precision ? clock + '.' + String(ms % 1000).padStart(3, '0') : clock
 }
 
+export function clipDuration(seconds: number) {
+  if (seconds < 1) return '<1s'
+  const total = Math.floor(seconds)
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor(total / 60) % 60
+  const remainder = total % 60
+  return [hours && `${hours}h`, minutes && `${minutes}m`, remainder && `${remainder}s`].filter(Boolean).join(' ')
+}
+
 export function parseTime(value: string) {
   const time = value.trim()
   if (!/^(?:\d+:){0,2}\d+(?:\.\d{1,3})?$/.test(time)) return NaN

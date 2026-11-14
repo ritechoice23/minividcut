@@ -1,6 +1,21 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { panTimeline, timelineWindow, zoomTimeline, timelineTime } from '../src/timeline.ts'
+import { panTimeline, timelineFrames, timelineOverlaps, timelineWindow, zoomTimeline, timelineTime } from '../src/timeline.ts'
+
+test('marks shared coverage without treating adjacent clips as overlapping', () => {
+  assert.deepEqual(timelineOverlaps([
+    { start: 8, end: 15 }, { start: 0, end: 10 }, { start: 9, end: 12 }, { start: 15, end: 20 },
+  ]), [{ start: 8, end: 12 }])
+})
+
+test('keeps frame times anchored as the zoomed viewport pans', () => {
+  const first = timelineFrames(120, 4, 30)
+  const next = timelineFrames(120, 4, 31)
+  assert.equal(first[0].time, next[0].time)
+  assert.equal(first[0].left, 0)
+  assert.ok(next[0].left < 0)
+  assert.ok(timelineFrames(120, 4, 90).every(frame => frame.time < 120))
+})
 
 test('centers the zoom on the playhead and clamps to the video ends', () => {
   assert.equal(zoomTimeline(120, 4, 60), 45)

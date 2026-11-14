@@ -2,6 +2,7 @@ mod caption_overlay;
 mod caption_render;
 mod captions;
 mod export_batch;
+mod models;
 mod titles;
 mod video;
 
@@ -20,6 +21,8 @@ pub fn run() {
             captions::cancel_captions,
             titles::generate_title,
             titles::select_moment,
+            models::local_models,
+            models::manage_local_model,
             caption_overlay::prepare_caption_overlay,
             caption_overlay::discard_caption_overlays,
             video::open_video,

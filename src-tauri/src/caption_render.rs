@@ -107,7 +107,7 @@ impl CaptionTrack {
             }
             let text = cue
                 .text
-                .replace('\\', "\\​")
+                .replace('\\', "\\\u{200B}")
                 .replace('{', "｛")
                 .replace('}', "｝")
                 .replace("\r\n", "\n")
@@ -139,7 +139,7 @@ mod tests {
         let ass = track.ass(1080, 1920, 3.0);
         assert!(ass.contains("PlayResX: 1080\nPlayResY: 1920"));
         assert!(ass.contains(
-            "Dialogue: 0,0:00:00.00,0:00:03.00,Caption,,0,0,0,,Hello, ｛\\​pos(2,2)｝\\NWorld"
+            "Dialogue: 0,0:00:00.00,0:00:03.00,Caption,,0,0,0,,Hello, ｛\\\u{200B}pos(2,2)｝\\NWorld"
         ));
     }
 }

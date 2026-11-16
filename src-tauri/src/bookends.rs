@@ -358,7 +358,12 @@ pub async fn inspect_bookend(app: AppHandle, path: PathBuf) -> Result<BookendInf
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-        Ok(BookendInfo { image, path, name, duration })
+        Ok(BookendInfo {
+            image,
+            path,
+            name,
+            duration,
+        })
     })
     .await
 }

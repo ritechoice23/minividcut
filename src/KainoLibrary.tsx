@@ -166,6 +166,7 @@ export function KainoLibrary({ enabled, collection, onCollectionChange, canUse, 
   useEffect(() => {
     if (!enabled) stopPreview()
   }, [enabled, stopPreview])
+  useEffect(() => { stopPreview() }, [collection, stopPreview])
   useEffect(() => stopPreview, [stopPreview])
 
   useEffect(() => {

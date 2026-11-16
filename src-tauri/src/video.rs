@@ -550,13 +550,17 @@ const MUSIC_FORMATS: &str = "mp3,wav,flac,ogg,opus,aac,mov,mp4,m4a,3gp,3g2,mj2";
 #[derive(Clone, Deserialize, PartialEq, Eq, Hash)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum MusicTrack {
-    Library { id: String },
+    Library {
+        id: String,
+    },
     Kaino {
         id: String,
         #[serde(default)]
         collection: crate::kaino::Collection,
     },
-    File { path: PathBuf },
+    File {
+        path: PathBuf,
+    },
 }
 
 impl MusicTrack {
@@ -657,7 +661,12 @@ fn music_level_filter(level: String, duration: f64, fade: bool) -> String {
     )
 }
 
-pub(crate) fn caption_audio(path: &Path, mut range: Clip, duration: f64, pcm: &Path) -> Result<f64> {
+pub(crate) fn caption_audio(
+    path: &Path,
+    mut range: Clip,
+    duration: f64,
+    pcm: &Path,
+) -> Result<f64> {
     source(path)?;
     validate_clips(std::slice::from_mut(&mut range), duration)?;
     let duration = range.end - range.start;
@@ -752,8 +761,11 @@ fn thumbnail_batch(path: &Path, times: &[f64]) -> Vec<String> {
 pub async fn clip_thumbnails(path: PathBuf, starts: Vec<f64>) -> Result<Vec<String>> {
     background(move || {
         let path = source(&path)?;
-        if starts.is_empty() || starts.len() > MAX_CLIPS
-            || starts.iter().any(|start| !start.is_finite() || *start < 0.0)
+        if starts.is_empty()
+            || starts.len() > MAX_CLIPS
+            || starts
+                .iter()
+                .any(|start| !start.is_finite() || *start < 0.0)
         {
             return Err("Invalid clip thumbnail times.".into());
         }
@@ -1278,7 +1290,11 @@ fn resolve_clip_media(
                 path,
                 volume: music.volume,
                 source_audio,
-                start: if music.start.is_finite() && music.start >= 0.0 { music.start } else { 0.0 },
+                start: if music.start.is_finite() && music.start >= 0.0 {
+                    music.start
+                } else {
+                    0.0
+                },
                 fade: music.fade,
             })
         })
@@ -1402,7 +1418,11 @@ pub async fn warm_encoders(app: AppHandle) {
         for format in [Format::Landscape, Format::Portrait] {
             for quality in [Quality::Compact, Quality::Compatible, Quality::Lossless] {
                 let key = (quality, format);
-                if exports.encoders.lock().is_ok_and(|cache| cache.contains_key(&key)) {
+                if exports
+                    .encoders
+                    .lock()
+                    .is_ok_and(|cache| cache.contains_key(&key))
+                {
                     continue;
                 }
                 let found = tauri::async_runtime::spawn_blocking(move || {
@@ -1621,8 +1641,14 @@ mod tests {
         output(
             ffmpeg()
                 .args([
-                    "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=10", "-t", "2",
-                    "-c:v", "libx264",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=160x90:rate=10",
+                    "-t",
+                    "2",
+                    "-c:v",
+                    "libx264",
                 ])
                 .arg(&source),
             "ffmpeg",
@@ -1632,7 +1658,9 @@ mod tests {
         let times = [0.2, 1.2, 0.7];
         let frames = thumbnail_batch(&source, &times);
         assert_eq!(frames.len(), times.len());
-        assert!(frames.iter().all(|frame| frame.starts_with("data:image/jpeg;base64,")));
+        assert!(frames
+            .iter()
+            .all(|frame| frame.starts_with("data:image/jpeg;base64,")));
         assert_ne!(frames[0], frames[1]);
     }
 
@@ -1954,10 +1982,7 @@ mod tests {
     fn music_fades_only_when_requested_and_scaled_to_short_segments() {
         let level = "[1:a:0]volume=0.2".to_string();
         assert_eq!(music_level_filter(level.clone(), 4.0, false), level);
-        assert_eq!(
-            music_level_filter(level.clone(), -1.0, true),
-            level
-        );
+        assert_eq!(music_level_filter(level.clone(), -1.0, true), level);
         let short = music_level_filter(level.clone(), 0.6, true);
         assert!(short.contains("afade=t=in:st=0:d=0.200"));
         assert!(short.contains("afade=t=out:st=0.400:d=0.200"));

@@ -93,7 +93,6 @@ impl Collection {
             Self::Sfx => "sfx",
         }
     }
-
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -415,7 +414,7 @@ pub async fn search_kaino(
     let search = retry_network(&progress, |attempt| {
         let (client, body, progress) = (&client, &body, &progress);
         async move {
-            report(&progress, "loadingCatalog", attempt, None);
+            report(progress, "loadingCatalog", attempt, None);
             let response = client
                 .post(format!("{BASE}/mcp"))
                 .header("Accept", "application/json, text/event-stream")
@@ -444,7 +443,10 @@ pub async fn search_kaino(
 }
 
 #[tauri::command]
-pub async fn local_kaino_tracks(app: AppHandle, collection: Option<Collection>) -> Result<Vec<Track>> {
+pub async fn local_kaino_tracks(
+    app: AppHandle,
+    collection: Option<Collection>,
+) -> Result<Vec<Track>> {
     let collection = collection.unwrap_or(Collection::Music);
     video::background(move || {
         let entries = match fs::read_dir(root_for(&app, collection)?) {
@@ -482,19 +484,28 @@ pub async fn download_kaino(
         return Ok(track);
     }
     let flag = cancels.begin(&id);
-    let _guard = CancelGuard { cancels: &cancels, id: id.clone() };
+    let _guard = CancelGuard {
+        cancels: &cancels,
+        id: id.clone(),
+    };
     check_cancel(&flag)?;
     let client = client(Duration::from_secs(90))?;
     let details = track_details(&client, &progress, &id, collection).await?;
     check_cancel(&flag)?;
     let listed_size = mp3_download(&details)?.bytes;
-    let download_url = format!("{BASE}/api/library/{}/{id}/download?format=mp3", collection.as_str());
+    let download_url = format!(
+        "{BASE}/api/library/{}/{id}/download?format=mp3",
+        collection.as_str()
+    );
     let bytes = retry_network(&progress, |attempt| {
         let (client, download_url, progress) = (&client, &download_url, &progress);
         let flag = Arc::clone(&flag);
         async move {
-            check_cancel(&flag).map_err(|message| RequestError { message, retry: false })?;
-            report(&progress, "downloading", attempt, None);
+            check_cancel(&flag).map_err(|message| RequestError {
+                message,
+                retry: false,
+            })?;
+            report(progress, "downloading", attempt, None);
             let mut response = client
                 .get(download_url.as_str())
                 .send()
@@ -510,7 +521,10 @@ pub async fn download_kaino(
             let mut bytes = Vec::with_capacity(expected.unwrap_or(0));
             let mut last_percent = None;
             while let Some(chunk) = response.chunk().await.map_err(network_error)? {
-                check_cancel(&flag).map_err(|message| RequestError { message, retry: false })?;
+                check_cancel(&flag).map_err(|message| RequestError {
+                    message,
+                    retry: false,
+                })?;
                 if bytes.len() + chunk.len() > expected.unwrap_or(MAX_AUDIO) {
                     return Err("Invalid track size.".into());
                 }
@@ -520,7 +534,7 @@ pub async fn download_kaino(
                     if last_percent != Some(percent) {
                         last_percent = Some(percent);
                         report(
-                            &progress,
+                            progress,
                             "downloading",
                             attempt,
                             Some(f64::from(percent) / 100.0),
@@ -575,7 +589,10 @@ async fn fetch_preview(
     id: &str,
     collection: Collection,
 ) -> Result<Vec<u8>> {
-    let url = format!("{BASE}/api/library/{}/{id}/download?format=mp3", collection.as_str());
+    let url = format!(
+        "{BASE}/api/library/{}/{id}/download?format=mp3",
+        collection.as_str()
+    );
     retry_network(progress, |attempt| {
         let (client, url, progress) = (client, &url, progress);
         async move {
@@ -664,7 +681,11 @@ pub async fn preview_kaino(
 }
 
 #[tauri::command]
-pub async fn remove_kaino(app: AppHandle, id: String, collection: Option<Collection>) -> Result<()> {
+pub async fn remove_kaino(
+    app: AppHandle,
+    id: String,
+    collection: Option<Collection>,
+) -> Result<()> {
     let collection = collection.unwrap_or(Collection::Music);
     video::background(move || {
         let root = root_for(&app, collection)?;
@@ -736,11 +757,26 @@ mod tests {
             collection: collection.into(),
             licence: Some(licence.into()),
         };
-        assert!(eligible(&track("afrobeat-01", "CC0-1.0", "music"), Collection::Music));
-        assert!(!eligible(&track("afrobeat-01", "CC-BY-4.0", "music"), Collection::Music));
-        assert!(!eligible(&track("afrobeat-01", "CC0-1.0", "sfx"), Collection::Music));
-        assert!(eligible(&track("amb-beach-01", "CC0-1.0", "sfx"), Collection::Sfx));
-        assert!(!eligible(&track("amb-beach-01", "CC0-1.0", "sfx"), Collection::Music));
+        assert!(eligible(
+            &track("afrobeat-01", "CC0-1.0", "music"),
+            Collection::Music
+        ));
+        assert!(!eligible(
+            &track("afrobeat-01", "CC-BY-4.0", "music"),
+            Collection::Music
+        ));
+        assert!(!eligible(
+            &track("afrobeat-01", "CC0-1.0", "sfx"),
+            Collection::Music
+        ));
+        assert!(eligible(
+            &track("amb-beach-01", "CC0-1.0", "sfx"),
+            Collection::Sfx
+        ));
+        assert!(!eligible(
+            &track("amb-beach-01", "CC0-1.0", "sfx"),
+            Collection::Music
+        ));
         assert_eq!(Collection::default(), Collection::Music);
         for id in ["../track", "con.mp3", "a--b", "a/b", "a%2fb"] {
             assert!(track_dir(Path::new("music"), id).is_err());

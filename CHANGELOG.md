@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Preview the full clip with intros, outros, transitions, captions and music composited live in the app — no render or temporary file until export.
+- Keep playback responsive by isolating time updates, batching thumbnail generation, preparing caption artwork concurrently, and warming hardware encoders ahead of the first export.
+- Verify the source video has not changed before exporting and release temporary asset access after a preview closes.
+
+- Trim now removes the In–Out range from every saved clip at once. A cut leaves each clip as a single object with internal source segments instead of creating “Part 2” duplicates, and deleted sections close up on export.
+- Edit clips directly on the timeline: select a clip, drag its edges, add a cut at the playhead with S, or remove it with Delete. Undo and redo are available from the timeline toolbar or Ctrl Z / Ctrl Shift Z.
+- Clips with internal cuts preview their remaining parts back to back; the Sequence timeline view shows how the export order closes up after cuts.
+- Switch the timeline between source time and a sequence view where cuts and deleted clips close the gaps, and drag clips there to reorder them. Snapping to nearby edit points can be toggled from the timeline toolbar.
+- The playhead no longer oscillates after a seek, and scrubbing no longer auto-pans the viewport under your pointer.
+- Ctrl + scroll the timeline to zoom in and out around the pointer in discrete steps. Shift + scroll or sideways trackpad swipes pan the viewport and drive the horizontal scrollbar; plain vertical scrolling leaves the timeline untouched so the filmstrip does not shift under the cursor. Wheel state is tracked in refs so rapid ticks do not make the view jump or the thumbnails churn.
+- Cutting speech out of a clip also removes those caption cues, including word timings, and trimming a clip edge keeps its captions inside the new bounds.
+- Music stays continuous across a clip's internal cuts instead of restarting at every segment.
+- Undo and redo now cover caption edits, music and bookend changes, and shared caption styling.
+
 - Keep the music panel focused on Kaino and local audio. Show progress and offer retry when catalog loading or a download fails.
 
 - Audition any Kaino track from the music library before downloading it. Previews stream a short sample and play inline without blocking other actions.

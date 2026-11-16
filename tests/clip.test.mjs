@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { cutRange, moveBoundary, parseTime, splitRange, stamp, validRange } from '../src/clip.ts'
+import {
+  clipSegments, cutRange, cutSegments, exportUnits, moveBoundary, normalizeClip, parseTime,
+  resizeClipEdge, segmentAt, splitClipAt, splitRange, stamp, trimClips, validRange, withSegments,
+} from '../src/clip.ts'
 
 test('accepts seconds and timecodes with millisecond precision', () => {
   assert.equal(parseTime('1:02:03.456'), 3723.456)
@@ -38,6 +41,7 @@ test('splits the active range without a tiny trailing clip', () => {
   ])
   assert.equal(splitRange({ start: 0, end: 1600 }, 15), null)
 })
+
 test('cuts a middle, edge, or entire section while dropping unusably short remnants', () => {
   const clip = { start: 1, end: 10 }
   assert.deepEqual(cutRange(clip, { start: 3, end: 7 }), [{ start: 1, end: 3 }, { start: 7, end: 10 }])
@@ -45,4 +49,77 @@ test('cuts a middle, edge, or entire section while dropping unusably short remna
   assert.deepEqual(cutRange(clip, { start: 4, end: 9.98 }), [{ start: 1, end: 4 }])
   assert.deepEqual(cutRange(clip, { start: 0, end: 11 }), [])
   assert.deepEqual(cutRange(clip, { start: 10, end: 11 }), [clip])
+})
+
+test('trims the In-Out range from every saved clip without splitting them', () => {
+  const first = { id: 1, start: 0, end: 10, title: 'Intro' }
+  const untouched = { id: 2, start: 12, end: 20 }
+  const swallowed = { id: 3, start: 4.5, end: 5.5, title: 'Detail' }
+  const sliced = []
+  const track = { cues: [] }
+  const result = trimClips([first, untouched, swallowed], { start: 4, end: 6 }, 24,
+    (_track, part) => { sliced.push(part); return track })
+
+  assert.equal(result.length, 2, 'the removed clip disappears and the cut clip stays one object')
+  assert.deepEqual(result[0], {
+    id: 1, start: 0, end: 10,
+    segments: [{ start: 0, end: 4 }, { start: 6, end: 10 }],
+    title: 'Intro', captions: track,
+  })
+  assert.equal(result[1], untouched, 'clips outside the cut keep their identity')
+  assert.deepEqual(sliced, [{ start: 0, end: 10 }], 'captions are sliced once to the shared bounds')
+})
+
+test('leaves clips unchanged when the cut misses them all', () => {
+  const clips = [{ id: 1, start: 0, end: 4 }, { id: 2, start: 6, end: 9 }]
+  assert.deepEqual(trimClips(clips, { start: 10, end: 12 }, 12), clips)
+})
+
+test('segment helpers keep bounds in sync', () => {
+  const clip = { id: 1, start: 0, end: 10 }
+  assert.deepEqual(clipSegments(clip), [{ start: 0, end: 10 }], 'draft clips without segments read as one range')
+  const next = withSegments(clip, [{ start: 6, end: 10 }, { start: 0, end: 4 }], 12)
+  assert.deepEqual(next.segments, [{ start: 0, end: 4 }, { start: 6, end: 10 }])
+  assert.deepEqual({ start: next.start, end: next.end }, { start: 0, end: 10 })
+  assert.deepEqual(cutSegments(next, { start: 3, end: 7 }, 12), [{ start: 0, end: 3 }, { start: 7, end: 10 }])
+  assert.equal(withSegments(clip, [{ start: 0, end: 0.01 }], 12), null)
+})
+
+test('a clip can be cut at the playhead, resized at its edges, and located by time', () => {
+  const clip = { id: 1, start: 0, end: 10, segments: [{ start: 0, end: 4 }, { start: 6, end: 10 }] }
+  assert.deepEqual(segmentAt(clip, 5), null, 'the removed middle is not part of the clip')
+  assert.deepEqual(segmentAt(clip, 7), { start: 6, end: 10 })
+
+  const split = splitClipAt(clip, 8, 12)
+  assert.deepEqual(split.segments, [{ start: 0, end: 4 }, { start: 6, end: 8 }, { start: 8, end: 10 }])
+  assert.equal(split.id, 1, 'splitting adds a boundary inside the same clip')
+  assert.equal(splitClipAt(clip, 5, 12), null, 'splitting inside a removed section is a no-op')
+
+  const grown = resizeClipEdge(clip, 'start', 0, 12)
+  assert.deepEqual(grown.segments, clip.segments)
+  const trimmedStart = resizeClipEdge(clip, 'start', 1, 12)
+  assert.deepEqual(trimmedStart.segments, [{ start: 1, end: 4 }, { start: 6, end: 10 }])
+  const trimmedEnd = resizeClipEdge(clip, 'end', 9, 12)
+  assert.deepEqual(trimmedEnd.segments, [{ start: 0, end: 4 }, { start: 6, end: 9 }])
+  assert.equal(resizeClipEdge(clip, 'start', 4, 12), null, 'an edge cannot cross its own segment')
+})
+
+test('export units flatten segments while keeping their parent clip', () => {
+  const clips = [
+    { id: 1, start: 0, end: 10, segments: [{ start: 0, end: 4 }, { start: 6, end: 10 }] },
+    { id: 2, start: 12, end: 20 },
+  ]
+  const units = exportUnits(clips)
+  assert.deepEqual(units.map(unit => [unit.clip.id, unit.segment, unit.first, unit.last]), [
+    [1, { start: 0, end: 4 }, true, false],
+    [1, { start: 6, end: 10 }, false, true],
+    [2, { start: 12, end: 20 }, true, true],
+  ])
+})
+
+test('draft migration normalizes clips written before segments existed', () => {
+  assert.deepEqual(normalizeClip({ id: 1, start: 2, end: 6 }, 10), { id: 1, start: 2, end: 6 })
+  assert.deepEqual(normalizeClip({ id: 1, start: 2, end: 6, segments: [{ start: 2, end: 4 }, { start: 5, end: 6 }] }, 10).segments,
+    [{ start: 2, end: 4 }, { start: 5, end: 6 }])
+  assert.equal(normalizeClip({ id: 1, start: 2, end: 11 }, 10), null)
 })

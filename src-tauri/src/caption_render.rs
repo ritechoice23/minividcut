@@ -1,3 +1,6 @@
+//! Legacy libass caption burner. Exports normally use the canvas-rendered PNG
+//! sprite overlay from `caption_overlay`; this ASS path is kept as a tested
+//! fallback for environments without a working browser canvas pipeline.
 use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 

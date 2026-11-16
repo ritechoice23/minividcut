@@ -3,7 +3,10 @@ import { captionLayouts, captionSequence, renderCaptionSprite } from './caption-
 import type { CaptionState } from './captions'
 import type { CaptionFormat, CaptionCue, CaptionTrack } from './captions'
 
-const RENDER_CONCURRENCY = 6
+// Caption PNGs can be large for word-by-word styling. Two in flight keeps the
+// parallel speed-up while bounding peak memory to roughly two overlay budgets.
+const RENDER_CONCURRENCY = 2
+const MAX_ARTWORK_BYTES = 64 * 1024 * 1024
 
 function png(canvas: HTMLCanvasElement) {
   return new Promise<Blob>((resolve, reject) => canvas.toBlob(blob => {
@@ -74,7 +77,7 @@ export async function prepareCaptionOverlay(track: CaptionTrack, format: Caption
     }))
     for (const image of rendered) {
       imageBytes += image.size
-      if (imageBytes > 125 * 1024 * 1024) throw new Error('Caption artwork is too large. Export a shorter clip.')
+      if (imageBytes > MAX_ARTWORK_BYTES) throw new Error('Caption artwork is too large. Export a shorter clip.')
       images.push(image)
     }
   }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { Play, X } from 'lucide-react'
@@ -21,7 +21,7 @@ type Props = {
 
 const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp', 'bmp']
 
-export function BookendsMenu({ project, clip, disabled, videoExtensions, aspect, open: visible, canPreview, onPreview, onClose, onChange }: Props) {
+export const BookendsMenu = memo(function BookendsMenu({ project, clip, disabled, videoExtensions, aspect, open: visible, canPreview, onPreview, onClose, onChange }: Props) {
   const [scope, setScope] = useState<'project' | 'clip'>('clip')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
@@ -107,7 +107,7 @@ export function BookendsMenu({ project, clip, disabled, videoExtensions, aspect,
       {error && <small role="alert">{error}</small>}
       </div>}
     </section>
-}
+})
 
 function ImagePlacement({ image, label, aspect, disabled, onChange }: {
   image: Bookend; label: string; aspect: number; disabled: boolean; onChange: (image: Bookend) => void

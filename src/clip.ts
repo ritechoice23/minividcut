@@ -3,7 +3,19 @@ import type { Music } from './music'
 import type { Bookends } from './bookends'
 
 export type Range = { start: number; end: number }
-export type Clip = Range & { id: number; title?: string; titleManuallyEdited?: boolean; captions?: CaptionTrack; music?: Music | null; bookends?: Bookends }
+// A clip is one editable object that may hold several source ranges. `start`
+// and `end` are the outer bounds of `segments` and must always be kept in sync
+// through withSegments(). Drafts written before segments existed only have the
+// bounds, which clipSegments() reads as a single segment.
+export type Clip = Range & {
+  id: number
+  segments?: Range[]
+  title?: string
+  titleManuallyEdited?: boolean
+  captions?: CaptionTrack
+  music?: Music | null
+  bookends?: Bookends
+}
 export const MIN_CLIP = 0.05
 export const MAX_CLIPS = 100
 
@@ -38,8 +50,10 @@ export function validRange(range: Range, duration: number) {
     && range.start >= 0 && range.end <= duration && range.end - range.start + 0.000001 >= MIN_CLIP
 }
 
+const boundary = (value: number, duration: number) => Math.abs(value - duration) <= 0.0005 ? duration : value
+
 export function moveBoundary(range: Range, side: keyof Range, value: number, duration: number): Range | null {
-  const mark = Math.abs(value - duration) <= 0.0005 ? duration : value
+  const mark = boundary(value, duration)
   if (!Number.isFinite(mark) || mark < 0 || mark > duration) return null
 
   if (side === 'start') {
@@ -67,4 +81,103 @@ export function cutRange(source: Range, cut: Range): Range[] {
 
 export function rangesOverlap(first: Range, second: Range) {
   return first.start < second.end && first.end > second.start
+}
+
+export function clipSegments(clip: Clip): Range[] {
+  return clip.segments?.length ? clip.segments : [{ start: clip.start, end: clip.end }]
+}
+
+export function withSegments(clip: Clip, segments: readonly Range[], duration: number): Clip | null {
+  const sorted = segments
+    .filter(segment => validRange(segment, duration))
+    .sort((first, second) => first.start - second.start)
+    .map(segment => ({ ...segment }))
+  if (!sorted.length) return null
+  return {
+    ...clip,
+    segments: sorted,
+    start: sorted[0].start,
+    end: sorted[sorted.length - 1].end,
+  }
+}
+
+export function cutSegments(clip: Clip, cut: Range, duration: number): Range[] {
+  return clipSegments(clip).flatMap(segment => cutRange(segment, cut)).filter(segment => validRange(segment, duration))
+}
+
+// Removes the In–Out range from every saved clip. Each clip stays a single
+// object: the remaining source ranges become its segments, so the cut closes
+// up on export instead of producing “Part 2” clones.
+export function trimClips(
+  clips: readonly Clip[],
+  cut: Range,
+  duration: number,
+  sliceCaptions?: (track: CaptionTrack | undefined, range: Range) => CaptionTrack | undefined,
+): Clip[] {
+  const result: Clip[] = []
+  let changed = false
+  for (const clip of clips) {
+    if (!clipSegments(clip).some(segment => rangesOverlap(segment, cut))) {
+      result.push(clip)
+      continue
+    }
+    changed = true
+    const remaining = cutSegments(clip, cut, duration)
+    if (!remaining.length) continue
+    const next = withSegments(clip, remaining, duration)!
+    result.push(sliceCaptions
+      ? { ...next, captions: sliceCaptions(clip.captions, { start: next.start, end: next.end }) }
+      : next)
+  }
+  return changed ? result : [...clips]
+}
+
+export function resizeClipEdge(clip: Clip, side: 'start' | 'end', value: number, duration: number): Clip | null {
+  const segments = clipSegments(clip)
+  const mark = boundary(value, duration)
+  if (!Number.isFinite(mark) || mark < 0 || mark > duration) return null
+  if (side === 'start') {
+    const first = segments[0]
+    if (mark > first.end - MIN_CLIP) return null
+    return withSegments(clip, [{ start: mark, end: first.end }, ...segments.slice(1)], duration)
+  }
+  const last = segments[segments.length - 1]
+  if (mark < last.start + MIN_CLIP) return null
+  return withSegments(clip, [...segments.slice(0, -1), { start: last.start, end: mark }], duration)
+}
+
+export function splitClipAt(clip: Clip, time: number, duration: number): Clip | null {
+  const mark = boundary(time, duration)
+  const segments = clipSegments(clip)
+  const index = segments.findIndex(segment => mark > segment.start + MIN_CLIP && mark < segment.end - MIN_CLIP)
+  if (index < 0) return null
+  const next = [...segments]
+  next.splice(index, 1, { start: segments[index].start, end: mark }, { start: mark, end: segments[index].end })
+  return withSegments(clip, next, duration)
+}
+
+export function segmentAt(clip: Clip, time: number): Range | null {
+  return clipSegments(clip).find(segment => time >= segment.start && time < segment.end) ?? null
+}
+
+export type ExportUnit = {
+  clip: Clip
+  segment: Range
+  first: boolean
+  last: boolean
+}
+
+export function exportUnits(clips: readonly Clip[]): ExportUnit[] {
+  return clips.flatMap(clip => {
+    const segments = clipSegments(clip)
+    return segments.map((segment, index) => ({
+      clip, segment, first: index === 0, last: index === segments.length - 1,
+    }))
+  })
+}
+
+export function normalizeClip(clip: Clip, duration: number): Clip | null {
+  if (!clip || !Number.isFinite(clip.id)) return null
+  if (Array.isArray(clip.segments) && clip.segments.length) return withSegments(clip, clip.segments, duration)
+  return validRange(clip, duration) ? { ...clip } : null
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { captionAt, captionDisplayText, captionSlice, captionStates, clipsNeedingCaptions, fitCaptionTiming, offsetCaption, restyleCaptionedClip, timedWords } from '../src/captions.ts'
+import { captionAt, captionCut, captionDisplayText, captionSlice, captionStates, clipsNeedingCaptions, fitCaptionTiming, offsetCaption, restyleCaptionedClip, timedWords } from '../src/captions.ts'
 
 const track = {
   style: { preset: 'classic', position: 'bottom', size: 'medium' },
@@ -12,6 +12,18 @@ test('batch generation skips clips with edited captions and fills empty tracks',
   const blank = { id: 2, start: 3, end: 5, captions: { ...track, cues: [{ start: 3, end: 4, text: '  ' }] } }
   const missing = { id: 3, start: 5, end: 6 }
   assert.deepEqual(clipsNeedingCaptions([saved, blank, missing]), [blank, missing])
+})
+
+test('a cut removes overlapping cues and keeps the spoken remnants', () => {
+  const withWords = { ...track, cues: [{ ...track.cues[0], words: [
+    { start: 3, end: 4, text: 'Hel' }, { start: 4.1, end: 5, text: 'lo' },
+  ] }] }
+  assert.deepEqual(captionCut(withWords, { start: 4, end: 4.5 }).cues, [
+    { start: 3, end: 4, text: 'Hello', words: [{ start: 3, end: 4, text: 'Hel' }] },
+    { start: 4.5, end: 5, text: 'Hello', words: [{ start: 4.5, end: 5, text: 'lo' }] },
+  ])
+  assert.deepEqual(captionCut(track, { start: 3, end: 8 }).cues, [])
+  assert.deepEqual(captionCut(track, { start: 9, end: 10 }).cues, track.cues)
 })
 
 test('word sync delays the highlight without extending it across silence', () => {

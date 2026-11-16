@@ -1,4 +1,5 @@
 export const MAX_TIMELINE_ZOOM = 128
+export const ZOOM_STEPS = [1, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128]
 
 export function timelineWindow(duration: number, zoom: number, start: number) {
   const span = duration / zoom
@@ -19,6 +20,12 @@ export function panTimeline(duration: number, zoom: number, start: number, scree
   return timelineWindow(duration, zoom, start + screenFraction * duration / zoom).start
 }
 
+// Keeps the time under the cursor at the same screen position after zooming.
+export function zoomAround(duration: number, zoom: number, anchor: number, fraction: number) {
+  const span = duration / zoom
+  return Math.max(0, Math.min(duration - span, anchor - fraction * span))
+}
+
 export function timelineOverlaps(ranges: { start: number; end: number }[]) {
   const edges = ranges.flatMap(range => [{ time: range.start, delta: 1 }, { time: range.end, delta: -1 }])
     .sort((a, b) => a.time - b.time)
@@ -34,6 +41,20 @@ export function timelineOverlaps(ranges: { start: number; end: number }[]) {
     else overlaps.push({ start, end })
   }
   return overlaps
+}
+
+export function snapTime(value: number, candidates: readonly number[], threshold: number) {
+  let nearest = value
+  let distance = threshold
+  for (const candidate of candidates) {
+    if (!Number.isFinite(candidate)) continue
+    const gap = Math.abs(candidate - value)
+    if (gap <= distance) {
+      nearest = candidate
+      distance = gap
+    }
+  }
+  return nearest
 }
 
 export function timelineFrames(duration: number, zoom: number, start: number) {

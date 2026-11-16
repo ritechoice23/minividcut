@@ -46,6 +46,18 @@ test('a long transition is capped at half the shorter segment', () => {
   assert.equal(plan.intro.overlap, 0.1) // min(15, 30, 3) frames
 })
 
+test('a clip with internal cuts previews its segments back to back', () => {
+  const plan = buildCompositionPlan({ ...base, range: { start: 10, end: 14 },
+    segments: [{ start: 10, end: 12 }, { start: 13, end: 14 }], bookends: {} })
+  assert.equal(plan.total, 3)
+  assert.deepEqual(plan.main.segments, [
+    { start: 0, sourceStart: 10, length: 2 },
+    { start: 2, sourceStart: 13, length: 1 },
+  ])
+  assert.equal(layerState('main', plan, 1.5).local, 11.5)
+  assert.equal(layerState('main', plan, 2.5).local, 13.5, 'playback jumps over the removed middle')
+})
+
 test('layer states expose crossfade alpha, slide travel and source-local time', () => {
   const plan = buildCompositionPlan({ ...base, bookends: {
     intro: { path: 'intro.mp4', name: 'intro', transition: 'fade' },

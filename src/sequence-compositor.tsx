@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode, Ref } from 'react'
+import { useEditor } from './editor-store'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import type { Range } from './clip'
 import type { Bookends } from './bookends'
 import type { CaptionTrack } from './captions'
-import { captionAt, captionSlice } from './captions'
+import { captionAt } from './captions'
 import { captionDimensions, captionLayouts, captionSequence, renderCaptionSprite } from './caption-artwork'
 import type { FramePosition, Framing } from './framing'
 import type { Music } from './music'
@@ -13,8 +14,8 @@ import type { BookendMedia, CompositionPlan, Format, LayerState } from './sequen
 
 export type Sequence = {
   path: string
-  duration: number
   range: Range
+  segments?: Range[]
   captions?: CaptionTrack
   music: Music | null
   musicPath: string
@@ -37,13 +38,11 @@ export type SequenceController = {
 
 type BookendInfo = { image: boolean; path: string; name: string; duration?: number }
 
-export function useSequencePreview(key: string, onError: (message: string) => void) {
+export function useSequenceCompositor(key: string, onError: (message: string) => void) {
   const [shown, setShown] = useState<string | null>(null)
   const [plan, setPlan] = useState<CompositionPlan | null>(null)
   const planRef = useRef<CompositionPlan | null>(null)
   const [preparing, setPreparing] = useState(false)
-  const [clock, setClock] = useState({ time: 0, duration: 0 })
-  const [playing, setPlaying] = useState(false)
 
   const request = useRef(0)
   const keyRef = useRef(key)
@@ -55,9 +54,46 @@ export function useSequencePreview(key: string, onError: (message: string) => vo
   const outroRef = useRef<HTMLMediaElement>(null)
   const musicRef = useRef<HTMLAudioElement>(null)
   const captionRef = useRef<HTMLCanvasElement>(null)
+  const audioGraph = useRef<{ context: AudioContext; destination: AudioNode } | null>(null)
   const visible = useRef({ intro: false, main: false, outro: false, music: false })
   const painter = useRef<((time: number, active: boolean) => void) | null>(null)
   const mediaCache = useRef(new Map<string, BookendMedia>())
+  const grantedAssets = useRef(new Set<string>())
+  const forceMute = useRef(false)
+
+  const connectAudio = (element: HTMLMediaElement) => {
+    if (!audioGraph.current) {
+      const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+      if (!AudioContextClass) return
+      const context = new AudioContextClass()
+      const limiter = context.createDynamicsCompressor()
+      limiter.threshold.value = -3
+      limiter.knee.value = 0
+      limiter.ratio.value = 20
+      limiter.attack.value = 0.003
+      limiter.release.value = 0.1
+      limiter.connect(context.destination)
+      audioGraph.current = { context, destination: limiter }
+    }
+    const { context, destination } = audioGraph.current
+    void context.resume().catch(() => {})
+    try {
+      context.createMediaElementSource(element).connect(destination)
+    } catch {
+      // An element can only be connected once; reconnecting is a no-op.
+    }
+  }
+
+  const safePlay = (element: HTMLMediaElement) => {
+    if (player.current.paused || !element.paused) return
+    void element.play().catch(() => {
+      // WebView2 can reject unmuted autoplay even after a click. Retry muted
+      // and keep subsequent frames muted until the preview is restarted.
+      forceMute.current = true
+      element.muted = true
+      void element.play().catch(() => {})
+    })
+  }
 
   const player = useRef<SequenceController>({
     currentTime: 0, duration: 0, paused: true, readyState: 4, volume: 1, muted: false,
@@ -80,9 +116,9 @@ export function useSequencePreview(key: string, onError: (message: string) => vo
     if (image) return
     if (!visible.current[flag] || Math.abs(element.currentTime - local) > 0.25) element.currentTime = local
     element.volume = state.alpha * player.current.volume
-    element.muted = player.current.muted
+    element.muted = player.current.muted || forceMute.current
     if (player.current.paused) element.pause()
-    else if (!visible.current[flag] || element.paused) void element.play().catch(() => {})
+    else if (!visible.current[flag] || element.paused) safePlay(element)
     visible.current[flag] = true
   }
 
@@ -101,10 +137,10 @@ export function useSequencePreview(key: string, onError: (message: string) => vo
     if (audio && current.music) {
       const local = audio.duration > 0 ? time % audio.duration : time
       audio.volume = current.music.volume / 100 * player.current.volume
-      audio.muted = player.current.muted
+      audio.muted = player.current.muted || forceMute.current
       if (!visible.current.music || Math.abs(audio.currentTime - local) > 0.4) audio.currentTime = local
       if (player.current.paused) audio.pause()
-      else if (audio.paused) void audio.play().catch(() => {})
+      else safePlay(audio)
       visible.current.music = true
     }
     painter.current?.(main.local, main.active)
@@ -112,7 +148,7 @@ export function useSequencePreview(key: string, onError: (message: string) => vo
 
   const pause = useCallback(() => {
     player.current.paused = true
-    setPlaying(false)
+    useEditor.getState().setSequencePlaying(false)
     window.cancelAnimationFrame(raf.current)
     mainRef.current?.pause()
     introRef.current?.pause()
@@ -126,35 +162,75 @@ export function useSequencePreview(key: string, onError: (message: string) => vo
     const value = Math.max(0, Math.min(current.total, time))
     player.current.currentTime = value
     update(current, value)
-    setClock({ time: value, duration: current.total })
+    useEditor.getState().setSequenceTime(value, current.total, layerState('main', current, value).local)
   }, [update])
 
   const play = useCallback(async () => {
     if (!plan) return
     if (player.current.currentTime >= plan.total - 0.001) seek(0)
     player.current.paused = false
-    setPlaying(true)
+    useEditor.getState().setSequencePlaying(true)
     lastFrame.current = performance.now()
     window.cancelAnimationFrame(raf.current)
+
+    // The audio element that is actually making sound is the most stable
+    // clock in the browser. When it is playing, advance from its currentTime
+    // and use requestVideoFrameCallback of the visible video as a secondary
+    // sync. Fall back to the rAF wall clock only before playback starts.
     const tick = (now: number) => {
-      if (player.current.paused || !plan) return
-      const step = Math.min(0.25, (now - lastFrame.current) / 1000)
+      if (player.current.paused || !planRef.current) return
+      const current = planRef.current
+      const wall = player.current.currentTime + Math.min(0.25, (now - lastFrame.current) / 1000)
       lastFrame.current = now
-      let time = player.current.currentTime + step
-      if (time >= plan.total) {
-        time = plan.total
+
+      let time = wall
+      const clockMedia = musicRef.current?.paused === false && musicRef.current.duration > 0
+        ? musicRef.current
+        : current.intro && layerState(current.intro, current, wall).active && !current.intro.image
+          ? introRef.current
+          : current.outro && outroLayerState(current, wall).active && !current.outro.image
+            ? outroRef.current
+            : mainRef.current
+      if (clockMedia && !clockMedia.paused && clockMedia.readyState > 1 &&
+          Number.isFinite(clockMedia.duration) && clockMedia.duration > 0) {
+        const clockTime = current.intro && clockMedia === introRef.current
+          ? clockMedia.currentTime
+          : current.outro && clockMedia === outroRef.current
+            ? current.outro.start + clockMedia.currentTime
+            : current.main.start + (clockMedia.currentTime - current.main.sourceStart)
+        if (Number.isFinite(clockTime) && Math.abs(clockTime - wall) < 0.6) time = clockTime
+      }
+
+      if (time >= current.total) {
+        time = current.total
         player.current.pause()
       }
       player.current.currentTime = time
-      update(plan, time)
+      update(current, time)
       if (now - lastClock.current > 100) {
         lastClock.current = now
-        setClock({ time, duration: plan.total })
+        useEditor.getState().setSequenceTime(time, current.total, layerState('main', current, time).local)
       }
       if (!player.current.paused) raf.current = window.requestAnimationFrame(tick)
     }
     raf.current = window.requestAnimationFrame(tick)
-  }, [plan, update, seek])
+  }, [update, seek])
+
+  // Keep the frame loop tied to the compositor's actual rendered frames when
+  // the browser supports it, instead of only running on the rAF wall clock.
+  useEffect(() => {
+    const video = mainRef.current
+    if (!shown || !video?.requestVideoFrameCallback) return
+    let handle = 0
+    let active = true
+    const onFrame = () => {
+      if (!active || player.current.paused || !planRef.current) return
+      update(planRef.current, player.current.currentTime)
+      handle = video.requestVideoFrameCallback(onFrame)
+    }
+    handle = video.requestVideoFrameCallback(onFrame)
+    return () => { active = false; video.cancelVideoFrameCallback?.(handle) }
+  }, [shown, update])
 
   player.current.play = play
   player.current.pause = pause
@@ -164,16 +240,22 @@ export function useSequencePreview(key: string, onError: (message: string) => vo
     ++request.current
     pause()
     window.cancelAnimationFrame(raf.current)
+    for (const path of grantedAssets.current) void invoke('release_asset', { path }).catch(() => {})
+    grantedAssets.current.clear()
+    void audioGraph.current?.context.close().catch(() => {})
+    audioGraph.current = null
     planRef.current = null
     player.current.currentTime = 0
     player.current.duration = 0
     visible.current = { intro: false, main: false, outro: false, music: false }
+    forceMute.current = false
     painter.current = null
     setShown(null)
     setPlan(null)
-    setPlaying(false)
     setPreparing(false)
-    setClock({ time: 0, duration: 0 })
+    useEditor.getState().setSequencePlaying(false)
+    useEditor.getState().setSequenceActive(false)
+    useEditor.getState().setSequenceTime(0, 0, 0)
   }, [pause])
 
   useEffect(() => {
@@ -185,8 +267,24 @@ export function useSequencePreview(key: string, onError: (message: string) => vo
   useEffect(() => stop, [stop])
   useEffect(() => {
     if (!shown) return
-    const handle = window.requestAnimationFrame(() => { void player.current.play() })
-    return () => window.cancelAnimationFrame(handle)
+    for (const element of [mainRef.current, introRef.current, outroRef.current, musicRef.current]) {
+      if (element && !(element instanceof HTMLImageElement)) connectAudio(element)
+    }
+    let cancelled = false
+    let attempts = 0
+    const prime = () => {
+      if (cancelled) return
+      const elements = [mainRef.current, introRef.current, outroRef.current]
+        .filter((element): element is HTMLMediaElement => Boolean(element))
+      const ready = elements.every(element => element.readyState >= 2) || attempts++ > 30
+      if (!ready) {
+        window.setTimeout(prime, 50)
+        return
+      }
+      void player.current.play()
+    }
+    prime()
+    return () => { cancelled = true }
   }, [shown])
 
   const resolveMedia = async (end: NonNullable<Bookends['intro']>): Promise<BookendMedia> => {
@@ -213,20 +311,33 @@ export function useSequencePreview(key: string, onError: (message: string) => vo
           .map(async end => [end.path, await resolveMedia(end)] as const),
       )
       if (request.current !== job) return
+      for (const path of entries.map(([path]) => path)) {
+        await invoke('allow_asset', { path })
+        grantedAssets.current.add(path)
+      }
+      if (request.current !== job) return
       const media = Object.fromEntries(entries)
-      const captions = captionSlice(sequence.captions, sequence.range, true)
+      // Caption cues stay in absolute source time; layerState('main').local is
+      // also source time, so the painter can follow jumps across segments.
+      const captions = sequence.captions
+      let musicPath = sequence.musicPath
+      if (sequence.music && !musicPath) {
+        musicPath = await invoke<string>('open_music', { track: sequence.music.track })
+      }
+      if (musicPath) grantedAssets.current.add(musicPath)
       const next = buildCompositionPlan({
-        path: sequence.path, range: sequence.range, bookends: sequence.bookends, media,
+        path: sequence.path, range: sequence.range, segments: sequence.segments, bookends: sequence.bookends, media,
         format: sequence.options.format, framing: sequence.options.framing,
         position: sequence.options.position, captions, music: sequence.music,
-        musicPath: sequence.musicPath, muted: sequence.muted,
+        musicPath, muted: sequence.muted,
       })
       preparePainter(captions, sequence.options.format)
       planRef.current = next
       player.current.currentTime = 0
       player.current.duration = next.total
       player.current.muted = next.muted
-      setClock({ time: 0, duration: next.total })
+      useEditor.getState().setSequenceTime(0, next.total, next.main.sourceStart)
+      useEditor.getState().setSequenceActive(true)
       setPlan(next)
       setShown(sequenceKey || 'composite')
       setPreparing(false)
@@ -294,7 +405,7 @@ export function useSequencePreview(key: string, onError: (message: string) => vo
     </div>
   ) : null
 
-  return { path: shown, stage, plan, preparing, clock, playing, player, play: start, stop }
+  return { path: shown, stage, preparing, player, play: start, stop }
 }
 
 function layerPosition(plan: CompositionPlan, outro = false) {

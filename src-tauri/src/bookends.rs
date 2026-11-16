@@ -301,6 +301,35 @@ fn inspect_image(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transition_overlap_matches_browser_preview_math() {
+        // Mirrors tests/sequence-plan.test.mjs so the browser compositor and
+        // this FFmpeg assembler stay on the same timing contract.
+        let clip = |frames: u32| frames;
+        assert_eq!(overlap(Transition::Cut, 60, 60), 0);
+        assert_eq!(overlap(Transition::Fade, clip(60), clip(60)), 15);
+        assert_eq!(overlap(Transition::Slide, clip(6), clip(60)), 3);
+        let main = frame_count(2.0);
+        let intro = frame_count(2.0);
+        let first = overlap(Transition::Fade, intro, main);
+        let joined = intro + main - first;
+        let last = overlap(Transition::Fade, joined, frame_count(1.0));
+        assert_eq!(first, 15);
+        assert_eq!(last, 15);
+        assert_eq!(joined + frame_count(1.0) - last, 120);
+    }
+
+    #[test]
+    fn image_duration_is_bounded() {
+        assert!(frame_count(0.5) >= 1);
+        assert_eq!(frame_count(1.0), 30);
+    }
+}
+
 #[derive(Serialize)]
 pub struct BookendInfo {
     image: bool,
@@ -315,13 +344,15 @@ pub async fn inspect_bookend(app: AppHandle, path: PathBuf) -> Result<BookendInf
         let image = is_image(&path);
         let duration = if image {
             inspect_image(&path)?;
-            app.asset_protocol_scope()
-                .allow_file(&path)
-                .map_err(|error| error.to_string())?;
             0.0
         } else {
             video::probe(video::source(&path)?)?.duration
         };
+        // Both images and video bookends are rendered by the browser preview
+        // through convertFileSrc, so both need asset-protocol access.
+        app.asset_protocol_scope()
+            .allow_file(&path)
+            .map_err(|error| error.to_string())?;
         let name = path
             .file_name()
             .unwrap_or_default()

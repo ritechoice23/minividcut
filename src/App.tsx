@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import { Channel, convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
@@ -6,15 +6,19 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { confirm, open } from '@tauri-apps/plugin-dialog'
 import {
   ArrowDownToLine, Check, ChevronDown, ChevronLeft, ChevronRight, Clapperboard, Copy, Ellipsis, FastForward, Film, FolderOpen, Rewind,
-  Keyboard, LoaderCircle, Minus, Monitor, Move, Music2, Pause, Pencil, Play, Plus, RotateCcw, Scissors, Smartphone, Square,
-  ScissorsLineDashed, Settings as SettingsIcon, Sparkles, Split, Subtitles, Trash2, Volume2, VolumeX, X, ZoomIn, ZoomOut,
+  Keyboard, LoaderCircle, Magnet, Minus, Monitor, Move, Music2, Pause, Pencil, Play, Plus, RotateCcw, Scissors, Smartphone, Square,
+  Redo2, ScissorsLineDashed, Settings as SettingsIcon, Sparkles, Split, Subtitles, Trash2, Undo2, Volume2, VolumeX, X, ZoomIn, ZoomOut,
 } from 'lucide-react'
-import { clipDuration, cutRange, MAX_CLIPS, moveBoundary, parseTime, rangesOverlap, splitRange, stamp, validRange } from './clip'
+import {
+  clipDuration, clipSegments, cutRange, exportUnits, MAX_CLIPS, moveBoundary, normalizeClip, parseTime,
+  rangesOverlap, resizeClipEdge, segmentAt, splitClipAt, splitRange, stamp, trimClips, validRange, withSegments,
+} from './clip'
 import type { Clip, Range } from './clip'
-import { MAX_TIMELINE_ZOOM, panTimeline, timelineFrames, timelineOverlaps, timelineTime, timelineWindow, zoomTimeline } from './timeline'
+import { MAX_TIMELINE_ZOOM, panTimeline, snapTime, timelineFrames, timelineOverlaps, timelineTime, timelineWindow, ZOOM_STEPS, zoomAround, zoomTimeline } from './timeline'
+import { buildSequenceMap, clipSpans, reorderClips, sequenceAtSource, sourceAtSequence } from './sequence-timeline'
 import { CENTER, frameTravel, panPosition } from './framing'
 import type { FramePosition, Framing } from './framing'
-import { fileSize, summarizeExport } from './export-progress'
+import { fileSize, groupExportStates, summarizeExport } from './export-progress'
 import type { ExportProgress, ExportState } from './export-progress'
 import { ClipActions } from './ClipActions'
 import { Settings } from './Settings'
@@ -22,7 +26,7 @@ import { CaptionEditor, CaptionStylePanel, progressLabel } from './CaptionEditor
 import { CaptionPreview } from './CaptionPreview'
 import { prepareCaptionOverlay } from './caption-export'
 import type { CaptionModel, CaptionProgress } from './CaptionEditor'
-import { captionSlice, clipsNeedingCaptions, DEFAULT_CAPTION_STYLE, offsetCaption, restyleCaptionedClip } from './captions'
+import { captionCut, captionSlice, clipsNeedingCaptions, DEFAULT_CAPTION_STYLE, offsetCaption, restyleCaptionedClip } from './captions'
 import type { CaptionCue, CaptionStyle, CaptionTrack } from './captions'
 import { DEFAULT_MOMENT_QUERY, missingTranscriptRanges, MOMENT_BATCH_SECONDS, momentCandidates, momentLimit } from './moments'
 import type { Moment } from './moments'
@@ -31,8 +35,8 @@ import { effectiveMusic, musicPosition } from './music'
 import type { Music, MusicTrack } from './music'
 import { BookendsMenu } from './BookendsMenu'
 import { effectiveBookends } from './bookends'
-import { useSequencePreview } from './sequence-preview'
-import { playbackClock, usePlaybackTime } from './playback-clock'
+import { useSequenceCompositor } from './sequence-compositor'
+import { activeTime, playbackClock, useEditor, usePlaybackTime } from './editor-store'
 import type { Bookend, Bookends } from './bookends'
 
 type VideoInfo = { path: string; name: string; duration: number; width: number; height: number; bytes: number }
@@ -40,7 +44,7 @@ type Format = 'landscape' | 'portrait'
 type Quality = 'compact' | 'compatible' | 'lossless'
 type ExportSettings = { format: Format; framing: Framing; position: FramePosition; quality: Quality }
 type Draft = {
-  version: 1; source: VideoInfo; range: Range; clips: Clip[]; sections: Range[]
+  version: 2; source: VideoInfo; range: Range; clips: Clip[]; sections: Range[]
   format: Format; quality: Quality; framing: Framing; positions: Record<Format, FramePosition>
   captions: Record<string, CaptionTrack | undefined>; captionStyle: CaptionStyle | null
   music?: Music | null
@@ -53,13 +57,20 @@ const TITLE_DOWNLOAD_KEY = 'minividcut.title-download-allowed'
 function readDraft(): Draft | null {
   try {
     const saved = JSON.parse(localStorage.getItem(DRAFT_KEY) ?? 'null')
-    return saved?.version === 1 && typeof saved.source?.path === 'string' ? saved : null
+    if ((saved?.version !== 1 && saved?.version !== 2) || typeof saved?.source?.path !== 'string') return null
+    const length = saved.source.duration
+    const clips = Array.isArray(saved.clips)
+      ? saved.clips.map((clip: Clip) => Number.isFinite(length) ? normalizeClip(clip, length) : clip).filter(Boolean)
+      : []
+    return { ...saved, version: 2, clips }
   } catch {
     return null
   }
 }
 
-type ExportBatch = { ranges: readonly Clip[]; states: ExportState[]; running: boolean; options: ExportSettings }
+type ExportBatch = {
+  ranges: readonly Clip[]; states: ExportState[]; weights: Range[]; running: boolean; options: ExportSettings
+}
 
 const EXTENSIONS = ['mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v', 'mts', 'm2ts', 'wmv', 'mpg', 'mpeg', 'ts', '3gp']
 const FORMATS = {
@@ -73,11 +84,12 @@ function Key({ children }: { children: ReactNode }) {
   return <kbd>{children}</kbd>
 }
 
-function ClockDisplay({ duration, sequencePath, sequenceTime }: {
-  duration: number; sequencePath: string | null; sequenceTime: { time: number; duration: number }
-}) {
+function ClockDisplay({ duration }: { duration: number }) {
   const time = usePlaybackTime()
-  return <span className="clock"><strong>{stamp(sequencePath ? sequenceTime.time : time, true)}</strong><span>/</span>{stamp(sequencePath ? sequenceTime.duration : duration)}</span>
+  const sequenceTime = useEditor(state => state.sequenceTime)
+  const sequenceDuration = useEditor(state => state.sequenceDuration)
+  const sequenceActive = useEditor(state => state.sequenceActive)
+  return <span className="clock"><strong>{stamp(sequenceActive ? sequenceTime : time, true)}</strong><span>/</span>{stamp(sequenceActive ? sequenceDuration : duration)}</span>
 }
 
 function TimelinePlayhead({ pct, inView, onDrag, onMove }: {
@@ -161,13 +173,22 @@ export function App() {
   const [range, setRange] = useState<Range>({ start: 0, end: 0 })
   const [clips, setClips] = useState<Clip[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [snapping, setSnapping] = useState(true)
+  const [timelineView, setTimelineView] = useState<'source' | 'sequence'>('source')
+  const [reorderTarget, setReorderTarget] = useState<number | null>(null)
   const [timelineZoom, setTimelineZoom] = useState(1)
   const [timelineStart, setTimelineStart] = useState(0)
   const timelinePanned = useRef(false)
   const timelineDrag = useRef<{ x: number; start: number; width: number; moved: boolean } | null>(null)
+  const clipReorder = useRef<{ index: number; x: number; moved: boolean } | null>(null)
+  const reorderTargetRef = useRef<number | null>(null)
+  const reorderMoved = useRef(false)
   const [grabbingTimeline, setGrabbingTimeline] = useState(false)
   const timelineBody = useRef<HTMLDivElement>(null)
+  const wheelView = useRef({ duration: 0, zoom: 1, start: 0, span: 0 })
+  const wheelZoomAccum = useRef(0)
   const [playing, setPlaying] = useState(false)
+  const sequencePlaying = useEditor(state => state.sequencePlaying)
   const [muted, setMuted] = useState(false)
   const [previewVolume, setPreviewVolume] = useState(100)
   const [projectMusic, setProjectMusic] = useState<Music | null>(null)
@@ -238,9 +259,11 @@ export function App() {
   const video = useRef<HTMLVideoElement>(null)
   const track = useRef<HTMLDivElement>(null)
   const trimDrag = useRef<{ range: Range; offset: number } | null>(null)
+  const clipEdgeDrag = useRef<{ clip: Clip; side: 'start' | 'end'; axisPointer: number; value: number; recorded: boolean } | null>(null)
   const playheadOffset = useRef(0)
   const frameDrag = useRef<{ x: number; y: number; travel: FramePosition; position: FramePosition } | null>(null)
   const playUntil = useRef<number | null>(null)
+  const ignoreTimeUpdateUntil = useRef(0)
   const sourceRequest = useRef(0)
   const importLock = useRef(false)
   const nextId = useRef(1)
@@ -262,13 +285,21 @@ export function App() {
   const travel = previewAspect ? frameTravel(activeFormat.aspect, 1, previewAspect, framing) : { x: 0, y: 0 }
   const positionAxis = Math.abs(travel.x) > 0.001 ? 'x' : Math.abs(travel.y) > 0.001 ? 'y' : null
   const canPosition = Boolean(positionAxis && hasSource && !loading && !selectedLocked && preview !== 'preparing' && preview !== 'unavailable')
-  const visibleTime = timelineWindow(duration, timelineZoom, timelineStart)
+  const sequenceMap = useMemo(() => buildSequenceMap(clips), [clips])
+  const sequenceSpans = useMemo(() => clipSpans(sequenceMap, clips), [sequenceMap, clips])
+  const axisDuration = timelineView === 'sequence' ? sequenceMap.duration : duration
+  const visibleTime = timelineWindow(axisDuration, timelineZoom, timelineStart)
+  wheelView.current = { duration: axisDuration, zoom: timelineZoom, start: visibleTime.start, span: visibleTime.span }
+  const toSource = (axisTime: number) => timelineView === 'sequence'
+    ? (sourceAtSequence(sequenceMap, axisTime)?.time ?? axisTime) : axisTime
+  const toAxis = (sourceTime: number) => timelineView === 'sequence'
+    ? (sequenceAtSource(sequenceMap, sourceTime) ?? 0) : sourceTime
   const pct = (value: number) => visibleTime.span
     ? Math.max(0, Math.min(100, 100 * (value - visibleTime.start) / visibleTime.span)) : 0
-  const filmTiles = timelineFrames(duration, timelineZoom, visibleTime.start)
+  const filmTiles = timelineFrames(axisDuration, timelineZoom, visibleTime.start)
   const overviewTiles = timelineFrames(duration, 1, 0)
   const tileTimes = filmTiles.map(tile => tile.time).join(',')
-  const overlaps = useMemo(() => timelineOverlaps(clips), [clips])
+  const overlaps = useMemo(() => timelineOverlaps(clips.flatMap(clipSegments)), [clips])
   useEffect(() => {
     // While zoomed playback pans the viewport, defer thumbnail work until the
     // user pauses instead of launching an FFmpeg batch on every time tick.
@@ -306,27 +337,42 @@ export function App() {
     if (Math.abs(bar.scrollLeft - left) > 1) bar.scrollLeft = left
   }, [visibleTime.start, visibleTime.maxStart, timelineZoom])
   const inView = (value: number) => value >= visibleTime.start - 0.000001 && value <= visibleTime.end + 0.000001
+  const snap = (value: number) => {
+    if (!snapping) return value
+    const points = [0, duration, playbackClock.get(),
+      ...clips.flatMap(clip => clipSegments(clip).flatMap(segment => [segment.start, segment.end])),
+      ...sections.flatMap(section => [section.start, section.end])]
+    return snapTime(value, points, visibleTime.span * 0.01)
+  }
   const setPlaybackTime = useCallback((value: number) => {
     playbackClock.set(value)
     if (timelinePanned.current) return
+    const axis = timelineView === 'sequence' ? (sequenceAtSource(sequenceMap, value) ?? visibleTime.start) : value
     setTimelineStart(start => {
-      const visible = timelineWindow(duration, timelineZoom, start)
-      if (value >= visible.start - 0.000001 && value <= visible.end + 0.000001) return start
-      return zoomTimeline(duration, timelineZoom, value)
+      const visible = timelineWindow(axisDuration, timelineZoom, start)
+      if (axis >= visible.start - 0.000001 && axis <= visible.end + 0.000001) return start
+      return zoomTimeline(axisDuration, timelineZoom, axis)
     })
-  }, [duration, timelineZoom])
+  }, [axisDuration, timelineZoom, timelineView, sequenceMap, visibleTime.start])
   const zoomTimelineTo = (requested: number) => {
     const zoom = Math.max(1, Math.min(MAX_TIMELINE_ZOOM, requested))
     if (zoom === timelineZoom) return
-    const now = playbackClock.get()
-    const anchor = inView(now) ? now : (visibleTime.start + visibleTime.end) / 2
+    const axisNow = toAxis(playbackClock.get())
+    const anchor = inView(axisNow) ? axisNow : (visibleTime.start + visibleTime.end) / 2
     setTimelineZoom(zoom)
-    setTimelineStart(zoomTimeline(duration, zoom, anchor))
+    setTimelineStart(zoomTimeline(axisDuration, zoom, anchor))
   }
   const revealTimelineTime = (point: number) => {
     timelinePanned.current = false
-    if (!inView(point)) setTimelineStart(zoomTimeline(duration, timelineZoom, point))
+    const axis = toAxis(point)
+    if (!inView(axis)) setTimelineStart(zoomTimeline(axisDuration, timelineZoom, axis))
   }
+
+  useEffect(() => {
+    if (!isTauri()) return
+    const timer = window.setTimeout(() => { void invoke('warm_encoders').catch(() => {}) }, 1500)
+    return () => window.clearTimeout(timer)
+  }, [])
 
   useEffect(() => {
     const layout = matchMedia('(min-width: 1120px)')
@@ -350,20 +396,104 @@ export function App() {
 
   useEffect(() => {
     const body = timelineBody.current
-    if (!body || timelineZoom === 1) return
+    if (!body) return
     const scrollTimeline = (event: WheelEvent) => {
-      if (event.ctrlKey || event.metaKey || (event.target instanceof Element && event.target.closest('input'))) return
-      const delta = event.deltaX || event.deltaY
-      if (!delta || !body.clientWidth) return
+      if (event.target instanceof Element && event.target.closest('input')) return
+      const view = wheelView.current
+      if (!body.clientWidth) return
+      const zooming = event.ctrlKey || event.metaKey
+      // Plain vertical wheel is inert (it used to make the filmstrip dance).
+      // Shift + wheel and horizontal trackpad swipes pan the viewport.
+      const horizontal = event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)
+      if (!zooming && !horizontal) return
+      const delta = zooming ? (event.deltaY || event.deltaX)
+        : event.shiftKey ? (event.deltaY || event.deltaX) : event.deltaX
+      if (!delta) return
       event.preventDefault()
       timelinePanned.current = true
       const pixels = event.deltaMode === 1 ? delta * 16 : event.deltaMode === 2 ? delta * body.clientWidth : delta
-      setTimelineStart(start => panTimeline(duration, timelineZoom, start, pixels / body.clientWidth))
+      if (!zooming) {
+        if (view.zoom === 1) return
+        setTimelineStart(start => panTimeline(view.duration, view.zoom, start, pixels / body.clientWidth))
+        return
+      }
+      wheelZoomAccum.current += -pixels
+      if (Math.abs(wheelZoomAccum.current) < 45) return
+      const direction = Math.sign(wheelZoomAccum.current)
+      wheelZoomAccum.current = 0
+      const level = ZOOM_STEPS.findIndex(step => step >= view.zoom - 0.0001)
+      const nextLevel = Math.max(0, Math.min(ZOOM_STEPS.length - 1, level + direction))
+      const zoom = ZOOM_STEPS[nextLevel]
+      if (zoom === view.zoom) return
+      const rect = body.getBoundingClientRect()
+      const fraction = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width))
+      const anchor = timelineTime(view.start, view.span, fraction)
+      const start = zoomAround(view.duration, zoom, anchor, fraction)
+      // Keep the ref in sync so rapid wheel ticks accumulate instead of
+      // each one restarting from the last rendered zoom.
+      wheelView.current = { ...view, zoom, start, span: view.duration / zoom }
+      setTimelineZoom(zoom)
+      setTimelineStart(start)
     }
     body.addEventListener('wheel', scrollTimeline, { passive: false })
     return () => body.removeEventListener('wheel', scrollTimeline)
-  }, [duration, timelineZoom])
+  }, [])
   const selectedClip = clips.find(clip => clip.id === selectedId)
+
+  // Editing history is a snapshot of the timeline state, not of playback.
+  // record() is called before a mutation so undo restores the previous state.
+  type EditSnapshot = {
+    range: Range; clips: Clip[]; sections: Range[]; draftCaptions: Record<string, CaptionTrack | undefined>
+    selectedId: number | null; reviewIndex: number | null
+  }
+  const past = useRef<EditSnapshot[]>([])
+  const future = useRef<EditSnapshot[]>([])
+  const captionEditAt = useRef(0)
+  const [, setHistoryRevision] = useState(0)
+  // Read through a ref so memoized callbacks always snapshot the latest state.
+  const editorState = useRef({ range, clips, sections, draftCaptions, selectedId, reviewIndex })
+  editorState.current = { range, clips, sections, draftCaptions, selectedId, reviewIndex }
+  const takeSnapshot = (): EditSnapshot => ({ ...editorState.current })
+  const recordEdit = () => {
+    past.current.push(takeSnapshot())
+    if (past.current.length > 100) past.current.shift()
+    future.current = []
+    setHistoryRevision(revision => revision + 1)
+  }
+  const recordRapidEdit = () => {
+    const now = performance.now()
+    if (now - captionEditAt.current > 800) recordEdit()
+    captionEditAt.current = now
+  }
+  const applySnapshot = (state: EditSnapshot) => {
+    setRange(state.range)
+    setClips(state.clips)
+    setSections(state.sections)
+    setDraftCaptions(state.draftCaptions)
+    setSelectedId(state.selectedId)
+    setReviewIndex(state.reviewIndex)
+  }
+  const undoEdit = () => {
+    const previous = past.current.pop()
+    if (!previous) return
+    future.current.push(takeSnapshot())
+    applySnapshot(previous)
+    setNotice('')
+    setEditStatus('Undone.')
+    setHistoryRevision(revision => revision + 1)
+  }
+  const redoEdit = () => {
+    const next = future.current.pop()
+    if (!next) return
+    past.current.push(takeSnapshot())
+    applySnapshot(next)
+    setNotice('')
+    setEditStatus('Redone.')
+    setHistoryRevision(revision => revision + 1)
+  }
+  const canUndo = past.current.length > 0
+  const canRedo = future.current.length > 0
+
   const activeMusic = effectiveMusic(projectMusic, selectedClip?.music)
   const musicTrack = activeMusic?.track
   const musicKey = musicTrack ? trackKey(musicTrack) : ''
@@ -425,6 +555,7 @@ export function App() {
   const musicSourceRevision = sourceRequest.current
   const changeMusic = (scope: 'project' | 'clip', music: Music | null | undefined, path?: string) => {
     if (musicSourceRevision !== sourceRequest.current || exportLock.current || importLock.current) return
+    recordRapidEdit()
     if (path && music) musicPaths.current.set(trackKey(music.track), path)
     if (scope === 'project') setProjectMusic(music ?? null)
     else if (selectedClip) {
@@ -433,6 +564,7 @@ export function App() {
   }
   const changeBookend = (scope: 'project' | 'clip', end: keyof Bookends, value: Bookend | null | undefined) => {
     if (musicSourceRevision !== sourceRequest.current || exportLock.current || importLock.current) return
+    recordEdit()
     if (scope === 'project') setProjectBookends(previous => ({ ...previous, [end]: value }))
     else if (selectedClip) {
       setClips(items => items.map(clip => clip.id === selectedClip.id
@@ -444,13 +576,15 @@ export function App() {
   const currentCaptions = selectedClip ? selectedClip.captions : draftCaptions[captionKey]
   const activeCaptions = useMemo(() => captionSlice(currentCaptions, range), [currentCaptions, range])
   const bookends = useMemo(() => effectiveBookends(projectBookends, selectedClip?.bookends), [projectBookends, selectedClip?.bookends])
+  const previewSegments = useMemo(() => selectedClip ? clipSegments(selectedClip) : [{ start: range.start, end: range.end }], [selectedClip, range])
   const sequenceKey = useMemo(() => source && (bookends.intro || bookends.outro)
-    ? JSON.stringify([musicSourceRevision, selectedId, range.start, range.end, format, framing, position, activeCaptions, activeMusic, bookends, musicCacheRevision])
-    : '', [source, musicSourceRevision, selectedId, range.start, range.end, format, framing, position, activeCaptions, activeMusic, bookends, musicCacheRevision])
-  const sequence = useSequencePreview(sequenceKey, setNotice)
+    ? JSON.stringify([musicSourceRevision, selectedId, previewSegments, format, framing, position, activeCaptions, activeMusic, bookends, musicCacheRevision])
+    : '', [source, musicSourceRevision, selectedId, previewSegments, format, framing, position, activeCaptions, activeMusic, bookends, musicCacheRevision])
+  const sequence = useSequenceCompositor(sequenceKey, setNotice)
   const stopSequence = sequence.stop
   const sequenceActive = Boolean(sequence.path || sequence.preparing)
-  const playerPlaying = sequence.path ? sequence.playing : playing
+  useEffect(() => { useEditor.getState().setSequenceActive(sequenceActive) }, [sequenceActive])
+  const playerPlaying = sequence.path ? sequencePlaying : playing
   useEffect(() => {
     if (loading || settingsOpen) stopSequence()
   }, [loading, settingsOpen, stopSequence])
@@ -473,7 +607,7 @@ export function App() {
   useEffect(() => {
     if (!source) return
     draftRef.current = {
-      version: 1, source, range, clips, sections, format: draftFormat, quality: draftQuality,
+      version: 2, source, range, clips, sections, format: draftFormat, quality: draftQuality,
       framing: draftFraming, positions, captions: draftCaptions, captionStyle: sharedCaptionStyle.current,
       music: projectMusic,
       bookends: projectBookends,
@@ -499,9 +633,16 @@ export function App() {
         // The user is leaving; there is no UI left to report this to.
       }
     }
+    const onVisibility = () => { if (document.visibilityState === 'hidden') flush() }
     window.addEventListener('pagehide', flush)
+    window.addEventListener('beforeunload', flush)
+    document.addEventListener('visibilitychange', onVisibility)
+    const checkpoint = window.setInterval(flush, 5000)
     return () => {
       window.removeEventListener('pagehide', flush)
+      window.removeEventListener('beforeunload', flush)
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.clearInterval(checkpoint)
       flush()
     }
   }, [])
@@ -582,7 +723,7 @@ export function App() {
     }
   }, [recovery, hasEdits, setPlaybackTime])
 
-  const clipStarts = [...new Set(clips.map(clip => clip.start))].join(',')
+  const clipStarts = [...new Set(clips.flatMap(clip => clipSegments(clip).map(segment => segment.start)))].join(',')
   useEffect(() => {
     if (!source || !clipStarts) return
     let cancelled = false
@@ -659,6 +800,9 @@ export function App() {
     stopSequence()
     const next = Math.min(duration, Math.max(0, position))
     const player = video.current
+    // A timeupdate queued before this seek can arrive afterwards with the old
+    // time and pull the playhead back, making it oscillate left and right.
+    ignoreTimeUpdateUntil.current = performance.now() + 120
     if (player && player.readyState > 0) player.currentTime = Math.min(next, player.duration)
     setPlaybackTime(next)
   }, [source, duration, stopSequence, setPlaybackTime])
@@ -784,6 +928,7 @@ export function App() {
   }, [])
 
   const saveCaptions = useCallback((track: CaptionTrack) => {
+    recordRapidEdit()
     if (selectedId === null) setDraftCaptions(current => ({ ...current, [captionKey]: track }))
     else setClips(items => items.map(clip => clip.id === selectedId ? { ...clip, captions: track } : clip))
     setCaptionStatus(current => current?.key === captionKey ? null : current)
@@ -795,6 +940,7 @@ export function App() {
 
   const applyCaptionStyle = useCallback((style: CaptionStyle) => {
     if (exportLock.current || importLock.current || captionJob.current) return false
+    recordEdit()
     sharedCaptionStyle.current = style
     setClips(items => items.map(clip => restyleCaptionedClip(clip, style)))
     setDraftCaptions(items => Object.fromEntries(Object.entries(items).map(([key, track]) =>
@@ -905,7 +1051,7 @@ export function App() {
     musicPlayer.current?.pause()
     setNotice('')
     void sequence.play({
-      path: source.path, duration: source.duration, range, captions: currentCaptions, music: activeMusic,
+      path: source.path, range, segments: previewSegments, captions: currentCaptions, music: activeMusic,
       musicPath, muted, bookends, options: { format, framing, position },
     })
   }
@@ -1129,8 +1275,9 @@ export function App() {
     if (exportLock.current || importLock.current || clips.length >= MAX_CLIPS) return
     const id = nextId.current++
     const style = sharedCaptionStyle.current ?? DEFAULT_CAPTION_STYLE
+    recordEdit()
     setClips(items => items.length >= MAX_CLIPS || items.some(clip => clip.start === moment.start && clip.end === moment.end)
-      ? items : [...items, { id, start: moment.start, end: moment.end, captions: { style, cues: moment.cues } }])
+      ? items : [...items, { id, start: moment.start, end: moment.end, segments: [{ start: moment.start, end: moment.end }], captions: { style, cues: moment.cues } }])
   }
 
   const editBoundary = (side: keyof Range, value: number, original = range) => {
@@ -1182,8 +1329,9 @@ export function App() {
     if (!validRange(range, duration)) return
     if (captionJob.current?.keys.has(captionKey)) return
     if (selectedId !== null) {
+      recordEdit()
       setClips(items => items.map(clip => clip.id === selectedId ? {
-        ...clip, start: range.start, end: range.end, captions: captionSlice(clip.captions, range),
+        ...clip, start: range.start, end: range.end, segments: [{ ...range }], captions: captionSlice(clip.captions, range),
       } : clip))
       setSelectedId(null)
       return
@@ -1192,7 +1340,8 @@ export function App() {
       setNotice(`A batch can contain up to ${MAX_CLIPS} clips.`)
       return
     }
-    const clip = { start: range.start, end: range.end, id: nextId.current++, captions: activeCaptions }
+    recordEdit()
+    const clip = { start: range.start, end: range.end, segments: [{ ...range }], id: nextId.current++, captions: activeCaptions }
     setClips(items => [...items, clip])
     if (activeCaptions) {
       if (reviewIndex === null) setDraftCaptions(current => ({ ...current, [captionKey]: undefined }))
@@ -1221,6 +1370,7 @@ export function App() {
       setNotice(parts ? 'Choose an interval shorter than the trim range.' : 'Choose a longer interval to create at most 100 sections.')
       return
     }
+    recordEdit()
     if (splitMode === 'mark') {
       if (activeCaptions) setDraftCaptions(current => ({
         ...current,
@@ -1239,7 +1389,7 @@ export function App() {
     const added = parts.map((part, index) => {
       const original = clips[replaced]
       const title = original?.title
-      return { ...part, id: nextId.current++, title: title ? `${title} - Part ${index + 1}` : undefined,
+      return { ...part, segments: [{ ...part }], id: nextId.current++, title: title ? `${title} - Part ${index + 1}` : undefined,
         captions: captionSlice(activeCaptions, part), music: original?.music, bookends: original?.bookends }
     })
     setClips(replaced < 0 ? [...clips, ...added] : [...clips.slice(0, replaced), ...added, ...clips.slice(replaced + 1)])
@@ -1252,7 +1402,7 @@ export function App() {
 
   const splitAtPlayhead = () => {
     setSplitOpen(false)
-    const at = playbackClock.get()
+    const at = activeTime()
     const first = { start: range.start, end: at }
     const second = { start: at, end: range.end }
     if (!validRange(first, duration) || !validRange(second, duration)) {
@@ -1266,7 +1416,7 @@ export function App() {
     playingMoment.current = null
     setClipActions(null)
     video.current?.pause()
-    setRange(clip)
+    setRange({ start: clip.start, end: clip.end })
     setSelectedId(clip.id)
     setReviewIndex(null)
     revealTimelineTime(clip.start)
@@ -1293,18 +1443,20 @@ export function App() {
 
   const trimSection = () => {
     if (!canTrim) return
-    if (selectedClip) {
-      const parts = cutRange(selectedClip, range)
-      if (clips.length - 1 + parts.length > MAX_CLIPS) {
+
+    // With saved clips, the In–Out cut applies to the whole timeline, not just
+    // whichever clip happens to be selected (see trimClips in clip.ts).
+    if (!sections.length && clips.length) {
+      const trimmed = trimClips(clips, range, duration, track => captionCut(track, range))
+      if (trimmed.length > MAX_CLIPS) {
         setNotice(`Keep at most ${MAX_CLIPS} clips.`)
         return
       }
-      const kept = parts.map((part, index) => ({
-        ...selectedClip, ...part, id: index === 0 ? selectedClip.id : nextId.current++,
-        captions: captionSlice(selectedClip.captions, part),
-      }))
-      setClips(items => items.flatMap(clip => clip.id === selectedClip.id ? kept : [clip]))
-      const next = kept.find(clip => clip.start >= range.end) ?? kept[0]
+      recordEdit()
+      const previousIndex = clips.findIndex(clip => clip.id === selectedId)
+      setClips(trimmed)
+      const next = trimmed.find(clip => clip.id === selectedId)
+        ?? trimmed[Math.min(Math.max(previousIndex, 0), trimmed.length - 1)]
       if (next) selectClip(next)
       else {
         video.current?.pause()
@@ -1314,9 +1466,12 @@ export function App() {
         seek(range.start)
       }
       setNotice('')
-      setEditStatus(kept.length === 2 ? 'Cut removed. Both remaining clips were kept.' : kept.length ? 'Clip trimmed.' : 'Clip removed.')
+      setEditStatus(trimmed.length < clips.length
+        ? `Cut removed from all clips. ${trimmed.length} ${trimmed.length === 1 ? 'clip' : 'clips'} kept.`
+        : 'Cut removed from the clips on the timeline.')
       return
     }
+
     const draftTargets = sections.length ? sections : [{ start: 0, end: duration }]
     const parts = draftTargets.flatMap(section => cutRange(section, range))
     const remaining = parts
@@ -1324,6 +1479,7 @@ export function App() {
       setNotice(`Keep at most ${MAX_CLIPS} marked sections.`)
       return
     }
+    recordEdit()
 
     setDraftCaptions(current => {
       const updated = { ...current }
@@ -1355,9 +1511,104 @@ export function App() {
   const renameClip = (id: number, title: string) => {
     if (clipLocked(id)) return
     const cleaned = title.trim()
+    recordEdit()
     setClips(items => items.map(clip => clip.id === id
       ? { ...clip, title: cleaned || undefined, titleManuallyEdited: true } : clip))
     setRenaming(null)
+  }
+
+  const splitClip = () => {
+    if (!selectedClip || selectedLocked || busy) return
+    const at = playbackClock.get()
+    const next = splitClipAt(selectedClip, at, duration)
+    if (!next) {
+      setNotice('Move the playhead inside the clip before adding a cut.')
+      return
+    }
+    recordEdit()
+    setClips(items => items.map(clip => clip.id === next.id ? next : clip))
+    setRange({ start: next.start, end: next.end })
+    setNotice('')
+    setEditStatus('Cut added inside the clip. Both parts stay in this clip.')
+  }
+
+  const deleteClip = () => {
+    if (!selectedClip || selectedLocked || busy) return
+    recordEdit()
+    setClips(items => items.filter(clip => clip.id !== selectedClip.id))
+    setSelectedId(null)
+    setReviewIndex(null)
+    setRange({ start: 0, end: duration })
+    setNotice('')
+    setEditStatus('Clip removed. The following clips fill its place in the export.')
+  }
+
+  const startClipEdgeDrag = (event: ReactPointerEvent, clip: Clip, side: 'start' | 'end') => {
+    if (!source || loading || selectedLocked || busy || event.button !== 0 || !track.current) return
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    video.current?.pause()
+    const rect = track.current.getBoundingClientRect()
+    const pointer = toSource(timelineTime(visibleTime.start, visibleTime.span, (event.clientX - rect.left) / rect.width))
+    clipEdgeDrag.current = { clip, side, axisPointer: timelineTime(visibleTime.start, visibleTime.span, (event.clientX - rect.left) / rect.width),
+      value: clip[side], recorded: false }
+    seek(clip[side])
+  }
+
+  const moveClipEdgeDrag = (event: ReactPointerEvent) => {
+    const drag = clipEdgeDrag.current
+    if (!drag || busy || !track.current || !event.currentTarget.hasPointerCapture(event.pointerId)) return
+    const rect = track.current.getBoundingClientRect()
+    const axis = timelineTime(visibleTime.start, visibleTime.span, (event.clientX - rect.left) / rect.width)
+    const raw = drag.value + axis - drag.axisPointer
+    const value = Math.max(0, Math.min(duration, snap(raw)))
+    const next = resizeClipEdge(drag.clip, drag.side, value, duration)
+    if (!next) return
+    if (!drag.recorded) {
+      recordEdit()
+      drag.recorded = true
+    }
+    const updated = { ...next, captions: captionSlice(next.captions, next) }
+    setClips(items => items.map(clip => clip.id === next.id ? updated : clip))
+    setRange({ start: next.start, end: next.end })
+    seek(value)
+  }
+
+  const startClipReorder = (event: ReactPointerEvent, index: number) => {
+    if (timelineView !== 'sequence' || disabled || busy || event.button !== 0 || !track.current) return
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    video.current?.pause()
+    clipReorder.current = { index, x: event.clientX, moved: false }
+  }
+
+  const moveClipReorder = (event: ReactPointerEvent) => {
+    const drag = clipReorder.current
+    if (!drag || !track.current || !event.currentTarget.hasPointerCapture(event.pointerId)) return
+    if (Math.abs(event.clientX - drag.x) < 5) return
+    drag.moved = true
+    reorderMoved.current = true
+    const rect = track.current.getBoundingClientRect()
+    const axis = timelineTime(visibleTime.start, visibleTime.span, (event.clientX - rect.left) / rect.width)
+    let target = 0
+    let best = Infinity
+    sequenceSpans.forEach((span, index) => {
+      const distance = Math.abs((span.start + span.end) / 2 - axis)
+      if (distance < best) { best = distance; target = index }
+    })
+    reorderTargetRef.current = target
+    setReorderTarget(target)
+  }
+
+  const finishClipReorder = () => {
+    const drag = clipReorder.current
+    clipReorder.current = null
+    const target = reorderTargetRef.current
+    reorderTargetRef.current = null
+    setReorderTarget(null)
+    if (!drag?.moved || target === null || target === drag.index) return
+    recordEdit()
+    setClips(items => reorderClips(items, drag.index, target))
   }
 
   const exportVideos = async (only?: Clip) => {
@@ -1379,7 +1630,21 @@ export function App() {
       if (!folder) return
       started = true
       setCaptionsOpen(false)
-      setExportBatch({ ranges: batch, states: batch.map(() => ({ status: 'queued' })), running: true, options })
+      // Each source segment becomes one FFmpeg file, but the UI keeps one
+      // status and one lock per clip (see groupExportStates).
+      const units = exportUnits(batch)
+      const owners: number[] = []
+      batch.forEach((clip, index) => {
+        for (const _segment of clipSegments(clip)) owners.push(index)
+      })
+      // summarizeExport pairs one weight with one displayed clip status.
+      const weights: Range[] = batch.map(clip => ({ start: 0,
+        end: clipSegments(clip).reduce((total, segment) => total + segment.end - segment.start, 0) }))
+      let unitStates: ExportState[] = owners.map(() => ({ status: 'queued' }))
+      const syncStates = () => setExportBatch(current => current && {
+        ...current, states: groupExportStates(unitStates, owners, batch.length),
+      })
+      setExportBatch({ ranges: batch, states: batch.map(() => ({ status: 'queued' })), weights, running: true, options })
       const hasCaptionArtwork = batch.some(clip => clip.captions?.cues.some(cue => cue.text.trim()))
       if (hasCaptionArtwork) setNotice('Preparing caption artwork…')
       const jobId = crypto.randomUUID()
@@ -1392,42 +1657,57 @@ export function App() {
           return
         }
         const { index, ...state } = event
-        setExportBatch(current => {
-          if (!current?.running || index < 0 || index >= current.states.length) return current
-          const previous = current.states[index]
-          if (previous.status === 'saved' || previous.status === 'failed' || previous.status === 'canceled') return current
-          if (state.status === 'encoding' && previous.status === 'encoding' && previous.fraction >= state.fraction) return current
-          const states = current.states.slice()
-          states[index] = state
-          return { ...current, states }
-        })
+        if (index < 0 || index >= unitStates.length) return
+        const previous = unitStates[index]
+        if (previous.status === 'saved' || previous.status === 'failed' || previous.status === 'canceled') return
+        if (state.status === 'encoding' && previous.status === 'encoding' && previous.fraction >= state.fraction) return
+        unitStates[index] = state
+        syncStates()
       }
       const prepared: {
         start: number; end: number; title?: string; captionOverlay?: string
-        music: Music | null; bookends: Bookends
+        music: (Music & { start?: number }) | null; bookends: Bookends
       }[] = []
+      const musicOffsets = new Map<number, number>()
       const OVERLAY_CONCURRENCY = 3
-      for (let index = 0; index < batch.length; index += OVERLAY_CONCURRENCY) {
+      for (let index = 0; index < units.length; index += OVERLAY_CONCURRENCY) {
         if (cancelRequested.current) break
-        const chunk = batch.slice(index, index + OVERLAY_CONCURRENCY)
-        const rendered = await Promise.all(chunk.map(async clip => {
-          const captions = captionSlice(clip.captions, clip, true)
-          const captionOverlay = captions && await prepareCaptionOverlay(captions, options.format, clip.end - clip.start, () => cancelRequested.current)
+        const chunk = units.slice(index, index + OVERLAY_CONCURRENCY)
+        const rendered = await Promise.all(chunk.map(async unit => {
+          const captions = captionSlice(unit.clip.captions, unit.segment, true)
+          const captionOverlay = captions && await prepareCaptionOverlay(captions, options.format,
+            unit.segment.end - unit.segment.start, () => cancelRequested.current)
           return captionOverlay || undefined
         }))
         rendered.forEach((captionOverlay, offset) => {
-          const clip = chunk[offset]
+          const unit = chunk[offset]
           if (captionOverlay) overlays.push(captionOverlay)
-          prepared.push({ start: clip.start, end: clip.end, title: clip.title, captionOverlay,
-            music: effectiveMusic(projectMusic, clip.music), bookends: effectiveBookends(projectBookends, clip.bookends) })
+          const ends = effectiveBookends(projectBookends, unit.clip.bookends)
+          const musicOffset = musicOffsets.get(unit.clip.id) ?? 0
+          musicOffsets.set(unit.clip.id, musicOffset + unit.segment.end - unit.segment.start)
+          const music = effectiveMusic(projectMusic, unit.clip.music)
+          prepared.push({
+            start: unit.segment.start, end: unit.segment.end,
+            title: unit.first ? unit.clip.title : undefined,
+            captionOverlay,
+            music: music ? { ...music, start: musicOffset } : null,
+            bookends: {
+              intro: unit.first ? ends.intro : null,
+              outro: unit.last ? ends.outro : null,
+            },
+          })
         })
       }
       if (hasCaptionArtwork) setNotice('')
-      const states = cancelRequested.current ? batch.map(() => ({ status: 'canceled' as const })) : await invoke<ExportState[]>('export_clips', {
-        path: source.path, folder, clips: prepared,
-        options, progress: channel, jobId, duration: source.duration,
-      })
-      setExportBatch({ ranges: batch, states, running: false, options })
+      const rawStates = cancelRequested.current
+        ? units.map(() => ({ status: 'canceled' as const }))
+        : await invoke<ExportState[]>('export_clips', {
+          path: source.path, folder, clips: prepared,
+          options, progress: channel, jobId, duration: source.duration,
+        })
+      unitStates = rawStates
+      const states = groupExportStates(rawStates, owners, batch.length)
+      setExportBatch({ ranges: batch, states, weights, running: false, options })
       const failure = states.find(state => state.status === 'failed')
       if (failure) setNotice(failure.error)
     } catch (error) {
@@ -1468,10 +1748,12 @@ export function App() {
   const shortcutState = useRef({
     captionsOpen, settingsOpen, shortcuts, source, loading, timelineZoom,
     closeCaptions, chooseVideo, zoomTimelineTo, editBoundary, seekPlayback, addClip, togglePlay,
+    undoEdit, redoEdit, splitClip, deleteClip,
   })
   shortcutState.current = {
     captionsOpen, settingsOpen, shortcuts, source, loading, timelineZoom,
     closeCaptions, chooseVideo, zoomTimelineTo, editBoundary, seekPlayback, addClip, togglePlay,
+    undoEdit, redoEdit, splitClip, deleteClip,
   }
   useEffect(() => {
     const isTextEditing = (el: Element | null): boolean => {
@@ -1519,13 +1801,20 @@ export function App() {
           if (state.source && !state.loading) state.zoomTimelineTo(1)
           return
         }
+        if (key === 'z' || key === 'y') {
+          if (isTextEditing(target)) return
+          event.preventDefault()
+          if (key === 'y' || event.shiftKey) state.redoEdit()
+          else state.undoEdit()
+          return
+        }
       }
 
       if (state.shortcuts) return
 
       if (isTextEditing(target) || event.ctrlKey || event.metaKey || event.altKey || !state.source || state.loading) return
       if (key === 'i' || key === 'o') {
-        state.editBoundary(key === 'i' ? 'start' : 'end', playbackClock.get())
+        state.editBoundary(key === 'i' ? 'start' : 'end', activeTime())
         return
       }
       if (key === 'arrowleft' || key === 'arrowright') {
@@ -1537,6 +1826,16 @@ export function App() {
       }
       if (key === 'enter' && !event.repeat) {
         if (!target?.closest('button, a, input, select, textarea')) state.addClip()
+      }
+      if (key === 's' && !event.repeat && !target?.closest('button, a, input, select, textarea')) {
+        state.splitClip()
+        return
+      }
+      if (event.key === 'Delete' || event.key === 'Backspace') {
+        if (!target?.closest('button, a, input, select, textarea')) {
+          event.preventDefault()
+          if (!event.repeat) state.deleteClip()
+        }
       }
     }
     const playbackShortcut = (event: KeyboardEvent) => {
@@ -1559,9 +1858,10 @@ export function App() {
   const scrub = (event: ReactPointerEvent, edge?: keyof Range, offset = 0) => {
     if (!track.current || !source || loading || (edge && selectedLocked)) return
     const rect = track.current.getBoundingClientRect()
-    const pointer = timelineTime(visibleTime.start, visibleTime.span, (event.clientX - rect.left - offset) / rect.width)
+    const pointer = toSource(timelineTime(visibleTime.start, visibleTime.span, (event.clientX - rect.left - offset) / rect.width))
     const drag = edge ? trimDrag.current : null
-    const time = Math.max(0, Math.min(duration, pointer - (drag?.offset ?? 0)))
+    const raw = pointer - (drag?.offset ?? 0)
+    const time = Math.max(0, Math.min(duration, edge ? snap(raw) : raw))
     if (edge && drag) editBoundary(edge, time, drag.range)
     seek(time)
   }
@@ -1571,9 +1871,10 @@ export function App() {
     event.stopPropagation()
     event.currentTarget.setPointerCapture(event.pointerId)
     video.current?.pause()
+    timelinePanned.current = true
     if (edge) {
       const rect = track.current.getBoundingClientRect()
-      const pointer = timelineTime(visibleTime.start, visibleTime.span, (event.clientX - rect.left) / rect.width)
+      const pointer = toSource(timelineTime(visibleTime.start, visibleTime.span, (event.clientX - rect.left) / rect.width))
       trimDrag.current = { range, offset: pointer - range[edge] }
       seek(range[edge])
     } else scrub(event)
@@ -1584,8 +1885,9 @@ export function App() {
     event.stopPropagation()
     event.currentTarget.setPointerCapture(event.pointerId)
     video.current?.pause()
+    timelinePanned.current = true
     const rect = track.current.getBoundingClientRect()
-    playheadOffset.current = event.clientX - rect.left - pct(playbackClock.get()) * rect.width / 100
+    playheadOffset.current = event.clientX - rect.left - pct(toAxis(playbackClock.get())) * rect.width / 100
   }
 
   const startTrackDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1610,7 +1912,7 @@ export function App() {
     drag.moved = true
     setGrabbingTimeline(true)
     timelinePanned.current = true
-    setTimelineStart(panTimeline(duration, timelineZoom, drag.start, delta / drag.width))
+    setTimelineStart(panTimeline(axisDuration, timelineZoom, drag.start, delta / drag.width))
   }
 
   const finishTrackDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1618,7 +1920,7 @@ export function App() {
     if (drag && !drag.moved && event.currentTarget.hasPointerCapture(event.pointerId)) {
       video.current?.pause()
       const rect = event.currentTarget.getBoundingClientRect()
-      seek(timelineTime(drag.start, visibleTime.span, (drag.x - rect.left) / rect.width))
+      seek(toSource(timelineTime(drag.start, visibleTime.span, (drag.x - rect.left) / rect.width)))
     }
   }
 
@@ -1633,12 +1935,12 @@ export function App() {
   const canSaveRange = validRange(range, duration)
   const editingCaptionJob = captionsRunning && Boolean(captionJob.current?.keys.has(captionKey))
   const canTrim = !trimDisabled && canSaveRange && !captionsRunning && !captionJob.current && (
-    selectedClip ? rangesOverlap(selectedClip, range)
-      : sections.length ? sections.some(section => rangesOverlap(section, range))
+    sections.length ? sections.some(section => rangesOverlap(section, range))
+      : clips.length ? clips.some(clip => clipSegments(clip).some(segment => rangesOverlap(segment, range)))
         : range.start > 0 || range.end < duration
   )
   const batchCount = clips.length || (hasSource && !sections.length ? 1 : 0)
-  const summary = exportBatch && summarizeExport(exportBatch.ranges, exportBatch.states)
+  const summary = exportBatch && summarizeExport(exportBatch.weights, exportBatch.states)
   const singleExport = busy ? exportBatch?.ranges.find(clip => clip.id === 0) : undefined
   const displayedClips = singleExport ? [singleExport, ...clips] : clips
   const captionLabel = selectedClip ? selectedClip.title || `Clip ${clips.indexOf(selectedClip) + 1}`
@@ -1767,6 +2069,7 @@ export function App() {
                         event.currentTarget.currentTime = Math.min(playbackClock.get(), event.currentTarget.duration)
                       }}
                       onTimeUpdate={event => {
+                        if (performance.now() < ignoreTimeUpdateUntil.current) return
                         const player = event.currentTarget
                         const stop = playUntil.current
                         if (!player.paused && stop !== null && player.currentTime >= stop) {
@@ -1830,10 +2133,10 @@ export function App() {
             <button className="icon-button compact" aria-label="Seek forward 1 second" title="Forward 1 second" disabled={disabled} onClick={() => seekPlayback(1)}><ChevronRight size={16} /></button>
             <button className="icon-button compact" aria-label="Seek forward 5 seconds" title="Forward 5 seconds" disabled={disabled} onClick={() => seekPlayback(5)}><FastForward size={15} /></button>
             </div>
-            <ClockDisplay duration={duration} sequencePath={sequence.path} sequenceTime={sequence.clock} />
+            <ClockDisplay duration={duration} />
           <div className="trim-bar" role="group" aria-label="Trim range">
-            <TimeField label="In" value={range.start} disabled={trimDisabled} onChange={value => editBoundary('start', value)} onMark={() => editBoundary('start', playbackClock.get())} />
-            <TimeField label="Out" value={range.end} disabled={trimDisabled} onChange={value => editBoundary('end', value)} onMark={() => editBoundary('end', playbackClock.get())} />
+            <TimeField label="In" value={range.start} disabled={trimDisabled} onChange={value => editBoundary('start', value)} onMark={() => editBoundary('start', activeTime())} />
+            <TimeField label="Out" value={range.end} disabled={trimDisabled} onChange={value => editBoundary('end', value)} onMark={() => editBoundary('end', activeTime())} />
             <button className="icon-button compact" title="Reset trim range" aria-label="Reset trim range" onClick={resetRange} disabled={trimDisabled}><RotateCcw size={15} /></button>
             <button className="icon-button compact clip-commit" disabled={!selectedLocked && (trimDisabled || !canSaveRange || editingCaptionJob)}
               aria-label={selectedLocked ? 'New clip' : selectedId === null ? 'Add clip' : 'Update clip'}
@@ -2126,8 +2429,20 @@ export function App() {
         <section className="timeline panel" aria-label="Timeline">
           <div className="panel-heading timeline-heading">
             <div className="source-line"><Scissors size={17} /><span>Timeline</span></div>
+            <div className="segmented timeline-view" role="group" aria-label="Timeline view">
+              <button aria-pressed={timelineView === 'source'} onClick={() => setTimelineView('source')}>Source</button>
+              <button aria-pressed={timelineView === 'sequence'} disabled={!clips.length} onClick={() => setTimelineView('sequence')}>Sequence</button>
+            </div>
             <button className="button outline small trim-section" disabled={!canTrim}
-              title="Remove the In–Out selection" onClick={trimSection}><ScissorsLineDashed size={15} /> Trim</button>
+              title="Remove the In–Out selection from every clip on the timeline" onClick={trimSection}><ScissorsLineDashed size={15} /> Trim</button>
+            <button className="icon-button compact" title="Undo (Ctrl Z)" aria-label="Undo" disabled={!canUndo} onClick={undoEdit}><Undo2 size={15} /></button>
+            <button className="icon-button compact" title="Redo (Ctrl Shift Z)" aria-label="Redo" disabled={!canRedo} onClick={redoEdit}><Redo2 size={15} /></button>
+            <button className="button outline small" title="Add a cut inside the selected clip at the playhead (S)"
+              disabled={!selectedClip || selectedLocked || busy} onClick={splitClip}><Scissors size={14} /> Cut</button>
+            <button className="icon-button compact" title="Remove the selected clip (Delete)" aria-label="Remove selected clip"
+              disabled={!selectedClip || selectedLocked || busy} onClick={deleteClip}><Trash2 size={15} /></button>
+            <button className={`icon-button compact ${snapping ? 'active' : ''}`} title={snapping ? 'Snapping on' : 'Snapping off'}
+              aria-label="Toggle snapping" aria-pressed={snapping} onClick={() => setSnapping(on => !on)}><Magnet size={15} /></button>
             <div className="timeline-zoom" role="group" aria-label="Timeline zoom">
               <button className="icon-button compact" aria-label="Zoom out timeline" title="Zoom out"
                 disabled={disabled || timelineZoom === 1} onClick={() => zoomTimelineTo(timelineZoom / 2)}><ZoomOut size={16} /></button>
@@ -2152,7 +2467,7 @@ export function App() {
             </div>
           </div>
           <div className="timeline-body" ref={timelineBody}>
-            <div className={`ruler ${hasSource ? 'seekable' : ''}`} aria-hidden="true" onPointerDown={seekFromRuler}>{[0, 1, 2, 3, 4, 5].map(step => <span key={step}>{duration
+            <div className={`ruler ${hasSource ? 'seekable' : ''}`} aria-hidden="true" onPointerDown={seekFromRuler}>{[0, 1, 2, 3, 4, 5].map(step => <span key={step}>{axisDuration
               ? stamp(timelineTime(visibleTime.start, visibleTime.span, step / 5), visibleTime.span < 5)
               : step === 0 ? '00:00:00' : ''}</span>)}</div>
             <div className={`track ${hasSource ? 'loaded' : ''} ${grabbingTimeline ? 'grabbing' : ''}`} ref={track}
@@ -2161,28 +2476,53 @@ export function App() {
               {hasSource ? (
                 <>
                   <div className="filmstrip" aria-hidden="true">{filmTiles.map(tile => {
-                    const overview = overviewTiles[Math.min(9, Math.floor(tile.time / duration * 10))]
-                    const frame = frames[tile.time] || frames[overview?.time]
+                    const sourceTime = toSource(tile.time)
+                    const overview = overviewTiles[Math.min(9, Math.floor(sourceTime / duration * 10))]
+                    const frame = frames[sourceTime] || frames[overview?.time]
                     return <div className="frame-tile" key={tile.index} style={{ left: `${tile.left}%` }}>
                       {frame && <img draggable={false} alt="" src={frame} />}
                     </div>
                   })}</div>
-                  {clips.map(clip => pct(clip.end) > pct(clip.start) && <div key={clip.id} className="clip-tint"
-                    style={{ left: `${pct(clip.start)}%`, width: `${pct(clip.end) - pct(clip.start)}%`, backgroundColor: clipColor(clip.id) + '35', borderColor: clipColor(clip.id) }} />)}
-                  {overlaps.map(overlap => pct(overlap.end) > pct(overlap.start) && <div key={overlap.start} className="overlap-line"
+                  {timelineView === 'source'
+                    ? clips.flatMap(clip => clipSegments(clip).map((segment, index, all) => ({ clip, segment, index, all })))
+                      .filter(({ segment }) => pct(segment.end) > pct(segment.start))
+                      .map(({ clip, segment, index, all }) => <Fragment key={`${clip.id}-${index}`}>
+                        <div className={`clip-tint ${clip.id === selectedId ? 'selected' : ''}`}
+                          style={{ left: `${pct(segment.start)}%`, width: `${pct(segment.end) - pct(segment.start)}%`, backgroundColor: clipColor(clip.id) + '35', borderColor: clipColor(clip.id) }} />
+                        {index > 0 && inView(segment.start) && <div className="cut-notch" title="Cut point — this part is skipped on export"
+                          style={{ left: `${pct(all[index - 1].end)}%`, borderColor: clipColor(clip.id) }} />}
+                      </Fragment>)
+                    : sequenceMap.pieces.map((piece, index) => <div key={`${piece.clipId}-${index}`}
+                        className={`sequence-piece ${piece.clipId === selectedId ? 'selected' : ''} ${reorderTarget === index ? 'drop-target' : ''}`}
+                        style={{ left: `${pct(piece.start)}%`, width: `${pct(piece.end) - pct(piece.start)}%`,
+                          backgroundColor: clipColor(piece.clipId) + '45', borderColor: clipColor(piece.clipId) }}
+                        title={`${stamp(piece.segment.start, true)} – ${stamp(piece.segment.end, true)} · drag to reorder`}
+                        onPointerDown={event => startClipReorder(event, clips.findIndex(clip => clip.id === piece.clipId))}
+                        onPointerMove={moveClipReorder} onPointerUp={finishClipReorder}
+                        onClick={() => {
+                          if (reorderMoved.current) { reorderMoved.current = false; return }
+                          const clip = clips.find(item => item.id === piece.clipId)
+                          if (clip) selectClip(clip)
+                        }}
+                        onLostPointerCapture={() => { clipReorder.current = null; reorderTargetRef.current = null; setReorderTarget(null) }}>
+                        <span>{stamp(piece.segment.end - piece.segment.start)}</span>
+                      </div>)}
+                  {timelineView === 'source' && overlaps.map(overlap => pct(overlap.end) > pct(overlap.start) && <div key={overlap.start} className="overlap-line"
                     title="Overlapping clips" style={{ left: `${pct(overlap.start)}%`, width: `${pct(overlap.end) - pct(overlap.start)}%` }} />)}
-                  <div className="range-shade" style={{ width: `${pct(range.start)}%` }} />
-                  <div className="range-shade right" style={{ width: `${100 - pct(range.end)}%` }} />
-                  <div className="selection" style={{ left: `${pct(range.start)}%`, width: `${pct(range.end) - pct(range.start)}%` }} />
-                  {moments.filter(moment => pct(moment.end) > pct(moment.start)).map(moment =>
-                    <div className="moment-mark" key={`${moment.start}:${moment.end}`} aria-hidden="true"
-                      style={{ left: `${pct(moment.start)}%`, width: `${pct(moment.end) - pct(moment.start)}%` }} />)}
-                  {[...new Set(sections.flatMap(section => [section.start, section.end]))].filter(point => point > 0 && point < duration && inView(point)).map(point =>
-                    <div className="section-mark" key={point} style={{ left: `${pct(point)}%` }} />)}
-                  {(['start', 'end'] as const).filter(edge => inView(range[edge])).map(edge => <button key={edge} className={`handle ${edge}`} disabled={trimDisabled}
+                  {timelineView === 'source' && <>
+                    <div className="range-shade" style={{ width: `${pct(range.start)}%` }} />
+                    <div className="range-shade right" style={{ width: `${100 - pct(range.end)}%` }} />
+                    <div className="selection" style={{ left: `${pct(range.start)}%`, width: `${pct(range.end) - pct(range.start)}%` }} />
+                    {moments.filter(moment => pct(moment.end) > pct(moment.start)).map(moment =>
+                      <div className="moment-mark" key={`${moment.start}:${moment.end}`} aria-hidden="true"
+                        style={{ left: `${pct(moment.start)}%`, width: `${pct(moment.end) - pct(moment.start)}%` }} />)}
+                    {[...new Set(sections.flatMap(section => [section.start, section.end]))].filter(point => point > 0 && point < duration && inView(point)).map(point =>
+                      <div className="section-mark" key={point} style={{ left: `${pct(point)}%` }} />)}
+                  </>}
+                  {(['start', 'end'] as const).filter(edge => inView(toAxis(range[edge]))).map(edge => <button key={edge} className={`handle ${edge}`} disabled={trimDisabled}
                     aria-label={edge === 'start' ? 'Drag trim start' : 'Drag trim end'}
-                    data-tight={pct(range.end) - pct(range.start) < 5}
-                    style={{ left: `clamp(0px, calc(${pct(range[edge])}% - ${edge === 'end' ? 11 : 0}px), calc(100% - 11px))` }}
+                    data-tight={pct(toAxis(range.end)) - pct(toAxis(range.start)) < 5}
+                    style={{ left: `clamp(0px, calc(${pct(toAxis(range[edge]))}% - ${edge === 'end' ? 11 : 0}px), calc(100% - 11px))` }}
                     onPointerDown={event => startScrub(event, edge)}
                     onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) scrub(event, edge) }}
                     onLostPointerCapture={() => { trimDrag.current = null }}
@@ -2193,20 +2533,30 @@ export function App() {
                       const value = Math.max(0, Math.min(duration, range[edge] + change))
                       if (editBoundary(edge, value)) seek(value)
                     }}><span /></button>)}
-                  <TimelinePlayhead pct={pct} inView={inView} onDrag={startPlayheadDrag}
+                  {selectedClip && !selectedLocked && !busy && (['start', 'end'] as const)
+                    .filter(side => inView(toAxis(selectedClip[side]))).map(side => <button key={`clip-${side}`}
+                      className={`handle clip-edge ${side}`} aria-label={`Drag clip ${side} to trim`}
+                      title={`Drag to trim the clip's ${side}`}
+                      style={{ left: `clamp(0px, calc(${pct(toAxis(selectedClip[side]))}% - ${side === 'end' ? 11 : 0}px), calc(100% - 11px))` }}
+                      onPointerDown={event => startClipEdgeDrag(event, selectedClip, side)}
+                      onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) moveClipEdgeDrag(event) }}
+                      onLostPointerCapture={() => { clipEdgeDrag.current = null }}><span /></button>)}
+                  <TimelinePlayhead pct={sourceTime => pct(toAxis(sourceTime))} inView={sourceTime => inView(toAxis(sourceTime))} onDrag={startPlayheadDrag}
                     onMove={event => {
                       if (event.currentTarget.hasPointerCapture(event.pointerId)) scrub(event, undefined, playheadOffset.current)
                     }} />
                 </>
               ) : <span className="empty-track"><Film size={16} /> Open a video to start trimming</span>}
             </div>
-            {clips.length > 0 && <div className="clip-strip" aria-label="Saved clip ranges">
-              {clips.map((clip, index) => clip.end > visibleTime.start && clip.start < visibleTime.end && <button key={clip.id} className={clip.id === selectedId ? 'selected' : ''}
-                title={`Clip ${index + 1} · ${stamp(clip.start, true)} – ${stamp(clip.end, true)}`}
-                aria-label={`Select clip ${index + 1} on timeline`} disabled={disabled}
-                aria-pressed={clip.id === selectedId}
-                style={{ left: `${pct(clip.start)}%`, width: `${pct(clip.end) - pct(clip.start)}%`, backgroundColor: clipColor(clip.id) }}
-                onClick={() => selectClip(clip)} />)}
+            {timelineView === 'source' && clips.length > 0 && <div className="clip-strip" aria-label="Saved clip ranges">
+              {clips.flatMap((clip, index) => clipSegments(clip).map((segment, part) => ({ clip, index, segment, part })))
+                .filter(({ segment }) => segment.end > visibleTime.start && segment.start < visibleTime.end)
+                .map(({ clip, index, segment, part }) => <button key={`${clip.id}-${part}`} className={clip.id === selectedId ? 'selected' : ''}
+                  title={`Clip ${index + 1}${part ? ` · cut ${part + 1}` : ''} · ${stamp(segment.start, true)} – ${stamp(segment.end, true)}`}
+                  aria-label={`Select clip ${index + 1}${part ? `, part ${part + 1}` : ''} on timeline`} disabled={disabled}
+                  aria-pressed={clip.id === selectedId}
+                  style={{ left: `${pct(segment.start)}%`, width: `${pct(segment.end) - pct(segment.start)}%`, backgroundColor: clipColor(clip.id) }}
+                  onClick={() => selectClip(clip)} />)}
             </div>}
             {source && <AccessibleScrubber duration={duration} seek={seek} />}
           </div>
@@ -2241,7 +2591,7 @@ export function App() {
       {shortcuts && <div className="dialog-backdrop" onClick={() => setShortcuts(false)}>
         <section className="shortcut-dialog panel" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" onClick={event => event.stopPropagation()}>
           <div className="section-title"><h2>Keyboard shortcuts</h2><button autoFocus className="icon-button" aria-label="Close shortcuts" onClick={() => setShortcuts(false)}><X size={18} /></button></div>
-          <dl>{[['Open video', 'Ctrl O'], ['Play / pause', 'Space'], ['Zoom in', 'Ctrl +'], ['Zoom out', 'Ctrl -'], ['Fit timeline', 'Ctrl 0'], ['Seek 1 second', '← / →'], ['Seek 5 seconds', 'Shift ← / →'], ['Mark In', 'I'], ['Mark Out', 'O'], ['Add or update clip', 'Enter']].map(([label, key]) =>
+          <dl>{[['Open video', 'Ctrl O'], ['Play / pause', 'Space'], ['Zoom in', 'Ctrl + scroll up / Ctrl +'], ['Zoom out', 'Ctrl + scroll down / Ctrl -'], ['Pan timeline', 'Shift scroll / sideways scroll'], ['Fit timeline', 'Ctrl 0'], ['Seek 1 second', '← / →'], ['Seek 5 seconds', 'Shift ← / →'], ['Mark In', 'I'], ['Mark Out', 'O'], ['Add or update clip', 'Enter'], ['Cut inside clip', 'S'], ['Remove selected clip', 'Delete'], ['Undo', 'Ctrl Z'], ['Redo', 'Ctrl Shift Z']].map(([label, key]) =>
             <div key={label}><dt>{label}</dt><dd><Key>{key}</Key></dd></div>)}</dl>
         </section>
       </div>}

@@ -79,6 +79,30 @@ export function captionAt<T extends Range>(cues: readonly T[], time: number) {
   return cue && time < cue.end ? cue : undefined
 }
 
+// Removes a cut range from a caption track. Cues that straddle the cut are
+// kept as two shorter cues so the editor no longer shows speech that was
+// removed from the clip and will never be exported.
+export function captionCut(track: CaptionTrack | undefined, cut: Range): CaptionTrack | undefined {
+  if (!track) return undefined
+  const cues = track.cues.flatMap(cue => {
+    if (cue.end <= cut.start || cue.start >= cut.end) return [cue]
+    const parts = [
+      { start: cue.start, end: Math.min(cue.end, cut.start) },
+      { start: Math.max(cue.start, cut.end), end: cue.end },
+    ]
+    return parts.flatMap(part => {
+      if (part.end - part.start < 0.01) return []
+      const words = cue.words?.map(word => ({
+        ...word,
+        start: Math.min(part.end, Math.max(part.start, word.start)),
+        end: Math.min(part.end, Math.max(part.start, word.end)),
+      })).filter(word => word.end - word.start > 0.001)
+      return [{ ...cue, ...part, ...(words && cue.words ? { words } : {}) }]
+    })
+  })
+  return { ...track, cues }
+}
+
 export function captionSlice(track: CaptionTrack | undefined, range: Range, relative = false) {
   if (!track) return undefined
   const offset = relative ? range.start : 0

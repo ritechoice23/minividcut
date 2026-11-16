@@ -476,6 +476,25 @@ pub async fn open_video(
     .await
 }
 
+/// Grant temporary asset-protocol access to a file used by the browser preview.
+#[tauri::command]
+pub fn allow_asset(app: AppHandle, path: PathBuf) -> Result<()> {
+    if !path.is_absolute() || !path.is_file() {
+        return Err("Choose an existing media file.".into());
+    }
+    app.asset_protocol_scope()
+        .allow_file(&path)
+        .map_err(|error| error.to_string())
+}
+
+/// Drop a file from the asset-protocol scope once it is no longer displayed.
+#[tauri::command]
+pub fn release_asset(app: AppHandle, path: PathBuf) -> Result<()> {
+    app.asset_protocol_scope()
+        .forbid_file(&path)
+        .map_err(|error| error.to_string())
+}
+
 #[derive(Deserialize)]
 pub struct VideoIdentity {
     duration: f64,
@@ -606,12 +625,17 @@ pub async fn open_music(app: AppHandle, track: MusicTrack) -> Result<PathBuf> {
 pub struct MusicSettings {
     track: MusicTrack,
     volume: u8,
+    // Seconds into the track where this segment's mix resumes, so a clip with
+    // internal cuts keeps one continuous music line across its segments.
+    #[serde(default)]
+    start: f64,
 }
 
 struct MusicMix {
     path: PathBuf,
     volume: u8,
     source_audio: bool,
+    start: f64,
 }
 
 pub(crate) fn caption_audio(path: &Path, mut range: Clip, duration: f64, pcm: &Path) -> Result<f64> {
@@ -690,7 +714,8 @@ fn thumbnail_at(path: &Path, time: f64) -> Result<String> {
 
 fn thumbnail_batch(path: &Path, times: &[f64]) -> Vec<String> {
     let mut results = vec![String::new(); times.len()];
-    let workers = times.len().min(4);
+    let cpus = std::thread::available_parallelism().map_or(1, usize::from);
+    let workers = export_batch::worker_count(times.len(), cpus).min(4);
     export_batch::run(
         times.len(),
         workers,
@@ -702,17 +727,6 @@ fn thumbnail_batch(path: &Path, times: &[f64]) -> Vec<String> {
         },
     );
     results
-}
-
-#[tauri::command]
-pub async fn clip_thumbnail(path: PathBuf, start: f64) -> Result<String> {
-    background(move || {
-        if !start.is_finite() || start < 0.0 {
-            return Err("Invalid clip start.".into());
-        }
-        thumbnail_at(&source(&path)?, start)
-    })
-    .await
 }
 
 #[tauri::command]
@@ -991,6 +1005,9 @@ fn encode_with(
         let index = next_input;
         next_input += 1;
         let gain = f64::from(music.volume) / 100.0;
+        if music.start > 0.0 {
+            cmd.args(["-ss", &format!("{:.9}", music.start)]);
+        }
         cmd.args(["-stream_loop", "-1", "-format_whitelist", MUSIC_FORMATS]);
         input(&mut cmd, &music.path);
         let level =
@@ -1239,115 +1256,12 @@ fn resolve_clip_media(
                 path,
                 volume: music.volume,
                 source_audio,
+                start: if music.start.is_finite() && music.start >= 0.0 { music.start } else { 0.0 },
             })
         })
         .transpose()?;
     let assembly = bookends::resolve(&clip.bookends, assets, source_audio, format)?;
     Ok(ClipMedia { music, assembly })
-}
-
-#[tauri::command]
-pub async fn prepare_sequence_preview(
-    app: AppHandle,
-    path: PathBuf,
-    mut clip: ExportClip,
-    options: ExportOptions,
-    request: String,
-    duration: f64,
-) -> Result<PathBuf> {
-    let cancel = Arc::new(AtomicBool::new(false));
-    {
-        let previews = app.state::<PreviewFiles>();
-        let mut state = previews.0.lock().map_err(|error| error.to_string())?;
-        if state.source.as_ref() != Some(&path) {
-            return Err("The source video changed.".into());
-        }
-        if let Some((_, previous)) = state.sequence.replace((request.clone(), cancel.clone())) {
-            previous.store(true, Ordering::Relaxed);
-        }
-    }
-    background(move || {
-        let result = (|| -> Result<(tempfile::TempDir, PathBuf)> {
-            check_export(&cancel)?;
-            source(&path)?;
-            if !duration.is_finite() || duration <= 0.0 {
-                return Err("Invalid video duration.".into());
-            }
-            validate_clips(std::slice::from_mut(&mut clip.range), duration)?;
-            let framed = filter(options.format, options.framing, options.position)?;
-            let media = resolve_clip_media(
-                &app,
-                &clip,
-                &mut AssetCache::default(),
-                &mut HashMap::new(),
-                audio_stream(&path, None)?,
-                options.format,
-            )?;
-            let overlay = clip
-                .overlay_id
-                .as_deref()
-                .map(|id| app.state::<CaptionOverlays>().take(id))
-                .transpose()?;
-            let (width, height) = match options.format {
-                Format::Landscape => (1920, 1080),
-                Format::Portrait => (1080, 1920),
-            };
-            if overlay
-                .as_ref()
-                .is_some_and(|overlay| !overlay.fits(width, height))
-            {
-                return Err("Caption artwork falls outside the preview frame.".into());
-            }
-            let folder = tempfile::tempdir().map_err(|error| error.to_string())?;
-            let destination = folder.path().join("clip-preview.mp4");
-            let size = format!("scale={}:{}", width / 2, height / 2);
-            encode_with(
-                &path,
-                clip.range,
-                &framed,
-                &["-c:v", "libx264", "-preset", "ultrafast", "-crf", "25"],
-                &destination,
-                CaptionLayers {
-                    legacy: None,
-                    overlay: overlay.as_ref(),
-                },
-                media.music.as_ref(),
-                media
-                    .assembly
-                    .as_ref()
-                    .map(|assembly| (assembly, Some(size.as_str()))),
-                &cancel,
-                |_| {},
-            )?;
-            app.asset_protocol_scope()
-                .allow_file(&destination)
-                .map_err(|error| error.to_string())?;
-            Ok((folder, destination))
-        })();
-        let previews = app.state::<PreviewFiles>();
-        let mut state = previews.0.lock().map_err(|error| error.to_string())?;
-        if state.sequence.as_ref().is_none_or(|(id, _)| id != &request) {
-            return Err("The clip preview changed.".into());
-        }
-        state.sequence = None;
-        check_export(&cancel)?;
-        let (folder, path) = result?;
-        state.sequence_folder = Some(folder);
-        Ok(path)
-    })
-    .await
-}
-
-#[tauri::command]
-pub fn cancel_sequence_preview(app: AppHandle, request: String) -> Result<()> {
-    let previews = app.state::<PreviewFiles>();
-    let state = previews.0.lock().map_err(|error| error.to_string())?;
-    if let Some((id, cancel)) = &state.sequence {
-        if id == &request {
-            cancel.store(true, Ordering::Relaxed);
-        }
-    }
-    Ok(())
 }
 
 fn encode_batch(
@@ -1456,6 +1370,30 @@ fn encode_batch(
         .collect()
 }
 
+/// Probe hardware encoders ahead of the first export so the first batch does
+/// not pay the cost of spawning several short FFmpeg processes.
+#[tauri::command]
+pub async fn warm_encoders(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let exports = app.state::<Exports>();
+        for format in [Format::Landscape, Format::Portrait] {
+            for quality in [Quality::Compact, Quality::Compatible, Quality::Lossless] {
+                let key = (quality, format);
+                if exports.encoders.lock().is_ok_and(|cache| cache.contains_key(&key)) {
+                    continue;
+                }
+                let found = tauri::async_runtime::spawn_blocking(move || {
+                    available_hardware_encoders(quality, format)
+                })
+                .await;
+                if let (Ok(found), Ok(mut cache)) = (found, exports.encoders.lock()) {
+                    cache.entry(key).or_insert(found);
+                }
+            }
+        }
+    });
+}
+
 #[tauri::command]
 pub async fn export_clips(
     app: AppHandle,
@@ -1483,8 +1421,15 @@ pub async fn export_clips(
         if !duration.is_finite() || duration <= 0.0 {
             return Err("Invalid video duration.".into());
         }
+        // The source can be replaced between opening it and exporting. Verify
+        // its identity so clip ranges cannot be applied to a different file.
+        let current = probe(path.clone())?;
+        let tolerance = (current.duration * 0.001).max(0.05);
+        if (current.duration - duration).abs() > tolerance {
+            return Err("The source video changed. Reopen it before exporting.".into());
+        }
         let mut ranges: Vec<_> = clips.iter().map(|clip| clip.range).collect();
-        validate_clips(&mut ranges, duration)?;
+        validate_clips(&mut ranges, current.duration)?;
         for (clip, range) in clips.iter_mut().zip(ranges) {
             clip.range = range;
         }
@@ -1825,6 +1770,7 @@ mod tests {
             path: music_path,
             volume: 15,
             source_audio: false,
+            start: 0.0,
         };
         encode_with(
             &path,
@@ -2030,6 +1976,7 @@ mod tests {
                     path: music.clone(),
                     volume: 25,
                     source_audio,
+                    start: 0.0,
                 }),
                 None,
                 &AtomicBool::new(false),

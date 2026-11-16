@@ -2,7 +2,7 @@ import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent, RefObject } from 'react'
 import { captionDimensions, captionLayouts, captionPoint, captionSequence, renderCaptionSprite } from './caption-artwork'
 import { captionAt } from './captions'
-import { usePlaybackTime } from './playback-clock'
+import { usePlaybackTime } from './editor-store'
 import type { CaptionFormat, CaptionState, CaptionStyle, CaptionTrack } from './captions'
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value))

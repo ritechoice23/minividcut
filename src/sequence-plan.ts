@@ -23,9 +23,15 @@ export type PlanLayer = {
   overlap: number
 }
 
+export type MainSegment = { start: number; sourceStart: number; length: number }
+
 export type CompositionPlan = {
   total: number
-  main: { path: string; sourceStart: number; length: number; start: number; framing: Framing; position: FramePosition; format: Format }
+  main: {
+    path: string; sourceStart: number; length: number; start: number
+    segments: MainSegment[]
+    framing: Framing; position: FramePosition; format: Format
+  }
   intro: PlanLayer | null
   outro: PlanLayer | null
   captions?: CaptionTrack
@@ -43,10 +49,11 @@ export function overlapFrames(transition: Transition, first: number, second: num
 }
 
 export function buildCompositionPlan({
-  path, range, bookends, media, format, framing, position, captions, music, musicPath, muted,
+  path, range, segments, bookends, media, format, framing, position, captions, music, musicPath, muted,
 }: {
   path: string
   range: Range
+  segments?: Range[]
   bookends: Bookends
   media: Record<string, BookendMedia>
   format: Format
@@ -57,7 +64,10 @@ export function buildCompositionPlan({
   musicPath: string
   muted: boolean
 }): CompositionPlan {
-  const mainLength = Math.max(0.05, range.end - range.start)
+  const sourceSegments = (segments?.length ? segments : [range])
+    .map(segment => ({ start: segment.start, end: segment.end }))
+    .sort((first, second) => first.start - second.start)
+  const mainLength = Math.max(0.05, sourceSegments.reduce((total, segment) => total + segment.end - segment.start, 0))
   const mainFrames = frames(mainLength)
   const introInfo = bookends.intro
   const outroInfo = bookends.outro
@@ -74,10 +84,20 @@ export function buildCompositionPlan({
   const total = seconds(afterIntro + (outroInfo ? outroFrames - lastOverlap : 0))
   const mainStart = introInfo ? seconds(introFrames - firstOverlap) : 0
   const outroStart = seconds(afterIntro - lastOverlap)
+  const mainSegments: MainSegment[] = []
+  let segmentStart = mainStart
+  for (const segment of sourceSegments) {
+    const length = segment.end - segment.start
+    mainSegments.push({ start: segmentStart, sourceStart: segment.start, length })
+    segmentStart += length
+  }
 
   return {
     total,
-    main: { path, sourceStart: range.start, length: mainLength, start: mainStart, framing, position, format },
+    main: {
+      path, sourceStart: sourceSegments[0].start, length: mainLength, start: mainStart,
+      segments: mainSegments, framing, position, format,
+    },
     intro: introInfo && introMedia ? {
       path: introInfo.path, image: introMedia.image, transition: introInfo.transition,
       position: introInfo.position, length: introLength, start: 0, overlap: seconds(firstOverlap),
@@ -103,9 +123,11 @@ export function layerState(layer: PlanLayer | 'main', plan: CompositionPlan, tim
     const fadeOut = outro?.overlap ? clamp((end - time) / outro.overlap) : 1
     const slideIn = intro?.transition === 'slide' && intro.overlap ? -100 * (1 - clamp((time - start) / intro.overlap)) : 0
     const slideOut = outro?.transition === 'slide' && outro.overlap ? -100 * (1 - clamp((end - time) / outro.overlap)) : 0
+    const segment = plan.main.segments.find(part => time >= part.start && time < part.start + part.length)
+      ?? plan.main.segments[plan.main.segments.length - 1]
     return {
       active: true,
-      local: plan.main.sourceStart + clamp(time - start, 0, plan.main.length),
+      local: segment ? segment.sourceStart + clamp(time - segment.start, 0, segment.length) : plan.main.sourceStart,
       alpha: fadeIn * fadeOut,
       slide: slideIn + slideOut,
     }

@@ -100,6 +100,10 @@ pub struct ExportClip {
     music: Option<MusicSettings>,
     #[serde(default)]
     bookends: Bookends,
+    /// Kept source ranges when the video has ripple deletes. They are joined
+    /// into one continuous main video before the rest of the export chain runs.
+    #[serde(default)]
+    segments: Option<Vec<Clip>>,
 }
 
 #[derive(Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
@@ -938,6 +942,83 @@ struct CaptionLayers<'a> {
     overlay: Option<&'a Overlay>,
 }
 
+/// Join kept source ranges into one intermediate video with no gap at the
+/// cut points. `trim`/`atrim` do not rebase timestamps, so every segment is
+/// followed by setpts/asetpts before concat, as required by FFmpeg.
+fn concat_segments(
+    path: &Path,
+    segments: &[Clip],
+    folder: &Path,
+    cancel: &AtomicBool,
+) -> Result<(tempfile::TempDir, PathBuf, f64)> {
+    check_export(cancel)?;
+    let directory = tempfile::tempdir_in(folder).map_err(|error| error.to_string())?;
+    let destination = directory.path().join("joined-main.mp4");
+    let has_audio = audio_stream(path, None)?;
+    let mut graph = Vec::new();
+    let mut order = Vec::new();
+    for (index, segment) in segments.iter().enumerate() {
+        let start = segment.start.max(0.0);
+        let end = segment.end.max(start);
+        graph.push(format!(
+            "[0:v:0]trim=start={start:.6}:end={end:.6},settb=AVTB,setpts=PTS-STARTPTS[v{index}]"
+        ));
+        if has_audio {
+            graph.push(format!(
+                "[0:a:0]atrim=start={start:.6}:end={end:.6},asetpts=PTS-STARTPTS[a{index}]"
+            ));
+        } else {
+            graph.push(format!(
+                "anullsrc=r=48000:cl=stereo:d={:.6},asetpts=PTS-STARTPTS[a{index}]",
+                end - start
+            ));
+        }
+        order.push(format!("[v{index}][a{index}]"));
+    }
+    graph.push(format!(
+        "{}concat=n={}:v=1:a=1[main_v][main_a]",
+        order.join(""),
+        segments.len()
+    ));
+    let mut cmd = ffmpeg();
+    cmd.args(["-y", "-i"])
+        .arg(path)
+        .args([
+            "-filter_complex",
+            &graph.join(";"),
+            "-map",
+            "[main_v]",
+            "-map",
+            "[main_a]",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "16",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-fps_mode",
+            "cfr",
+            "-movflags",
+            "+faststart",
+        ])
+        .arg(&destination);
+    output(&mut cmd, "ffmpeg", "Could not join the kept ranges")?;
+    check_export(cancel)?;
+    let duration: f64 = segments
+        .iter()
+        .map(|segment| (segment.end - segment.start).max(0.0))
+        .sum();
+    Ok((directory, destination, duration))
+}
+
 #[cfg(test)]
 fn encode_clip(
     path: &Path,
@@ -1344,6 +1425,24 @@ fn encode_batch(
                 Some(media) => media[index].as_ref().map_err(Clone::clone)?,
                 None => &empty,
             };
+            // A ripple-deleted video carries all kept source ranges in one
+            // export entry. Join them first so the export chain still writes
+            // exactly one file with all bookends and music attached.
+            let (_joined, main_path, main_range) = match clip.segments.as_deref() {
+                Some(segments) if segments.len() > 1 => {
+                    let (directory, path, duration) =
+                        concat_segments(path, segments, folder, cancel)?;
+                    (
+                        Some(directory),
+                        path,
+                        Clip {
+                            start: 0.0,
+                            end: duration,
+                        },
+                    )
+                }
+                _ => (None, path.to_path_buf(), clip.range),
+            };
             let output = tempfile::Builder::new()
                 .prefix(".minividcut-")
                 .suffix(".mp4")
@@ -1356,8 +1455,8 @@ fn encode_batch(
             let furthest = std::cell::Cell::new(0.0_f64);
             let encoder = encode_with_fallback(&hardware, options.quality.args(), |args| {
                 encode_with(
-                    path,
-                    clip.range,
+                    &main_path,
+                    main_range,
                     &filter,
                     args,
                     output.path(),
@@ -2287,6 +2386,7 @@ mod tests {
                     overlay: None,
                     music: None,
                     bookends: Bookends::default(),
+                    segments: None,
                 }
             })
             .collect();
@@ -2360,6 +2460,116 @@ mod tests {
     }
 
     #[test]
+    fn ripple_delete_exports_one_file_with_kept_ranges_back_to_back() {
+        let folder = tempfile::tempdir().unwrap();
+        let source = folder.path().join("source.mp4");
+        output(
+            ffmpeg()
+                .args([
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=320x180:rate=24",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:sample_rate=48000",
+                    "-t",
+                    "6",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-preset",
+                    "ultrafast",
+                    "-c:a",
+                    "aac",
+                    "-shortest",
+                ])
+                .arg(&source),
+            "ffmpeg",
+            "Could not make a test source",
+        )
+        .unwrap();
+        let clips = [ExportClip {
+            range: Clip {
+                start: 0.0,
+                end: 4.0,
+            },
+            title: Some("Ripple".into()),
+            captions: None,
+            overlay_id: None,
+            overlay: None,
+            music: None,
+            bookends: Bookends::default(),
+            // Delete 2–4s: keep the first and last two seconds.
+            segments: Some(vec![
+                Clip {
+                    start: 0.0,
+                    end: 2.0,
+                },
+                Clip {
+                    start: 4.0,
+                    end: 6.0,
+                },
+            ]),
+        }];
+        let results = encode_batch(
+            &source,
+            folder.path(),
+            &clips,
+            ExportOptions {
+                format: Format::Landscape,
+                framing: Framing::Fill,
+                position: FramePosition { x: 50, y: 50 },
+                quality: Quality::Compact,
+            },
+            None,
+            &EncoderCache::default(),
+            &AtomicBool::new(false),
+            1,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(results.len(), 1, "a ripple delete must produce one file");
+        assert!(matches!(results[0], ClipExport::Saved { .. }));
+        let exported = folder.path().join("Ripple.mp4");
+        assert!(exported.exists());
+        let info = probe(exported.clone()).unwrap();
+        assert!(
+            (info.duration - 4.0).abs() < 0.15,
+            "expected 4s of kept footage, got {}",
+            info.duration
+        );
+        let frames = output(
+            command("ffprobe")
+                .args([
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-count_frames",
+                    "-show_entries",
+                    "stream=nb_read_frames",
+                    "-of",
+                    "csv=p=0",
+                ])
+                .arg(&exported),
+            "ffprobe",
+            "Could not count exported frames",
+        )
+        .unwrap();
+        let count: u64 = String::from_utf8_lossy(&frames.stdout)
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            (count as i64 - 96).abs() <= 4,
+            "expected ~96 frames, got {count}"
+        );
+    }
+
+    #[test]
     fn cancellation_keeps_finished_clips_and_cleans_up_temporary_outputs() {
         let folder = tempfile::tempdir().unwrap();
         let source = folder.path().join("source.mp4");
@@ -2392,6 +2602,7 @@ mod tests {
                 overlay: None,
                 music: None,
                 bookends: Bookends::default(),
+                segments: None,
             })
             .collect();
         let cancel = AtomicBool::new(false);
@@ -2578,6 +2789,7 @@ mod tests {
                 overlay: None,
                 music: None,
                 bookends: Bookends::default(),
+                segments: None,
             }],
             ExportOptions {
                 format: Format::Portrait,

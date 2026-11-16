@@ -30,6 +30,8 @@
 
 - Browse Kaino's CC0 sound effects alongside music. Audition, download and use effects with the same controls, stored separately from your music.
 
+- Remove the bundled demo tracks from the music menu. Drafts that used one still open; choose a Kaino track or a local file instead.
+
 - Preview the full clip with its intro, outro, transitions, captions, and music. Playback places Play/Pause between the seek buttons and groups preview volume with mute.
 
 - Search Kaino's CC0 music catalog and download individual tracks on demand. Reuse downloads offline or remove them from the music panel.

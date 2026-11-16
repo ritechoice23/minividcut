@@ -2,7 +2,7 @@ import { memo, useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { Pause, Play, X } from 'lucide-react'
-import { DEFAULT_MUSIC_VOLUME, effectiveMusic, MUSIC_LIBRARY } from './music'
+import { DEFAULT_MUSIC_VOLUME, effectiveMusic } from './music'
 import type { KainoCollection, Music, MusicTrack } from './music'
 import { KainoLibrary, MusicLoading } from './KainoLibrary'
 import type { KainoTrack } from './KainoLibrary'
@@ -94,9 +94,7 @@ export const MusicMenu = memo(function MusicMenu({ project, clip, disabled, canP
         if (!path) return
         track = { kind: 'file', path, name: path.split(/[/\\]/).pop() ?? path }
       } else {
-        const library = MUSIC_LIBRARY.find(track => track.id === value)
-        if (!library) return
-        track = { kind: 'library', id: library.id }
+        throw new Error('Choose a track from the Kaino library or an audio file.')
       }
       const path = await invoke<string>('open_music', { track })
       onChange(target, {
@@ -137,14 +135,13 @@ export const MusicMenu = memo(function MusicMenu({ project, clip, disabled, canP
           {target === 'clip' && <option value="inherit">Use project music</option>}
           <option value="off">No music</option>
           {current?.track.kind === 'file' && <option value="file" disabled>{current.track.name}</option>}
+          {current?.track.kind === 'library' && <option value={value} disabled>{current.track.id} · no longer bundled</option>}
           <option value="browse">Choose an audio file…</option>
           {activeKaino && !(activeKaino.collection === 'sfx' ? sfxTracks : kainoTracks)
             .some(track => `kaino${activeKaino.collection === 'sfx' ? '-sfx' : ''}:${track.id}` === value) &&
             <option value={value} disabled>{activeKaino.name} (download required)</option>}
           {kainoTracks.map(track => <option key={`music-${track.id}`} value={`kaino:${track.id}`}>{track.title}</option>)}
           {sfxTracks.map(track => <option key={`sfx-${track.id}`} value={`kaino-sfx:${track.id}`}>SFX · {track.title}</option>)}
-          {MUSIC_LIBRARY.filter(track => track.id === value)
-            .map(track => <option key={track.id} value={track.id}>{track.name}</option>)}
         </select>
       </label>
       {current && <label>

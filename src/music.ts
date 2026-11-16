@@ -1,13 +1,7 @@
-export const MUSIC_LIBRARY = [
-  { id: 'a-brand-new-wisdom', name: 'A Brand New Wisdom' },
-  { id: 'just-saying-tho', name: 'Just Saying Tho' },
-  { id: 'winter-dust', name: 'Winter Dust' },
-  { id: 'swinging-sweet', name: 'Swinging Sweet' },
-] as const
-
-type LibraryTrack = typeof MUSIC_LIBRARY[number]['id']
 export type KainoCollection = 'music' | 'sfx'
-export type MusicTrack = { kind: 'library'; id: LibraryTrack }
+// The bundled library is no longer shipped; keep the kind so older drafts
+// still load and can be switched to a Kaino track or local file.
+export type MusicTrack = { kind: 'library'; id: string }
   | { kind: 'kaino'; id: string; name: string; collection?: KainoCollection }
   | { kind: 'file'; path: string; name: string }
 export const kainoKey = (id: string, collection: KainoCollection = 'music') =>

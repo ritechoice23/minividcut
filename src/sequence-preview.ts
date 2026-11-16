@@ -10,6 +10,7 @@ import { prepareCaptionOverlay } from './caption-export'
 
 type Sequence = {
   path: string
+  duration: number
   range: Range
   captions?: CaptionTrack
   music: Music | null
@@ -62,7 +63,8 @@ export function useSequencePreview(key: string, onError: (message: string) => vo
       if (request.current !== job) return
       job.encoding = true
       const path = await invoke<string>('prepare_sequence_preview', {
-        request: job.id, path: sequence.path, options: { ...sequence.options, quality: 'compatible' },
+        request: job.id, path: sequence.path, duration: sequence.duration,
+        options: { ...sequence.options, quality: 'compatible' },
         clip: { start: sequence.range.start, end: sequence.range.end,
           captionOverlay, music: sequence.music, bookends: sequence.bookends },
       })

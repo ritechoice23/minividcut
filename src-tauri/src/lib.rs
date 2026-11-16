@@ -37,6 +37,7 @@ pub fn run() {
             kaino::remove_kaino,
             video::thumbnails,
             video::clip_thumbnail,
+            video::clip_thumbnails,
             video::prepare_preview,
             video::prepare_sequence_preview,
             video::cancel_sequence_preview,

@@ -2,6 +2,7 @@ import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent, RefObject } from 'react'
 import { captionDimensions, captionLayouts, captionPoint, captionSequence, renderCaptionSprite } from './caption-artwork'
 import { captionAt } from './captions'
+import { usePlaybackTime } from './playback-clock'
 import type { CaptionFormat, CaptionState, CaptionStyle, CaptionTrack } from './captions'
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value))
@@ -11,10 +12,11 @@ const handles = [
   ['bottom left', -1, 1], ['bottom', 0, 1], ['bottom right', 1, 1],
 ] as const
 
-export function CaptionPreview({ track, format, video, time, editable, onStyle }: {
-  track: CaptionTrack; format: CaptionFormat; video: RefObject<HTMLVideoElement | null>; time: number
+export function CaptionPreview({ track, format, video, editable, onStyle }: {
+  track: CaptionTrack; format: CaptionFormat; video: RefObject<HTMLVideoElement | null>
   editable: boolean; onStyle: (style: CaptionStyle) => void
 }) {
+  const time = usePlaybackTime()
   const canvas = useRef<HTMLCanvasElement>(null)
   const handle = useRef<HTMLDivElement>(null)
   const painting = useRef<CanvasRenderingContext2D | null>(null)

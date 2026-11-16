@@ -89,6 +89,7 @@ pub enum CaptionProgress {
 pub struct CaptionRequest {
     path: PathBuf,
     range: Clip,
+    duration: f64,
     allow_download: bool,
 }
 
@@ -434,10 +435,13 @@ pub async fn generate_captions(
         if !installed(&path) && !request.allow_download {
             return Err("Download the caption model to generate captions.".into());
         }
+        if !request.duration.is_finite() || request.duration <= 0.0 {
+            return Err("Invalid video duration.".into());
+        }
         report(CaptionProgress::Preparing);
         let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
         let pcm = directory.path().join("audio.pcm");
-        let duration = caption_audio(&request.path, request.range, &pcm)?;
+        let duration = caption_audio(&request.path, request.range, request.duration, &pcm)?;
         check_cancel(cancel)?;
         let pcm = File::open(pcm).map_err(|error| error.to_string())?;
         if pcm.metadata().map_err(|error| error.to_string())?.len() == 0 {
@@ -464,6 +468,7 @@ pub async fn generate_captions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::video::{probe, source};
 
     #[test]
     fn preserves_silent_gaps_and_clamps_early_word_boundaries() {
@@ -548,6 +553,7 @@ mod tests {
                 start: 0.2,
                 end: 4.0,
             },
+            probe(source(&input).unwrap()).unwrap().duration,
             &pcm,
         )
         .unwrap();

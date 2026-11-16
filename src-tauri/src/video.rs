@@ -614,13 +614,13 @@ struct MusicMix {
     source_audio: bool,
 }
 
-pub(crate) fn caption_audio(path: &Path, mut range: Clip, pcm: &Path) -> Result<f64> {
-    let video = probe(source(path)?)?;
-    validate_clips(std::slice::from_mut(&mut range), video.duration)?;
+pub(crate) fn caption_audio(path: &Path, mut range: Clip, duration: f64, pcm: &Path) -> Result<f64> {
+    source(path)?;
+    validate_clips(std::slice::from_mut(&mut range), duration)?;
     let duration = range.end - range.start;
     let mut cmd = ffmpeg();
     cmd.args(["-ss", &format!("{:.6}", range.start)]);
-    let output = input(&mut cmd, &video.path)
+    let output = input(&mut cmd, path)
         .args([
             "-t",
             &format!("{duration:.6}"),
@@ -688,6 +688,22 @@ fn thumbnail_at(path: &Path, time: f64) -> Result<String> {
     ))
 }
 
+fn thumbnail_batch(path: &Path, times: &[f64]) -> Vec<String> {
+    let mut results = vec![String::new(); times.len()];
+    let workers = times.len().min(4);
+    export_batch::run(
+        times.len(),
+        workers,
+        |index, _| thumbnail_at(path, times[index]),
+        |index, event| {
+            if let Update::Finished(result) = event {
+                results[index] = result.unwrap_or_default();
+            }
+        },
+    );
+    results
+}
+
 #[tauri::command]
 pub async fn clip_thumbnail(path: PathBuf, start: f64) -> Result<String> {
     background(move || {
@@ -695,6 +711,20 @@ pub async fn clip_thumbnail(path: PathBuf, start: f64) -> Result<String> {
             return Err("Invalid clip start.".into());
         }
         thumbnail_at(&source(&path)?, start)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn clip_thumbnails(path: PathBuf, starts: Vec<f64>) -> Result<Vec<String>> {
+    background(move || {
+        let path = source(&path)?;
+        if starts.is_empty() || starts.len() > MAX_CLIPS
+            || starts.iter().any(|start| !start.is_finite() || *start < 0.0)
+        {
+            return Err("Invalid clip thumbnail times.".into());
+        }
+        Ok(thumbnail_batch(&path, &starts))
     })
     .await
 }
@@ -722,10 +752,7 @@ pub async fn thumbnails(
         {
             return Err("Invalid timeline thumbnail times.".into());
         }
-        Ok(times
-            .into_iter()
-            .map(|time| thumbnail_at(&path, time).unwrap_or_default())
-            .collect())
+        Ok(thumbnail_batch(&path, &times))
     })
     .await
 }
@@ -1226,6 +1253,7 @@ pub async fn prepare_sequence_preview(
     mut clip: ExportClip,
     options: ExportOptions,
     request: String,
+    duration: f64,
 ) -> Result<PathBuf> {
     let cancel = Arc::new(AtomicBool::new(false));
     {
@@ -1241,8 +1269,11 @@ pub async fn prepare_sequence_preview(
     background(move || {
         let result = (|| -> Result<(tempfile::TempDir, PathBuf)> {
             check_export(&cancel)?;
-            let info = probe(source(&path)?)?;
-            validate_clips(std::slice::from_mut(&mut clip.range), info.duration)?;
+            source(&path)?;
+            if !duration.is_finite() || duration <= 0.0 {
+                return Err("Invalid video duration.".into());
+            }
+            validate_clips(std::slice::from_mut(&mut clip.range), duration)?;
             let framed = filter(options.format, options.framing, options.position)?;
             let media = resolve_clip_media(
                 &app,
@@ -1434,6 +1465,7 @@ pub async fn export_clips(
     options: ExportOptions,
     progress: Channel<Option<Progress>>,
     job_id: String,
+    duration: f64,
 ) -> Result<Vec<ClipExport>> {
     background(move || {
         let exports = app.state::<Exports>();
@@ -1447,9 +1479,12 @@ pub async fn export_clips(
         }
         let _job = ExportJob(&exports.batch);
         let _ = progress.send(None);
-        let video = probe(source(&path)?)?;
+        let path = source(&path)?;
+        if !duration.is_finite() || duration <= 0.0 {
+            return Err("Invalid video duration.".into());
+        }
         let mut ranges: Vec<_> = clips.iter().map(|clip| clip.range).collect();
-        validate_clips(&mut ranges, video.duration)?;
+        validate_clips(&mut ranges, duration)?;
         for (clip, range) in clips.iter_mut().zip(ranges) {
             clip.range = range;
         }
@@ -1493,7 +1528,7 @@ pub async fn export_clips(
         let workers = export_batch::worker_count(clips.len(), cpus);
         let source_audio = clips.iter().any(|clip| {
             clip.bookends.configured() || clip.music.as_ref().is_some_and(|music| music.volume > 0)
-        }) && audio_stream(&video.path, None)?;
+        }) && audio_stream(&path, None)?;
         let mut assets = AssetCache::default();
         let mut music_paths = HashMap::new();
         let media = clips
@@ -1511,7 +1546,7 @@ pub async fn export_clips(
             })
             .collect::<Vec<_>>();
         let results = encode_batch(
-            &video.path,
+            &path,
             &folder,
             &clips,
             options,
@@ -1609,6 +1644,28 @@ mod tests {
         ] {
             assert!(validate_clips(&mut [invalid], 3.0).is_err());
         }
+    }
+
+    #[test]
+    fn batches_thumbnails_in_requested_order() {
+        let folder = tempfile::tempdir().unwrap();
+        let source = folder.path().join("source.mp4");
+        output(
+            ffmpeg()
+                .args([
+                    "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=10", "-t", "2",
+                    "-c:v", "libx264",
+                ])
+                .arg(&source),
+            "ffmpeg",
+            "Could not make a test source",
+        )
+        .unwrap();
+        let times = [0.2, 1.2, 0.7];
+        let frames = thumbnail_batch(&source, &times);
+        assert_eq!(frames.len(), times.len());
+        assert!(frames.iter().all(|frame| frame.starts_with("data:image/jpeg;base64,")));
+        assert_ne!(frames[0], frames[1]);
     }
 
     #[test]

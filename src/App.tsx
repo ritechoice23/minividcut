@@ -32,6 +32,7 @@ import type { Music, MusicTrack } from './music'
 import { BookendsMenu } from './BookendsMenu'
 import { effectiveBookends } from './bookends'
 import { useSequencePreview } from './sequence-preview'
+import { playbackClock, usePlaybackTime } from './playback-clock'
 import type { Bookend, Bookends } from './bookends'
 
 type VideoInfo = { path: string; name: string; duration: number; width: number; height: number; bytes: number }
@@ -70,6 +71,31 @@ const trackKey = (track: MusicTrack) => track.kind === 'file' ? `file:${track.pa
 
 function Key({ children }: { children: ReactNode }) {
   return <kbd>{children}</kbd>
+}
+
+function ClockDisplay({ duration, sequencePath, sequenceTime }: {
+  duration: number; sequencePath: string | null; sequenceTime: { time: number; duration: number }
+}) {
+  const time = usePlaybackTime()
+  return <span className="clock"><strong>{stamp(sequencePath ? sequenceTime.time : time, true)}</strong><span>/</span>{stamp(sequencePath ? sequenceTime.duration : duration)}</span>
+}
+
+function TimelinePlayhead({ pct, inView, onDrag, onMove }: {
+  pct: (value: number) => number; inView: (value: number) => boolean
+  onDrag: (event: ReactPointerEvent) => void; onMove: (event: ReactPointerEvent) => void
+}) {
+  const time = usePlaybackTime()
+  if (!inView(time)) return null
+  return <div className="playhead" style={{ left: `${pct(time)}%` }}>
+    <span className="playhead-grip" title="Drag to seek" aria-hidden="true"
+      onPointerDown={onDrag} onPointerMove={onMove} />
+  </div>
+}
+
+function AccessibleScrubber({ duration, seek }: { duration: number; seek: (time: number) => void }) {
+  const time = usePlaybackTime()
+  return <input className="accessible-scrubber" aria-label="Playhead time" type="range"
+    min={0} max={duration} step="any" value={time} onChange={event => seek(Number(event.target.value))} />
 }
 
 function ExportBadge({ state }: { state: ExportState }) {
@@ -126,13 +152,15 @@ export function App() {
   const [previewPath, setPreviewPath] = useState('')
   const [preview, setPreview] = useState<'direct' | 'preparing' | 'proxy' | 'unavailable'>('direct')
   const [frames, setFrames] = useState<Record<string, string>>({})
+  const framesRef = useRef(frames)
+  framesRef.current = frames
+  const framesInFlight = useRef(new Set<string>())
   const timelineScroll = useRef<HTMLDivElement>(null)
   const [loading, setLoading] = useState(false)
   const [dragging, setDragging] = useState(false)
   const [range, setRange] = useState<Range>({ start: 0, end: 0 })
   const [clips, setClips] = useState<Clip[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
-  const [time, setTime] = useState(0)
   const [timelineZoom, setTimelineZoom] = useState(1)
   const [timelineStart, setTimelineStart] = useState(0)
   const timelinePanned = useRef(false)
@@ -244,21 +272,35 @@ export function App() {
   const tileTimes = filmTiles.map(tile => tile.time).join(',')
   const overlaps = useMemo(() => timelineOverlaps(clips), [clips])
   useEffect(() => {
-    if (!source || !tileTimes) return
-    const times = tileTimes.split(',').map(Number).filter(time => !(time in frames))
+    // While zoomed playback pans the viewport, defer thumbnail work until the
+    // user pauses instead of launching an FFmpeg batch on every time tick.
+    if (!source || !tileTimes || (playing && timelineZoom > 1)) return
+    const times = tileTimes.split(',').map(Number)
+      .filter(time => !(String(time) in framesRef.current) && !framesInFlight.current.has(String(time)))
     if (!times.length) return
+    const keys = times.map(String)
+    keys.forEach(key => framesInFlight.current.add(key))
     let active = true
     const timer = window.setTimeout(() => {
       void invoke<string[]>('thumbnails', { path: source.path, duration: source.duration, times })
         .then(images => {
           if (!active) return
-          setFrames(previous => Object.fromEntries([
-            ...Object.entries(previous).slice(-240), ...times.map((time, index) => [time, images[index] ?? '']),
-          ]))
-        }).catch(() => {})
+          const next = { ...framesRef.current }
+          times.forEach((time, index) => { next[time] = images[index] ?? '' })
+          const existing = Object.keys(next)
+          for (const key of existing.slice(0, Math.max(0, existing.length - 240))) delete next[key]
+          framesRef.current = next
+          setFrames(next)
+        }).catch(() => {}).finally(() => {
+          keys.forEach(key => framesInFlight.current.delete(key))
+        })
     }, 140)
-    return () => { active = false; window.clearTimeout(timer) }
-  }, [source, tileTimes, frames])
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+      keys.forEach(key => framesInFlight.current.delete(key))
+    }
+  }, [source, tileTimes, playing, timelineZoom])
   useEffect(() => {
     const bar = timelineScroll.current
     if (!bar || !visibleTime.maxStart) return
@@ -266,10 +308,20 @@ export function App() {
     if (Math.abs(bar.scrollLeft - left) > 1) bar.scrollLeft = left
   }, [visibleTime.start, visibleTime.maxStart, timelineZoom])
   const inView = (value: number) => value >= visibleTime.start - 0.000001 && value <= visibleTime.end + 0.000001
+  const setPlaybackTime = useCallback((value: number) => {
+    playbackClock.set(value)
+    if (timelinePanned.current) return
+    setTimelineStart(start => {
+      const visible = timelineWindow(duration, timelineZoom, start)
+      if (value >= visible.start - 0.000001 && value <= visible.end + 0.000001) return start
+      return zoomTimeline(duration, timelineZoom, value)
+    })
+  }, [duration, timelineZoom])
   const zoomTimelineTo = (requested: number) => {
     const zoom = Math.max(1, Math.min(MAX_TIMELINE_ZOOM, requested))
     if (zoom === timelineZoom) return
-    const anchor = inView(time) ? time : (visibleTime.start + visibleTime.end) / 2
+    const now = playbackClock.get()
+    const anchor = inView(now) ? now : (visibleTime.start + visibleTime.end) / 2
     setTimelineZoom(zoom)
     setTimelineStart(zoomTimeline(duration, zoom, anchor))
   }
@@ -297,15 +349,6 @@ export function App() {
       void listener.then(unlisten => unlisten()).catch(() => {})
     }
   }, [])
-
-  useEffect(() => {
-    if (timelinePanned.current) return
-    setTimelineStart(start => {
-      const visible = timelineWindow(duration, timelineZoom, start)
-      if (time >= visible.start - 0.000001 && time <= visible.end + 0.000001) return start
-      return zoomTimeline(duration, timelineZoom, time)
-    })
-  }, [duration, timelineZoom, time])
 
   useEffect(() => {
     const body = timelineBody.current
@@ -425,20 +468,45 @@ export function App() {
     draftQuality !== 'compact' || draftFraming !== 'fill' || Object.values(positions).some(
       position => position.x !== CENTER.x || position.y !== CENTER.y)))
 
+  // Drafts can contain hundreds of thousands of caption characters. Serialize
+  // them at most once per burst of edits instead of on every pointer move.
+  const draftTimer = useRef<number | null>(null)
+  const draftRef = useRef<Draft | null>(null)
   useEffect(() => {
     if (!source) return
-    try {
-      const draft: Draft = {
-        version: 1, source, range, clips, sections, format: draftFormat, quality: draftQuality,
-        framing: draftFraming, positions, captions: draftCaptions, captionStyle: sharedCaptionStyle.current,
-        music: projectMusic,
-        bookends: projectBookends,
-      }
-      localStorage.setItem(DRAFT_KEY, JSON.stringify(draft))
-    } catch {
-      setNotice('Draft recovery could not save your latest edits.')
+    draftRef.current = {
+      version: 1, source, range, clips, sections, format: draftFormat, quality: draftQuality,
+      framing: draftFraming, positions, captions: draftCaptions, captionStyle: sharedCaptionStyle.current,
+      music: projectMusic,
+      bookends: projectBookends,
     }
+    if (draftTimer.current !== null) window.clearTimeout(draftTimer.current)
+    draftTimer.current = window.setTimeout(() => {
+      draftTimer.current = null
+      try {
+        localStorage.setItem(DRAFT_KEY, JSON.stringify(draftRef.current))
+      } catch {
+        setNotice('Draft recovery could not save your latest edits.')
+      }
+    }, 400)
   }, [source, range, clips, sections, draftFormat, draftQuality, draftFraming, positions, draftCaptions, projectMusic, projectBookends])
+  useEffect(() => {
+    const flush = () => {
+      if (draftTimer.current === null || !draftRef.current) return
+      window.clearTimeout(draftTimer.current)
+      draftTimer.current = null
+      try {
+        localStorage.setItem(DRAFT_KEY, JSON.stringify(draftRef.current))
+      } catch {
+        // The user is leaving; there is no UI left to report this to.
+      }
+    }
+    window.addEventListener('pagehide', flush)
+    return () => {
+      window.removeEventListener('pagehide', flush)
+      flush()
+    }
+  }, [])
 
   const loadVideo = useCallback(async (path: string, draft?: Draft) => {
     if (exportLock.current || importLock.current) return
@@ -480,7 +548,7 @@ export function App() {
         setFraming(draft.framing)
       }
       setRange(draft?.range ?? { start: 0, end: info.duration })
-      setTime(0)
+      setPlaybackTime(0)
       timelinePanned.current = false
       setTimelineZoom(1)
       setTimelineStart(0)
@@ -504,6 +572,8 @@ export function App() {
       setDraftCaptions(draft?.captions ?? {})
       sharedCaptionStyle.current = draft?.captionStyle ?? null
       setFrames({})
+      framesRef.current = {}
+      framesInFlight.current.clear()
       setExportBatch(null)
       setSplitOpen(false)
     } catch (error) {
@@ -512,7 +582,7 @@ export function App() {
       importLock.current = false
       setLoading(false)
     }
-  }, [recovery, hasEdits])
+  }, [recovery, hasEdits, setPlaybackTime])
 
   const clipStarts = [...new Set(clips.map(clip => clip.start))].join(',')
   useEffect(() => {
@@ -522,16 +592,13 @@ export function App() {
     const cache = frameCache.current
     for (const start of cache.keys()) if (!starts.includes(start)) cache.delete(start)
     const pending = starts.filter(start => !cache.has(start))
-    async function renderFrames(path: string) {
-      for (const start of pending) {
-        if (cancelled) break
-        const frame = await invoke<string>('clip_thumbnail', { path, start }).catch(() => '')
-        if (cancelled) break
-        cache.set(start, frame)
+    if (!pending.length) return
+    void invoke<string[]>('clip_thumbnails', { path: source.path, starts: pending })
+      .then(images => {
+        if (cancelled) return
+        pending.forEach((start, index) => cache.set(start, images[index] ?? ''))
         setClipFrames(Object.fromEntries(cache))
-      }
-    }
-    void renderFrames(source.path)
+      }).catch(() => {})
     return () => { cancelled = true }
   }, [source, clipStarts])
 
@@ -595,8 +662,8 @@ export function App() {
     const next = Math.min(duration, Math.max(0, position))
     const player = video.current
     if (player && player.readyState > 0) player.currentTime = Math.min(next, player.duration)
-    setTime(next)
-  }, [source, duration, stopSequence])
+    setPlaybackTime(next)
+  }, [source, duration, stopSequence, setPlaybackTime])
 
   const refreshCaptionModel = useCallback(async () => {
     const info = await invoke<CaptionModel>('caption_model')
@@ -673,7 +740,7 @@ export function App() {
           }
         }
         const cues = await invoke<CaptionCue[]>('generate_captions', {
-          request: { path: source.path, range: { start: clip.start, end: clip.end }, allowDownload: true },
+          request: { path: source.path, range: { start: clip.start, end: clip.end }, duration: source.duration, allowDownload: true },
           progress,
         })
         transcript = cues.map(cue => cue.text).join(' ').trim()
@@ -774,7 +841,7 @@ export function App() {
         try {
           const { start, end } = target.range
           const cues = await invoke<CaptionCue[]>('generate_captions', {
-            request: { path: source.path, range: { start, end }, allowDownload: !model.installed },
+            request: { path: source.path, range: { start, end }, duration: source.duration, allowDownload: !model.installed },
             progress,
           })
           if (stale()) break
@@ -842,7 +909,7 @@ export function App() {
     setSequencePlaying(false)
     setNotice('')
     void sequence.play({
-      path: source.path, range, captions: currentCaptions, music: activeMusic, bookends,
+      path: source.path, duration: source.duration, range, captions: currentCaptions, music: activeMusic, bookends,
       options: { format, framing, position },
     })
   }
@@ -913,7 +980,7 @@ export function App() {
     const player = sequence.player.current
     if (player && player.readyState > 0) {
       player.currentTime = Math.max(0, Math.min(player.duration, player.currentTime + offset))
-    } else if (!sequence.preparing) seek(time + offset)
+    } else if (!sequence.preparing) seek(playbackClock.get() + offset)
   }
 
   function stopMomentSearch() {
@@ -999,7 +1066,7 @@ export function App() {
               }
             }
             const result = await invoke<CaptionCue[]>('generate_captions', {
-              request: { path: source.path, range: gap, allowDownload: true }, progress,
+              request: { path: source.path, range: gap, duration: source.duration, allowDownload: true }, progress,
             })
             const generated = result.map(cue => offsetCaption(cue, gap.start))
             cache.push({ range: gap, cues: generated })
@@ -1189,8 +1256,9 @@ export function App() {
 
   const splitAtPlayhead = () => {
     setSplitOpen(false)
-    const first = { start: range.start, end: time }
-    const second = { start: time, end: range.end }
+    const at = playbackClock.get()
+    const first = { start: range.start, end: at }
+    const second = { start: at, end: range.end }
     if (!validRange(first, duration) || !validRange(second, duration)) {
       setNotice('Move the playhead inside the trim range before splitting.')
       return
@@ -1338,19 +1406,30 @@ export function App() {
           return { ...current, states }
         })
       }
-      const prepared = []
-      for (const clip of batch) {
+      const prepared: {
+        start: number; end: number; title?: string; captionOverlay?: string
+        music: Music | null; bookends: Bookends
+      }[] = []
+      const OVERLAY_CONCURRENCY = 3
+      for (let index = 0; index < batch.length; index += OVERLAY_CONCURRENCY) {
         if (cancelRequested.current) break
-        const captions = captionSlice(clip.captions, clip, true)
-        const captionOverlay = captions && await prepareCaptionOverlay(captions, options.format, clip.end - clip.start, () => cancelRequested.current)
-        if (captionOverlay) overlays.push(captionOverlay)
-        prepared.push({ start: clip.start, end: clip.end, title: clip.title, captionOverlay,
-          music: effectiveMusic(projectMusic, clip.music), bookends: effectiveBookends(projectBookends, clip.bookends) })
+        const chunk = batch.slice(index, index + OVERLAY_CONCURRENCY)
+        const rendered = await Promise.all(chunk.map(async clip => {
+          const captions = captionSlice(clip.captions, clip, true)
+          const captionOverlay = captions && await prepareCaptionOverlay(captions, options.format, clip.end - clip.start, () => cancelRequested.current)
+          return captionOverlay || undefined
+        }))
+        rendered.forEach((captionOverlay, offset) => {
+          const clip = chunk[offset]
+          if (captionOverlay) overlays.push(captionOverlay)
+          prepared.push({ start: clip.start, end: clip.end, title: clip.title, captionOverlay,
+            music: effectiveMusic(projectMusic, clip.music), bookends: effectiveBookends(projectBookends, clip.bookends) })
+        })
       }
       if (hasCaptionArtwork) setNotice('')
       const states = cancelRequested.current ? batch.map(() => ({ status: 'canceled' as const })) : await invoke<ExportState[]>('export_clips', {
         path: source.path, folder, clips: prepared,
-        options, progress: channel, jobId,
+        options, progress: channel, jobId, duration: source.duration,
       })
       setExportBatch({ ranges: batch, states, running: false, options })
       const failure = states.find(state => state.status === 'failed')
@@ -1388,6 +1467,16 @@ export function App() {
     if (exportReady.current) void sendExportCancellation(exportReady.current)
   }
 
+  // State used by the global shortcuts is read through a ref so the listeners
+  // are attached once instead of being replaced on every render.
+  const shortcutState = useRef({
+    captionsOpen, settingsOpen, shortcuts, source, loading, timelineZoom,
+    closeCaptions, chooseVideo, zoomTimelineTo, editBoundary, seekPlayback, addClip, togglePlay,
+  })
+  shortcutState.current = {
+    captionsOpen, settingsOpen, shortcuts, source, loading, timelineZoom,
+    closeCaptions, chooseVideo, zoomTimelineTo, editBoundary, seekPlayback, addClip, togglePlay,
+  }
   useEffect(() => {
     const isTextEditing = (el: Element | null): boolean => {
       if (!el) return false
@@ -1401,65 +1490,67 @@ export function App() {
     }
 
     const shortcutsHandler = (event: KeyboardEvent) => {
+      const state = shortcutState.current
       if (document.querySelector('.settings-page:not([hidden])')) return
       const key = event.key.toLowerCase()
       const target = event.target instanceof Element ? event.target : null
 
       if (event.key === 'Escape') {
-        if (captionsOpen && target?.closest('#caption-editor') && !target.closest('input, select, textarea')) closeCaptions()
+        if (state.captionsOpen && target?.closest('#caption-editor') && !target.closest('input, select, textarea')) state.closeCaptions()
         setShortcuts(false)
         setSplitOpen(false)
         return
       }
       if ((event.ctrlKey || event.metaKey) && key === 'o') {
         event.preventDefault()
-        void chooseVideo()
+        void state.chooseVideo()
         return
       }
 
       if ((event.ctrlKey || event.metaKey) && !event.altKey) {
         if (key === '+' || key === '=' || event.code === 'NumpadAdd') {
           event.preventDefault()
-          if (source && !loading) zoomTimelineTo(timelineZoom * 2)
+          if (state.source && !state.loading) state.zoomTimelineTo(state.timelineZoom * 2)
           return
         }
         if (key === '-' || key === '_' || event.code === 'NumpadSubtract') {
           event.preventDefault()
-          if (source && !loading) zoomTimelineTo(timelineZoom / 2)
+          if (state.source && !state.loading) state.zoomTimelineTo(state.timelineZoom / 2)
           return
         }
         if (key === '0' || event.code === 'Numpad0') {
           event.preventDefault()
-          if (source && !loading) zoomTimelineTo(1)
+          if (state.source && !state.loading) state.zoomTimelineTo(1)
           return
         }
       }
 
-      if (shortcuts) return
+      if (state.shortcuts) return
 
-      if (isTextEditing(target) || event.ctrlKey || event.metaKey || event.altKey || !source || loading) return
+      if (isTextEditing(target) || event.ctrlKey || event.metaKey || event.altKey || !state.source || state.loading) return
       if (key === 'i' || key === 'o') {
-        editBoundary(key === 'i' ? 'start' : 'end', time)
+        state.editBoundary(key === 'i' ? 'start' : 'end', playbackClock.get())
         return
       }
       if (key === 'arrowleft' || key === 'arrowright') {
         if (!target?.closest('input[type="range"]')) {
           event.preventDefault()
-          seekPlayback((key === 'arrowleft' ? -1 : 1) * (event.shiftKey ? 5 : 1))
+          state.seekPlayback((key === 'arrowleft' ? -1 : 1) * (event.shiftKey ? 5 : 1))
         }
         return
       }
       if (key === 'enter' && !event.repeat) {
-        if (!target?.closest('button, a, input, select, textarea')) addClip()
+        if (!target?.closest('button, a, input, select, textarea')) state.addClip()
       }
     }
     const playbackShortcut = (event: KeyboardEvent) => {
-      if ((event.key !== ' ' && event.code !== 'Space') || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || !source || settingsOpen) return
+      const state = shortcutState.current
+      if ((event.key !== ' ' && event.code !== 'Space') || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || !state.source || state.settingsOpen) return
       const target = event.target instanceof Element ? event.target : null
       if (isTextEditing(target) || target?.closest('button, select, input[type="range"], a')) return
       event.preventDefault()
       event.stopPropagation()
-      if (!event.repeat) togglePlay()
+      if (!event.repeat) state.togglePlay()
     }
     window.addEventListener('keydown', playbackShortcut, true)
     window.addEventListener('keydown', shortcutsHandler)
@@ -1467,7 +1558,7 @@ export function App() {
       window.removeEventListener('keydown', playbackShortcut, true)
       window.removeEventListener('keydown', shortcutsHandler)
     }
-  })
+  }, [])
 
   const scrub = (event: ReactPointerEvent, edge?: keyof Range, offset = 0) => {
     if (!track.current || !source || loading || (edge && selectedLocked)) return
@@ -1498,7 +1589,7 @@ export function App() {
     event.currentTarget.setPointerCapture(event.pointerId)
     video.current?.pause()
     const rect = track.current.getBoundingClientRect()
-    playheadOffset.current = event.clientX - rect.left - pct(time) * rect.width / 100
+    playheadOffset.current = event.clientX - rect.left - pct(playbackClock.get()) * rect.width / 100
   }
 
   const startTrackDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1677,7 +1768,7 @@ export function App() {
                       onLoadedMetadata={event => {
                         const { videoWidth, videoHeight } = event.currentTarget
                         setPreviewAspect(videoHeight > 0 ? videoWidth / videoHeight : 0)
-                        event.currentTarget.currentTime = Math.min(time, event.currentTarget.duration)
+                        event.currentTarget.currentTime = Math.min(playbackClock.get(), event.currentTarget.duration)
                       }}
                       onTimeUpdate={event => {
                         const player = event.currentTarget
@@ -1685,7 +1776,7 @@ export function App() {
                         if (!player.paused && stop !== null && player.currentTime >= stop) {
                           player.pause()
                           seek(stop)
-                        } else setTime(Math.min(duration, player.currentTime))
+                        } else setPlaybackTime(Math.min(duration, player.currentTime))
                         syncMusic()
                       }}
                       onPlay={() => setPlaying(true)} onPlaying={() => syncMusic(true)}
@@ -1701,7 +1792,7 @@ export function App() {
                     onLoadedMetadata={() => syncMusic(true)}
                     onError={() => setNotice('This track could not play in preview. You can still export it.')} />}
                   {!sequence.path && activeCaptions && activeCaptions.cues.length > 0 && preview !== 'preparing' && preview !== 'unavailable' &&
-                    <CaptionPreview key={previewPath} track={activeCaptions} format={format} video={video} time={time}
+                    <CaptionPreview key={previewPath} track={activeCaptions} format={format} video={video}
                       editable={showCaptionEditor && !editingCaptionJob} onStyle={saveCaptionStyle} />}
                   {sequence.path && <video key={sequence.path} ref={sequence.player} className="sequence-video fit"
                     src={convertFileSrc(sequence.path)} autoPlay playsInline muted={muted} onClick={toggleSequence}
@@ -1756,10 +1847,10 @@ export function App() {
             <button className="icon-button compact" aria-label="Seek forward 1 second" title="Forward 1 second" disabled={disabled} onClick={() => seekPlayback(1)}><ChevronRight size={16} /></button>
             <button className="icon-button compact" aria-label="Seek forward 5 seconds" title="Forward 5 seconds" disabled={disabled} onClick={() => seekPlayback(5)}><FastForward size={15} /></button>
             </div>
-            <span className="clock"><strong>{stamp(sequence.path ? sequenceClock.time : time, true)}</strong><span>/</span>{stamp(sequence.path ? sequenceClock.duration : duration)}</span>
+            <ClockDisplay duration={duration} sequencePath={sequence.path} sequenceTime={sequenceClock} />
           <div className="trim-bar" role="group" aria-label="Trim range">
-            <TimeField label="In" value={range.start} disabled={trimDisabled} onChange={value => editBoundary('start', value)} onMark={() => editBoundary('start', time)} />
-            <TimeField label="Out" value={range.end} disabled={trimDisabled} onChange={value => editBoundary('end', value)} onMark={() => editBoundary('end', time)} />
+            <TimeField label="In" value={range.start} disabled={trimDisabled} onChange={value => editBoundary('start', value)} onMark={() => editBoundary('start', playbackClock.get())} />
+            <TimeField label="Out" value={range.end} disabled={trimDisabled} onChange={value => editBoundary('end', value)} onMark={() => editBoundary('end', playbackClock.get())} />
             <button className="icon-button compact" title="Reset trim range" aria-label="Reset trim range" onClick={resetRange} disabled={trimDisabled}><RotateCcw size={15} /></button>
             <button className="icon-button compact clip-commit" disabled={!selectedLocked && (trimDisabled || !canSaveRange || editingCaptionJob)}
               aria-label={selectedLocked ? 'New clip' : selectedId === null ? 'Add clip' : 'Update clip'}
@@ -2111,13 +2202,10 @@ export function App() {
                       const value = Math.max(0, Math.min(duration, range[edge] + change))
                       if (editBoundary(edge, value)) seek(value)
                     }}><span /></button>)}
-                  {inView(time) && <div className="playhead" style={{ left: `${pct(time)}%` }}>
-                    <span className="playhead-grip" title="Drag to seek" aria-hidden="true"
-                      onPointerDown={startPlayheadDrag}
-                      onPointerMove={event => {
-                        if (event.currentTarget.hasPointerCapture(event.pointerId)) scrub(event, undefined, playheadOffset.current)
-                      }} />
-                  </div>}
+                  <TimelinePlayhead pct={pct} inView={inView} onDrag={startPlayheadDrag}
+                    onMove={event => {
+                      if (event.currentTarget.hasPointerCapture(event.pointerId)) scrub(event, undefined, playheadOffset.current)
+                    }} />
                 </>
               ) : <span className="empty-track"><Film size={16} /> Open a video to start trimming</span>}
             </div>
@@ -2129,7 +2217,7 @@ export function App() {
                 style={{ left: `${pct(clip.start)}%`, width: `${pct(clip.end) - pct(clip.start)}%`, backgroundColor: clipColor(clip.id) }}
                 onClick={() => selectClip(clip)} />)}
             </div>}
-            {source && <input className="accessible-scrubber" aria-label="Playhead time" type="range" min={0} max={duration} step="any" value={time} onChange={event => seek(Number(event.target.value))} />}
+            {source && <AccessibleScrubber duration={duration} seek={seek} />}
           </div>
           {timelineZoom > 1 && <div ref={timelineScroll} className="timeline-pan" tabIndex={0} aria-label="Scroll timeline"
             onScroll={event => {

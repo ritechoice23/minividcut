@@ -10,10 +10,11 @@ import {
   Redo2, ScissorsLineDashed, Settings as SettingsIcon, Sparkles, Split, Subtitles, Trash2, Undo2, Volume2, VolumeX, X, ZoomIn, ZoomOut,
 } from 'lucide-react'
 import {
-  clipDuration, clipSegments, cutRange, exportUnits, MAX_CLIPS, moveBoundary, normalizeClip, parseTime,
-  rangesOverlap, resizeClipEdge, segmentAt, splitRange, stamp, trimClips, validRange, withSegments,
+  clipDuration, clipSegments, cutRange, deleteFromRanges, exportUnits, keptDuration, MAX_CLIPS,
+  moveBoundary, normalizeClip, parseTime, rangesOverlap, resizeClipEdge, segmentAt, splitRange, stamp,
+  trimClips, validRange, withSegments,
 } from './clip'
-import type { Clip, Range } from './clip'
+import type { Clip, ExportUnit, Range } from './clip'
 import { MAX_TIMELINE_ZOOM, panTimeline, snapTime, timelineFrames, timelineOverlaps, timelineTime, timelineWindow, ZOOM_STEPS, zoomAround, zoomTimeline } from './timeline'
 import { CENTER, frameTravel, panPosition } from './framing'
 import type { FramePosition, Framing } from './framing'
@@ -25,7 +26,7 @@ import { CaptionEditor, CaptionStylePanel, progressLabel } from './CaptionEditor
 import { CaptionPreview } from './CaptionPreview'
 import { prepareCaptionOverlay } from './caption-export'
 import type { CaptionModel, CaptionProgress } from './CaptionEditor'
-import { captionCut, captionSlice, clipsNeedingCaptions, DEFAULT_CAPTION_STYLE, offsetCaption, restyleCaptionedClip } from './captions'
+import { captionCut, captionSlice, captionsForKept, clipsNeedingCaptions, DEFAULT_CAPTION_STYLE, offsetCaption, restyleCaptionedClip } from './captions'
 import type { CaptionCue, CaptionStyle, CaptionTrack } from './captions'
 import { DEFAULT_MOMENT_QUERY, missingTranscriptRanges, MOMENT_BATCH_SECONDS, momentCandidates, momentLimit } from './moments'
 import type { Moment } from './moments'
@@ -44,6 +45,7 @@ type Quality = 'compact' | 'compatible' | 'lossless'
 type ExportSettings = { format: Format; framing: Framing; position: FramePosition; quality: Quality }
 type Draft = {
   version: 2; source: VideoInfo; range: Range; clips: Clip[]; sections: Range[]
+  keptRanges?: Range[]
   format: Format; quality: Quality; framing: Framing; positions: Record<Format, FramePosition>
   captions: Record<string, CaptionTrack | undefined>; captionStyle: CaptionStyle | null
   music?: Music | null
@@ -61,7 +63,11 @@ function readDraft(): Draft | null {
     const clips = Array.isArray(saved.clips)
       ? saved.clips.map((clip: Clip) => Number.isFinite(length) ? normalizeClip(clip, length) : clip).filter(Boolean)
       : []
-    return { ...saved, version: 2, clips }
+    const keptRanges = Array.isArray(saved.keptRanges) && saved.keptRanges.length
+      && saved.keptRanges.every((part: Range) => validRange(part, length))
+      ? saved.keptRanges
+      : [{ start: 0, end: length }]
+    return { ...saved, version: 2, clips, keptRanges }
   } catch {
     return null
   }
@@ -220,6 +226,7 @@ export function App() {
   const [splitOpen, setSplitOpen] = useState(false)
   const [splitMode, setSplitMode] = useState<'mark' | 'add'>('mark')
   const [sections, setSections] = useState<Range[]>([])
+  const [keptRanges, setKeptRanges] = useState<Range[]>([])
   const [momentsOpen, setMomentsOpen] = useState(false)
   const [styleDockKey, setStyleDockKey] = useState<string | null>(null)
   const [mediaDock, setMediaDock] = useState<'music' | 'bookends' | null>(null)
@@ -431,7 +438,8 @@ export function App() {
   // Editing history is a snapshot of the timeline state, not of playback.
   // record() is called before a mutation so undo restores the previous state.
   type EditSnapshot = {
-    range: Range; clips: Clip[]; sections: Range[]; draftCaptions: Record<string, CaptionTrack | undefined>
+    range: Range; clips: Clip[]; sections: Range[]; keptRanges: Range[]
+    draftCaptions: Record<string, CaptionTrack | undefined>
     selectedId: number | null; reviewIndex: number | null
   }
   const past = useRef<EditSnapshot[]>([])
@@ -439,8 +447,8 @@ export function App() {
   const captionEditAt = useRef(0)
   const [, setHistoryRevision] = useState(0)
   // Read through a ref so memoized callbacks always snapshot the latest state.
-  const editorState = useRef({ range, clips, sections, draftCaptions, selectedId, reviewIndex })
-  editorState.current = { range, clips, sections, draftCaptions, selectedId, reviewIndex }
+  const editorState = useRef({ range, clips, sections, keptRanges, draftCaptions, selectedId, reviewIndex })
+  editorState.current = { range, clips, sections, keptRanges, draftCaptions, selectedId, reviewIndex }
   const takeSnapshot = (): EditSnapshot => ({ ...editorState.current })
   const recordEdit = () => {
     past.current.push(takeSnapshot())
@@ -457,6 +465,7 @@ export function App() {
     setRange(state.range)
     setClips(state.clips)
     setSections(state.sections)
+    setKeptRanges(state.keptRanges)
     setDraftCaptions(state.draftCaptions)
     setSelectedId(state.selectedId)
     setReviewIndex(state.reviewIndex)
@@ -565,10 +574,14 @@ export function App() {
   const currentCaptions = selectedClip ? selectedClip.captions : draftCaptions[captionKey]
   const activeCaptions = useMemo(() => captionSlice(currentCaptions, range), [currentCaptions, range])
   const bookends = useMemo(() => effectiveBookends(projectBookends, selectedClip?.bookends), [projectBookends, selectedClip?.bookends])
-  const previewSegments = useMemo(() => selectedClip ? clipSegments(selectedClip) : [{ start: range.start, end: range.end }], [selectedClip, range])
-  const sequenceKey = useMemo(() => source && (bookends.intro || bookends.outro)
+  const hasKeptEdit = keptRanges.length > 0 && (keptRanges.length > 1
+    || keptRanges[0].start > 0.000001 || keptRanges[keptRanges.length - 1].end < duration - 0.000001)
+  const previewSegments = useMemo(() => hasKeptEdit ? keptRanges
+    : selectedClip ? clipSegments(selectedClip) : [{ start: range.start, end: range.end }],
+  [hasKeptEdit, keptRanges, selectedClip, range])
+  const sequenceKey = useMemo(() => source && (hasKeptEdit || bookends.intro || bookends.outro)
     ? JSON.stringify([musicSourceRevision, selectedId, previewSegments, format, framing, position, activeCaptions, activeMusic, bookends, musicCacheRevision])
-    : '', [source, musicSourceRevision, selectedId, previewSegments, format, framing, position, activeCaptions, activeMusic, bookends, musicCacheRevision])
+    : '', [source, hasKeptEdit, musicSourceRevision, selectedId, previewSegments, format, framing, position, activeCaptions, activeMusic, bookends, musicCacheRevision])
   const sequence = useSequenceCompositor(sequenceKey, setNotice)
   const stopSequence = sequence.stop
   const sequenceActive = Boolean(sequence.path || sequence.preparing)
@@ -596,7 +609,7 @@ export function App() {
   useEffect(() => {
     if (!source) return
     draftRef.current = {
-      version: 2, source, range, clips, sections, format: draftFormat, quality: draftQuality,
+      version: 2, source, range, clips, sections, keptRanges, format: draftFormat, quality: draftQuality,
       framing: draftFraming, positions, captions: draftCaptions, captionStyle: sharedCaptionStyle.current,
       music: projectMusic,
       bookends: projectBookends,
@@ -610,7 +623,7 @@ export function App() {
         setNotice('Draft recovery could not save your latest edits.')
       }
     }, 400)
-  }, [source, range, clips, sections, draftFormat, draftQuality, draftFraming, positions, draftCaptions, projectMusic, projectBookends])
+  }, [source, range, clips, sections, keptRanges, draftFormat, draftQuality, draftFraming, positions, draftCaptions, projectMusic, projectBookends])
   useEffect(() => {
     const flush = () => {
       if (draftTimer.current === null || !draftRef.current) return
@@ -687,6 +700,7 @@ export function App() {
       setClipActions(null)
       nextId.current = Math.max(0, ...(draft?.clips.map(clip => clip.id) ?? [])) + 1
       setSections(draft?.sections ?? [])
+      setKeptRanges(draft?.keptRanges ?? [{ start: 0, end: info.duration }])
       setReviewIndex(null)
       setRenaming(null)
       setRequestedTitle(null)
@@ -1433,109 +1447,25 @@ export function App() {
 
   const trimSection = () => {
     if (!canTrim) return
-
-    // With saved clips, the In–Out cut applies to the whole timeline, not just
-    // whichever clip happens to be selected (see trimClips in clip.ts).
-    if (clips.length && trimHitsClip) {
-      const trimmed = trimClips(clips, range, duration, track => captionCut(track, range))
-      if (trimmed.length > MAX_CLIPS) {
-        setNotice(`Keep at most ${MAX_CLIPS} clips.`)
-        return
-      }
-      recordEdit()
-      const previousIndex = clips.findIndex(clip => clip.id === selectedId)
-      setClips(trimmed)
-      const next = trimmed.find(clip => clip.id === selectedId)
-        ?? trimmed[Math.min(Math.max(previousIndex, 0), trimmed.length - 1)]
-      if (next) selectClip(next)
-      else {
-        video.current?.pause()
-        setSelectedId(null)
-        setReviewIndex(null)
-        setRange({ start: range.start, end: range.start })
-        seek(range.start)
-      }
-      setNotice('')
-      setEditStatus(trimmed.length < clips.length
-        ? `Cut removed from all clips. ${trimmed.length} ${trimmed.length === 1 ? 'clip' : 'clips'} kept.`
-        : 'Cut removed from the clips on the timeline.')
-      return
-    }
-
-    if (sections.length && trimHitsSection) {
-      const draftTargets = sections
-      const parts = draftTargets.flatMap(section => cutRange(section, range))
-      const remaining = parts
-      if (remaining.length > MAX_CLIPS) {
-        setNotice(`Keep at most ${MAX_CLIPS} marked sections.`)
-        return
-      }
-      recordEdit()
-      setDraftCaptions(current => {
-        const updated = { ...current }
-        for (const key of Object.keys(updated)) if (key.startsWith('section-')) delete updated[key]
-        for (const section of draftTargets) {
-          const track = current[`section-${section.start}-${section.end}`]
-          for (const part of cutRange(section, range)) {
-            if (track) updated[`section-${part.start}-${part.end}`] = captionSlice(track, part)
-          }
-        }
-        return updated
-      })
-      setSections(remaining)
-      if (remaining.length) {
-        const preferred = parts.find(section => section.start >= range.end) ?? parts.at(-1)
-        const next = preferred ? remaining.findIndex(section => section.start === preferred.start && section.end === preferred.end) : -1
-        reviewSection(remaining, next < 0 ? remaining.length - 1 : next)
-      } else {
-        setSelectedId(null)
-        setReviewIndex(null)
-        setRange({ start: range.start, end: range.start })
-        video.current?.pause()
-      }
-      setNotice('')
-      setEditStatus('Cut removed from the marked ranges.')
-      return
-    }
-
-    // The selection does not touch a saved clip or marked section: cut it from
-    // the source and keep everything else, without duplicating saved clips.
-    const keptParts = cutRange({ start: 0, end: duration }, range)
-    const survivingClips = clips.length
-      ? trimClips(clips, range, duration, track => captionCut(track, range))
-      : []
-    const covered = survivingClips.flatMap(clipSegments)
-    const additions = keptParts.flatMap(part => covered.reduce(
-      (pieces, kept) => pieces.flatMap(piece => cutRange(piece, kept)), [part] as Range[],
-    ))
-    const total = survivingClips.length + additions.length
-    if (total > MAX_CLIPS) {
-      setNotice(`Keep at most ${MAX_CLIPS} clips.`)
-      return
-    }
     recordEdit()
-    const track = draftCaptions.range
+    const next = deleteFromRanges(keptRanges, range)
+    const removed = Math.max(0, range.end - range.start)
+    const total = keptDuration(next)
+    setKeptRanges(next)
+    setSelectedId(null)
+    setReviewIndex(null)
+    setRange({ start: 0, end: total })
     setDraftCaptions(current => {
       const updated = { ...current }
       for (const key of Object.keys(updated)) if (key.startsWith('section-')) delete updated[key]
-      updated.range = undefined
       return updated
     })
-    const added = additions.map(part => ({
-      id: nextId.current++, start: part.start, end: part.end, segments: [{ ...part }], captions: captionSlice(track, part),
-    }))
-    setClips([...survivingClips, ...added])
-    if (sections.length && !trimHitsSection) setSections(sections)
-    else setSections([])
-    setSelectedId(null)
-    setReviewIndex(null)
-    setRange({ start: range.start, end: range.start })
-    video.current?.pause()
-    seek(range.start)
     setNotice('')
-    setEditStatus(total
-      ? `Cut removed. ${total} ${total === 1 ? 'clip' : 'clips'} kept.`
-      : 'Cut removed. Nothing left to keep.')
+    video.current?.pause()
+    seek(0)
+    setEditStatus(next.length
+      ? `Removed ${stamp(removed)}. ${stamp(total)} of video kept.`
+      : 'Removed the selection. Nothing left to keep.')
   }
 
   const renameClip = (id: number, title: string) => {
@@ -1580,7 +1510,18 @@ export function App() {
   const exportVideos = async (only?: Clip) => {
     if (!source || exportLock.current || importLock.current || fileDialog.current || captionJob.current || titleJob.current) return
     if (!clips.length && sections.length) return
-    const batch: Clip[] = only ? [only] : clips.length ? clips : [{ ...range, id: 0, captions: activeCaptions }]
+    // A ripple-deleted video is one edited timeline, not a set of separate
+    // clips. Export it as a single file containing every kept range.
+    const editedClip: Clip = {
+      id: 0,
+      start: 0,
+      end: keptDuration(keptRanges),
+      segments: keptRanges.map(part => ({ ...part })),
+      title: 'Edited video',
+      captions: captionsForKept(draftCaptions.range, keptRanges),
+    }
+    const batch: Clip[] = hasKeptEdit ? [editedClip]
+      : only ? [only] : clips.length ? clips : [{ ...range, id: 0, captions: activeCaptions }]
     const options = { format: draftFormat, framing: draftFraming, position: positions[draftFormat], quality: draftQuality }
     if (!batch.every(clip => validRange(clip, duration))) return
     exportLock.current = true
@@ -1598,7 +1539,9 @@ export function App() {
       setCaptionsOpen(false)
       // Each source segment becomes one FFmpeg file, but the UI keeps one
       // status and one lock per clip (see groupExportStates).
-      const units = exportUnits(batch)
+      const units: ExportUnit[] = hasKeptEdit
+        ? [{ clip: batch[0], segment: { start: 0, end: batch[0].end }, first: true, last: true }]
+        : exportUnits(batch)
       const owners: number[] = []
       batch.forEach((clip, index) => {
         for (const _segment of clipSegments(clip)) owners.push(index)
@@ -1633,6 +1576,7 @@ export function App() {
       const prepared: {
         start: number; end: number; title?: string; captionOverlay?: string
         music: (Music & { start?: number }) | null; bookends: Bookends
+        segments?: Range[]
       }[] = []
       const musicOffsets = new Map<number, number>()
       const OVERLAY_CONCURRENCY = 3
@@ -1661,6 +1605,7 @@ export function App() {
               intro: unit.first ? ends.intro : null,
               outro: unit.last ? ends.outro : null,
             },
+            segments: hasKeptEdit ? keptRanges.map(part => ({ ...part })) : undefined,
           })
         })
       }
@@ -1890,8 +1835,6 @@ export function App() {
   const trimDisabled = disabled || selectedLocked
   const canSaveRange = validRange(range, duration)
   const editingCaptionJob = captionsRunning && Boolean(captionJob.current?.keys.has(captionKey))
-  const trimHitsSection = sections.some(section => rangesOverlap(section, range))
-  const trimHitsClip = clips.some(clip => clipSegments(clip).some(segment => rangesOverlap(segment, range)))
   const canTrim = !trimDisabled && canSaveRange && !captionsRunning && !captionJob.current
     && (range.start > 0 || range.end < duration)
   const batchCount = clips.length || (hasSource && !sections.length ? 1 : 0)

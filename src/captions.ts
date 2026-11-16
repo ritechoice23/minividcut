@@ -119,6 +119,28 @@ export function captionSlice(track: CaptionTrack | undefined, range: Range, rela
   return { ...track, cues }
 }
 
+/** Map source-time captions onto an edited timeline of kept ranges. */
+export function captionsForKept(track: CaptionTrack | undefined, kept: readonly Range[]): CaptionTrack | undefined {
+  if (!track || !kept.length) return track
+  const cues: CaptionCue[] = []
+  let offset = 0
+  for (const range of kept) {
+    const local = captionSlice(track, range, true)
+    for (const cue of local?.cues ?? []) {
+      cues.push({
+        ...cue,
+        start: cue.start + offset,
+        end: cue.end + offset,
+        ...(cue.words ? {
+          words: cue.words.map(word => ({ ...word, start: word.start + offset, end: word.end + offset })),
+        } : {}),
+      })
+    }
+    offset += range.end - range.start
+  }
+  return { ...track, cues }
+}
+
 export function fitCaptionTiming(cues: CaptionCue[], index: number, edge: keyof Range, value: number, shot: Range) {
   const next = { ...cues[index], [edge]: value }
   const earliest = Math.max(shot.start, cues[index - 1]?.end ?? shot.start)

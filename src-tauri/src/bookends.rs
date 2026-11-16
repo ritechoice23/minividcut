@@ -306,26 +306,28 @@ pub struct BookendInfo {
     image: bool,
     path: PathBuf,
     name: String,
+    duration: f64,
 }
 
 #[tauri::command]
 pub async fn inspect_bookend(app: AppHandle, path: PathBuf) -> Result<BookendInfo> {
     video::background(move || {
         let image = is_image(&path);
-        if image {
+        let duration = if image {
             inspect_image(&path)?;
             app.asset_protocol_scope()
                 .allow_file(&path)
                 .map_err(|error| error.to_string())?;
+            0.0
         } else {
-            video::probe(video::source(&path)?)?;
-        }
+            video::probe(video::source(&path)?)?.duration
+        };
         let name = path
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-        Ok(BookendInfo { image, path, name })
+        Ok(BookendInfo { image, path, name, duration })
     })
     .await
 }

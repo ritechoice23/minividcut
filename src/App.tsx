@@ -170,8 +170,6 @@ export function App() {
   const [playing, setPlaying] = useState(false)
   const [muted, setMuted] = useState(false)
   const [previewVolume, setPreviewVolume] = useState(100)
-  const [sequenceClock, setSequenceClock] = useState({ time: 0, duration: 0 })
-  const [sequencePlaying, setSequencePlaying] = useState(false)
   const [projectMusic, setProjectMusic] = useState<Music | null>(null)
   const [musicCacheRevision, setMusicCacheRevision] = useState(0)
   const [projectBookends, setProjectBookends] = useState<Bookends>({})
@@ -452,7 +450,7 @@ export function App() {
   const sequence = useSequencePreview(sequenceKey, setNotice)
   const stopSequence = sequence.stop
   const sequenceActive = Boolean(sequence.path || sequence.preparing)
-  const playerPlaying = sequence.path ? sequencePlaying : playing
+  const playerPlaying = sequence.path ? sequence.playing : playing
   useEffect(() => {
     if (loading || settingsOpen) stopSequence()
   }, [loading, settingsOpen, stopSequence])
@@ -905,12 +903,10 @@ export function App() {
     if (!source || !validRange(range, duration) || !sequenceKey) return
     video.current?.pause()
     musicPlayer.current?.pause()
-    setSequenceClock({ time: 0, duration: 0 })
-    setSequencePlaying(false)
     setNotice('')
     void sequence.play({
-      path: source.path, duration: source.duration, range, captions: currentCaptions, music: activeMusic, bookends,
-      options: { format, framing, position },
+      path: source.path, duration: source.duration, range, captions: currentCaptions, music: activeMusic,
+      musicPath, muted, bookends, options: { format, framing, position },
     })
   }
 
@@ -979,7 +975,7 @@ export function App() {
   const seekPlayback = (offset: number) => {
     const player = sequence.player.current
     if (player && player.readyState > 0) {
-      player.currentTime = Math.max(0, Math.min(player.duration, player.currentTime + offset))
+      player.seek(player.currentTime + offset)
     } else if (!sequence.preparing) seek(playbackClock.get() + offset)
   }
 
@@ -1794,20 +1790,7 @@ export function App() {
                   {!sequence.path && activeCaptions && activeCaptions.cues.length > 0 && preview !== 'preparing' && preview !== 'unavailable' &&
                     <CaptionPreview key={previewPath} track={activeCaptions} format={format} video={video}
                       editable={showCaptionEditor && !editingCaptionJob} onStyle={saveCaptionStyle} />}
-                  {sequence.path && <video key={sequence.path} ref={sequence.player} className="sequence-video fit"
-                    src={convertFileSrc(sequence.path)} autoPlay playsInline muted={muted} onClick={toggleSequence}
-                    aria-label="Full clip preview" onLoadedMetadata={event => {
-                      const player = event.currentTarget
-                      player.volume = previewVolume / 100
-                      setSequenceClock({ time: 0, duration: player.duration })
-                    }} onTimeUpdate={event => {
-                      const player = event.currentTarget
-                      setSequenceClock({ time: player.currentTime, duration: player.duration })
-                    }} onPlay={() => setSequencePlaying(true)} onPause={() => setSequencePlaying(false)}
-                    onEnded={() => setSequencePlaying(false)} onError={() => {
-                      stopSequence()
-                      setNotice('Could not play the full clip preview.')
-                    }} />}
+                  {sequence.stage}
                 </div>
                 {!sequenceActive && (preview === 'preparing' || preview === 'unavailable') && <div className="stage-message">
                   {preview === 'preparing' && <LoaderCircle size={24} className="spin" />}
@@ -1847,7 +1830,7 @@ export function App() {
             <button className="icon-button compact" aria-label="Seek forward 1 second" title="Forward 1 second" disabled={disabled} onClick={() => seekPlayback(1)}><ChevronRight size={16} /></button>
             <button className="icon-button compact" aria-label="Seek forward 5 seconds" title="Forward 5 seconds" disabled={disabled} onClick={() => seekPlayback(5)}><FastForward size={15} /></button>
             </div>
-            <ClockDisplay duration={duration} sequencePath={sequence.path} sequenceTime={sequenceClock} />
+            <ClockDisplay duration={duration} sequencePath={sequence.path} sequenceTime={sequence.clock} />
           <div className="trim-bar" role="group" aria-label="Trim range">
             <TimeField label="In" value={range.start} disabled={trimDisabled} onChange={value => editBoundary('start', value)} onMark={() => editBoundary('start', playbackClock.get())} />
             <TimeField label="Out" value={range.end} disabled={trimDisabled} onChange={value => editBoundary('end', value)} onMark={() => editBoundary('end', playbackClock.get())} />
@@ -1878,12 +1861,20 @@ export function App() {
               {captionsRunning ? <LoaderCircle size={17} className="spin" /> : <Subtitles size={18} />}
             </button>}
             <div className="transport-audio" role="group" aria-label="Preview audio">
-              <button className="icon-button compact mute" aria-label={muted ? 'Unmute' : 'Mute'} title={muted ? 'Unmute' : 'Mute'} disabled={!source} onClick={() => setMuted(!muted)}>
+              <button className="icon-button compact mute" aria-label={muted ? 'Unmute' : 'Mute'} title={muted ? 'Unmute' : 'Mute'} disabled={!source} onClick={() => {
+                const next = !muted
+                setMuted(next)
+                if (sequence.player.current) sequence.player.current.muted = next
+              }}>
                 {muted || !previewVolume ? <VolumeX size={17} /> : <Volume2 size={17} />}
               </button>
               <input aria-label="Preview volume" title="Preview volume" type="range" min={0} max={100}
                 value={muted ? 0 : previewVolume} disabled={!source}
-                onChange={event => { setPreviewVolume(event.target.valueAsNumber); setMuted(false) }} />
+                onChange={event => {
+                  setPreviewVolume(event.target.valueAsNumber)
+                  setMuted(false)
+                  if (sequence.player.current) sequence.player.current.muted = false
+                }} />
             </div>
             </div>
           </div>

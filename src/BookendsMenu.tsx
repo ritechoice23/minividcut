@@ -40,8 +40,12 @@ export function BookendsMenu({ project, clip, disabled, videoExtensions, aspect,
       const path = await open({ title: `Choose ${end} media`,
         filters: [{ name: 'Images and videos', extensions: [...IMAGE_EXTENSIONS, ...videoExtensions] }] })
       if (!path) return
-      const info = await invoke<Pick<Bookend, 'path' | 'name' | 'image'>>('inspect_bookend', { path })
-      onChange(target, end, { ...info, transition: active[end]?.transition ?? 'cut' })
+      const info = await invoke<Pick<Bookend, 'path' | 'name' | 'image'> & { duration: number }>('inspect_bookend', { path })
+      onChange(target, end, {
+        path: info.path, name: info.name, image: info.image,
+        duration: info.image ? undefined : info.duration,
+        transition: active[end]?.transition ?? 'cut',
+      })
     } catch (error) {
       setError(String(error))
     } finally {

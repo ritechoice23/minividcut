@@ -113,6 +113,11 @@ kbd { font: 10px var(--mono); color: #b0b0a9; background: #101010; border: 1px s
 .canvas video.fit { object-fit: contain; }
 .canvas video[hidden] { display: none; }
 .canvas video.sequence-video { cursor: pointer; }
+.composite { position: absolute; inset: 0; background: #000; cursor: pointer; }
+.composite-layer { position: absolute; inset: 0; }
+.composite-layer > video, .composite-layer > img { display: block; width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+.composite-layer > .fit { object-fit: contain; }
+.composite-layer > video[hidden], .composite-layer > img[hidden] { display: none; }
 .canvas.can-pan { touch-action: none; }
 .canvas.can-pan video { cursor: grab; user-select: none; }
 .canvas.panning video { cursor: grabbing; }

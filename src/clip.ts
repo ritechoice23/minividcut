@@ -83,6 +83,20 @@ export function rangesOverlap(first: Range, second: Range) {
   return first.start < second.end && first.end > second.start
 }
 
+/**
+ * Ripple-delete an In–Out range from an ordered list of kept source ranges.
+ * The result stays in source time, but is played and exported back to back,
+ * so the deleted material disappears and the remaining footage closes up.
+ */
+export function deleteFromRanges(kept: readonly Range[], cut: Range): Range[] {
+  if (!Number.isFinite(cut.start) || !Number.isFinite(cut.end) || cut.end <= cut.start) return [...kept]
+  return kept.flatMap(range => cutRange(range, cut))
+}
+
+export function keptDuration(kept: readonly Range[]) {
+  return kept.reduce((total, range) => total + Math.max(0, range.end - range.start), 0)
+}
+
 export function clipSegments(clip: Clip): Range[] {
   return clip.segments?.length ? clip.segments : [{ start: clip.start, end: clip.end }]
 }

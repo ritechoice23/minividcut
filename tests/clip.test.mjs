@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
-  clipSegments, cutRange, cutSegments, exportUnits, moveBoundary, normalizeClip, parseTime,
-  resizeClipEdge, segmentAt, splitClipAt, splitRange, stamp, trimClips, validRange, withSegments,
+  clipSegments, cutRange, cutSegments, deleteFromRanges, exportUnits, keptDuration, moveBoundary,
+  normalizeClip, parseTime, resizeClipEdge, segmentAt, splitClipAt, splitRange, stamp, trimClips,
+  validRange, withSegments,
 } from '../src/clip.ts'
 
 test('accepts seconds and timecodes with millisecond precision', () => {
@@ -19,6 +20,27 @@ test('rejects invalid trim bounds', () => {
   assert.ok(!validRange({ start: 3, end: 3.04 }, 5))
   assert.ok(!validRange({ start: 3, end: 5.01 }, 5))
   assert.ok(!validRange({ start: NaN, end: 5 }, 5))
+})
+
+test('ripple delete removes a range from the whole video and closes the gap', () => {
+  const whole = [{ start: 0, end: 60 }]
+  assert.deepEqual(deleteFromRanges(whole, { start: 10, end: 20 }), [
+    { start: 0, end: 10 },
+    { start: 20, end: 60 },
+  ])
+  assert.equal(keptDuration(deleteFromRanges(whole, { start: 10, end: 20 })), 50)
+  assert.deepEqual(deleteFromRanges(whole, { start: 0, end: 5 }), [{ start: 5, end: 60 }])
+  assert.deepEqual(deleteFromRanges(whole, { start: 55, end: 60 }), [{ start: 0, end: 55 }])
+  assert.deepEqual(deleteFromRanges(whole, { start: 0, end: 60 }), [])
+  assert.deepEqual(deleteFromRanges(whole, { start: 20, end: 10 }), whole)
+  assert.deepEqual(deleteFromRanges(whole, { start: 30, end: 40 }), [
+    { start: 0, end: 30 },
+    { start: 40, end: 60 },
+  ])
+  assert.deepEqual(
+    deleteFromRanges([{ start: 0, end: 10 }, { start: 20, end: 30 }], { start: 8, end: 22 }),
+    [{ start: 0, end: 8 }, { start: 22, end: 30 }],
+  )
 })
 
 test('places the requested marker at the playhead on either side of the other marker', () => {

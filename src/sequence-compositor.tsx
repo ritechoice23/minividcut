@@ -35,6 +35,7 @@ export type SequenceController = {
   play: () => Promise<void>
   pause: () => void
   seek: (time: number) => void
+  setMuted: (muted: boolean) => void
 }
 
 type BookendInfo = { image: boolean; path: string; name: string; duration?: number }
@@ -55,36 +56,16 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
   const outroRef = useRef<HTMLMediaElement>(null)
   const musicRef = useRef<HTMLAudioElement>(null)
   const captionRef = useRef<HTMLCanvasElement>(null)
-  const audioGraph = useRef<{ context: AudioContext; destination: AudioNode } | null>(null)
   const visible = useRef({ intro: false, main: false, outro: false, music: false })
   const painter = useRef<((time: number, active: boolean) => void) | null>(null)
   const mediaCache = useRef(new Map<string, BookendMedia>())
   const grantedAssets = useRef(new Set<string>())
   const forceMute = useRef(false)
 
-  const connectAudio = (element: HTMLMediaElement) => {
-    if (!audioGraph.current) {
-      const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
-      if (!AudioContextClass) return
-      const context = new AudioContextClass()
-      const limiter = context.createDynamicsCompressor()
-      limiter.threshold.value = -3
-      limiter.knee.value = 0
-      limiter.ratio.value = 20
-      limiter.attack.value = 0.003
-      limiter.release.value = 0.1
-      limiter.connect(context.destination)
-      audioGraph.current = { context, destination: limiter }
-    }
-    const { context, destination } = audioGraph.current
-    void context.resume().catch(() => {})
-    try {
-      context.createMediaElementSource(element).connect(destination)
-    } catch {
-      // An element can only be connected once; reconnecting is a no-op.
-    }
-  }
-
+  // Media elements output audio directly. Routing them through a Web Audio
+  // AudioContext made every layer silent whenever that context stayed
+  // suspended under the webview's autoplay policy, even though the picture
+  // was playing. Volume and mute are applied on the elements themselves.
   const safePlay = (element: HTMLMediaElement) => {
     if (player.current.paused || !element.paused) return
     void element.play().catch(() => {
@@ -98,7 +79,7 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
 
   const player = useRef<SequenceController>({
     currentTime: 0, duration: 0, paused: true, readyState: 4, volume: 1, muted: false,
-    play: async () => {}, pause: () => {}, seek: () => {},
+    play: async () => {}, pause: () => {}, seek: () => {}, setMuted: () => {},
   })
 
   const applyLayer = (element: HTMLMediaElement | null, state: LayerState, local: number,
@@ -153,10 +134,10 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
     player.current.paused = true
     useEditor.getState().setSequencePlaying(false)
     window.cancelAnimationFrame(raf.current)
-    mainRef.current?.pause()
-    introRef.current?.pause()
-    outroRef.current?.pause()
-    musicRef.current?.pause()
+    // Image bookends are <img> elements with no pause() method.
+    for (const element of [mainRef.current, introRef.current, outroRef.current, musicRef.current]) {
+      if (element instanceof HTMLMediaElement) element.pause()
+    }
   }, [])
 
   const seek = useCallback((time: number) => {
@@ -169,8 +150,12 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
   }, [update])
 
   const play = useCallback(async () => {
-    if (!plan) return
-    if (player.current.currentTime >= plan.total - 0.001) seek(0)
+    // Read the plan from the ref, not from the render closure: this callback
+    // is memoized with stable dependencies, so a captured `plan` would stay
+    // null forever and playback would silently do nothing.
+    const current = planRef.current
+    if (!current) return
+    if (player.current.currentTime >= current.total - 0.001) seek(0)
     player.current.paused = false
     useEditor.getState().setSequencePlaying(true)
     lastFrame.current = performance.now()
@@ -235,9 +220,18 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
     return () => { active = false; video.cancelVideoFrameCallback?.(handle) }
   }, [shown, update])
 
+  // An explicit unmute from the transport has to clear the autoplay fallback,
+  // otherwise applyLayer re-applies forceMute on the next frame and the button
+  // appears to do nothing.
+  const setMuted = useCallback((muted: boolean) => {
+    player.current.muted = muted
+    if (!muted) forceMute.current = false
+  }, [])
+
   player.current.play = play
   player.current.pause = pause
   player.current.seek = seek
+  player.current.setMuted = setMuted
 
   const stop = useCallback(() => {
     ++request.current
@@ -245,8 +239,6 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
     window.cancelAnimationFrame(raf.current)
     for (const path of grantedAssets.current) void invoke('release_asset', { path }).catch(() => {})
     grantedAssets.current.clear()
-    void audioGraph.current?.context.close().catch(() => {})
-    audioGraph.current = null
     planRef.current = null
     player.current.currentTime = 0
     player.current.duration = 0
@@ -270,15 +262,12 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
   useEffect(() => stop, [stop])
   useEffect(() => {
     if (!shown) return
-    for (const element of [mainRef.current, introRef.current, outroRef.current, musicRef.current]) {
-      if (element && !(element instanceof HTMLImageElement)) connectAudio(element)
-    }
     let cancelled = false
     let attempts = 0
     const prime = () => {
       if (cancelled) return
       const elements = [mainRef.current, introRef.current, outroRef.current]
-        .filter((element): element is HTMLMediaElement => Boolean(element))
+        .filter((element): element is HTMLMediaElement => element instanceof HTMLMediaElement)
       const ready = elements.every(element => element.readyState >= 2) || attempts++ > 30
       if (!ready) {
         window.setTimeout(prime, 50)

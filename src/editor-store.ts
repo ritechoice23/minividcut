@@ -40,6 +40,12 @@ export const playbackClock = {
 
 export const usePlaybackTime = () => useEditor((state) => state.time)
 
+// The timeline is drawn in source time. During a full-clip preview the clock is
+// driven by composite time, so the playhead must follow the mapped source time
+// instead of the source clock, which stops advancing while the preview runs.
+export const selectTimelineTime = (state: EditorState) =>
+  state.sequenceActive ? state.previewSourceTime : state.time
+
 // During a full-clip preview the transport and trim controls act on composite
 // time, not on the source video's playhead.
 export function activeTime() {

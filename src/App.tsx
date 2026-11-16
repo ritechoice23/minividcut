@@ -11,11 +11,10 @@ import {
 } from 'lucide-react'
 import {
   clipDuration, clipSegments, cutRange, exportUnits, MAX_CLIPS, moveBoundary, normalizeClip, parseTime,
-  rangesOverlap, resizeClipEdge, segmentAt, splitClipAt, splitRange, stamp, trimClips, validRange, withSegments,
+  rangesOverlap, resizeClipEdge, segmentAt, splitRange, stamp, trimClips, validRange, withSegments,
 } from './clip'
 import type { Clip, Range } from './clip'
 import { MAX_TIMELINE_ZOOM, panTimeline, snapTime, timelineFrames, timelineOverlaps, timelineTime, timelineWindow, ZOOM_STEPS, zoomAround, zoomTimeline } from './timeline'
-import { buildSequenceMap, clipSpans, reorderClips, sequenceAtSource, sourceAtSequence } from './sequence-timeline'
 import { CENTER, frameTravel, panPosition } from './framing'
 import type { FramePosition, Framing } from './framing'
 import { fileSize, groupExportStates, summarizeExport } from './export-progress'
@@ -36,7 +35,7 @@ import type { KainoCollection, Music, MusicTrack } from './music'
 import { BookendsMenu } from './BookendsMenu'
 import { effectiveBookends } from './bookends'
 import { useSequenceCompositor } from './sequence-compositor'
-import { activeTime, playbackClock, useEditor, usePlaybackTime } from './editor-store'
+import { activeTime, playbackClock, selectTimelineTime, useEditor, usePlaybackTime } from './editor-store'
 import type { Bookend, Bookends } from './bookends'
 
 type VideoInfo = { path: string; name: string; duration: number; width: number; height: number; bytes: number }
@@ -97,7 +96,9 @@ function TimelinePlayhead({ pct, inView, onDrag, onMove }: {
   pct: (value: number) => number; inView: (value: number) => boolean
   onDrag: (event: ReactPointerEvent) => void; onMove: (event: ReactPointerEvent) => void
 }) {
-  const time = usePlaybackTime()
+  // Follow the composited preview in source time so the playhead tracks the
+  // picture instead of freezing at the last scrub position.
+  const time = useEditor(selectTimelineTime)
   if (!inView(time)) return null
   return <div className="playhead" style={{ left: `${pct(time)}%` }}>
     <span className="playhead-grip" title="Drag to seek" aria-hidden="true"
@@ -175,15 +176,10 @@ export function App() {
   const [clips, setClips] = useState<Clip[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [snapping, setSnapping] = useState(true)
-  const [timelineView, setTimelineView] = useState<'source' | 'sequence'>('source')
-  const [reorderTarget, setReorderTarget] = useState<number | null>(null)
   const [timelineZoom, setTimelineZoom] = useState(1)
   const [timelineStart, setTimelineStart] = useState(0)
   const timelinePanned = useRef(false)
   const timelineDrag = useRef<{ x: number; start: number; width: number; moved: boolean } | null>(null)
-  const clipReorder = useRef<{ index: number; x: number; moved: boolean } | null>(null)
-  const reorderTargetRef = useRef<number | null>(null)
-  const reorderMoved = useRef(false)
   const [grabbingTimeline, setGrabbingTimeline] = useState(false)
   const timelineBody = useRef<HTMLDivElement>(null)
   const wheelView = useRef({ duration: 0, zoom: 1, start: 0, span: 0 })
@@ -286,18 +282,11 @@ export function App() {
   const travel = previewAspect ? frameTravel(activeFormat.aspect, 1, previewAspect, framing) : { x: 0, y: 0 }
   const positionAxis = Math.abs(travel.x) > 0.001 ? 'x' : Math.abs(travel.y) > 0.001 ? 'y' : null
   const canPosition = Boolean(positionAxis && hasSource && !loading && !selectedLocked && preview !== 'preparing' && preview !== 'unavailable')
-  const sequenceMap = useMemo(() => buildSequenceMap(clips), [clips])
-  const sequenceSpans = useMemo(() => clipSpans(sequenceMap, clips), [sequenceMap, clips])
-  const axisDuration = timelineView === 'sequence' ? sequenceMap.duration : duration
-  const visibleTime = timelineWindow(axisDuration, timelineZoom, timelineStart)
-  wheelView.current = { duration: axisDuration, zoom: timelineZoom, start: visibleTime.start, span: visibleTime.span }
-  const toSource = (axisTime: number) => timelineView === 'sequence'
-    ? (sourceAtSequence(sequenceMap, axisTime)?.time ?? axisTime) : axisTime
-  const toAxis = (sourceTime: number) => timelineView === 'sequence'
-    ? (sequenceAtSource(sequenceMap, sourceTime) ?? 0) : sourceTime
+  const visibleTime = timelineWindow(duration, timelineZoom, timelineStart)
+  wheelView.current = { duration, zoom: timelineZoom, start: visibleTime.start, span: visibleTime.span }
   const pct = (value: number) => visibleTime.span
     ? Math.max(0, Math.min(100, 100 * (value - visibleTime.start) / visibleTime.span)) : 0
-  const filmTiles = timelineFrames(axisDuration, timelineZoom, visibleTime.start)
+  const filmTiles = timelineFrames(duration, timelineZoom, visibleTime.start)
   const overviewTiles = timelineFrames(duration, 1, 0)
   const tileTimes = filmTiles.map(tile => tile.time).join(',')
   const overlaps = useMemo(() => timelineOverlaps(clips.flatMap(clipSegments)), [clips])
@@ -348,25 +337,23 @@ export function App() {
   const setPlaybackTime = useCallback((value: number) => {
     playbackClock.set(value)
     if (timelinePanned.current) return
-    const axis = timelineView === 'sequence' ? (sequenceAtSource(sequenceMap, value) ?? visibleTime.start) : value
     setTimelineStart(start => {
-      const visible = timelineWindow(axisDuration, timelineZoom, start)
-      if (axis >= visible.start - 0.000001 && axis <= visible.end + 0.000001) return start
-      return zoomTimeline(axisDuration, timelineZoom, axis)
+      const visible = timelineWindow(duration, timelineZoom, start)
+      if (value >= visible.start - 0.000001 && value <= visible.end + 0.000001) return start
+      return zoomTimeline(duration, timelineZoom, value)
     })
-  }, [axisDuration, timelineZoom, timelineView, sequenceMap, visibleTime.start])
+  }, [duration, timelineZoom])
   const zoomTimelineTo = (requested: number) => {
     const zoom = Math.max(1, Math.min(MAX_TIMELINE_ZOOM, requested))
     if (zoom === timelineZoom) return
-    const axisNow = toAxis(playbackClock.get())
-    const anchor = inView(axisNow) ? axisNow : (visibleTime.start + visibleTime.end) / 2
+    const now = playbackClock.get()
+    const anchor = inView(now) ? now : (visibleTime.start + visibleTime.end) / 2
     setTimelineZoom(zoom)
-    setTimelineStart(zoomTimeline(axisDuration, zoom, anchor))
+    setTimelineStart(zoomTimeline(duration, zoom, anchor))
   }
   const revealTimelineTime = (point: number) => {
     timelinePanned.current = false
-    const axis = toAxis(point)
-    if (!inView(axis)) setTimelineStart(zoomTimeline(axisDuration, timelineZoom, axis))
+    if (!inView(point)) setTimelineStart(zoomTimeline(duration, timelineZoom, point))
   }
 
   useEffect(() => {
@@ -1330,14 +1317,6 @@ export function App() {
     if (selectedLocked) return
     if (!validRange(range, duration)) return
     if (captionJob.current?.keys.has(captionKey)) return
-    if (selectedId !== null) {
-      recordEdit()
-      setClips(items => items.map(clip => clip.id === selectedId ? {
-        ...clip, start: range.start, end: range.end, segments: [{ ...range }], captions: captionSlice(clip.captions, range),
-      } : clip))
-      setSelectedId(null)
-      return
-    }
     if (clips.length >= MAX_CLIPS) {
       setNotice(`A batch can contain up to ${MAX_CLIPS} clips.`)
       return
@@ -1345,11 +1324,20 @@ export function App() {
     recordEdit()
     const clip = { start: range.start, end: range.end, segments: [{ ...range }], id: nextId.current++, captions: activeCaptions }
     setClips(items => [...items, clip])
-    if (activeCaptions) {
-      if (reviewIndex === null) setDraftCaptions(current => ({ ...current, [captionKey]: undefined }))
-      setSelectedId(clip.id)
-      setReviewIndex(null)
-    }
+    setSelectedId(null)
+    setReviewIndex(null)
+    setNotice('')
+  }
+
+  // Explicit update lives in the clip's actions menu, so the main commit
+  // button always adds a new clip and never silently overwrites one.
+  const updateClip = (clip: Clip) => {
+    if (clipLocked(clip.id) || !validRange(range, duration)) return
+    recordEdit()
+    setClips(items => items.map(item => item.id === clip.id ? {
+      ...item, start: range.start, end: range.end, segments: [{ ...range }], captions: captionSlice(item.captions, range),
+    } : item))
+    setSelectedId(null)
     setNotice('')
   }
 
@@ -1448,7 +1436,7 @@ export function App() {
 
     // With saved clips, the In–Out cut applies to the whole timeline, not just
     // whichever clip happens to be selected (see trimClips in clip.ts).
-    if (!sections.length && clips.length) {
+    if (clips.length && trimHitsClip) {
       const trimmed = trimClips(clips, range, duration, track => captionCut(track, range))
       if (trimmed.length > MAX_CLIPS) {
         setNotice(`Keep at most ${MAX_CLIPS} clips.`)
@@ -1474,40 +1462,80 @@ export function App() {
       return
     }
 
-    const draftTargets = sections.length ? sections : [{ start: 0, end: duration }]
-    const parts = draftTargets.flatMap(section => cutRange(section, range))
-    const remaining = parts
-    if (remaining.length > MAX_CLIPS) {
-      setNotice(`Keep at most ${MAX_CLIPS} marked sections.`)
+    if (sections.length && trimHitsSection) {
+      const draftTargets = sections
+      const parts = draftTargets.flatMap(section => cutRange(section, range))
+      const remaining = parts
+      if (remaining.length > MAX_CLIPS) {
+        setNotice(`Keep at most ${MAX_CLIPS} marked sections.`)
+        return
+      }
+      recordEdit()
+      setDraftCaptions(current => {
+        const updated = { ...current }
+        for (const key of Object.keys(updated)) if (key.startsWith('section-')) delete updated[key]
+        for (const section of draftTargets) {
+          const track = current[`section-${section.start}-${section.end}`]
+          for (const part of cutRange(section, range)) {
+            if (track) updated[`section-${part.start}-${part.end}`] = captionSlice(track, part)
+          }
+        }
+        return updated
+      })
+      setSections(remaining)
+      if (remaining.length) {
+        const preferred = parts.find(section => section.start >= range.end) ?? parts.at(-1)
+        const next = preferred ? remaining.findIndex(section => section.start === preferred.start && section.end === preferred.end) : -1
+        reviewSection(remaining, next < 0 ? remaining.length - 1 : next)
+      } else {
+        setSelectedId(null)
+        setReviewIndex(null)
+        setRange({ start: range.start, end: range.start })
+        video.current?.pause()
+      }
+      setNotice('')
+      setEditStatus('Cut removed from the marked ranges.')
+      return
+    }
+
+    // The selection does not touch a saved clip or marked section: cut it from
+    // the source and keep everything else, without duplicating saved clips.
+    const keptParts = cutRange({ start: 0, end: duration }, range)
+    const survivingClips = clips.length
+      ? trimClips(clips, range, duration, track => captionCut(track, range))
+      : []
+    const covered = survivingClips.flatMap(clipSegments)
+    const additions = keptParts.flatMap(part => covered.reduce(
+      (pieces, kept) => pieces.flatMap(piece => cutRange(piece, kept)), [part] as Range[],
+    ))
+    const total = survivingClips.length + additions.length
+    if (total > MAX_CLIPS) {
+      setNotice(`Keep at most ${MAX_CLIPS} clips.`)
       return
     }
     recordEdit()
-
+    const track = draftCaptions.range
     setDraftCaptions(current => {
       const updated = { ...current }
       for (const key of Object.keys(updated)) if (key.startsWith('section-')) delete updated[key]
-      for (const section of draftTargets) {
-        const track = sections.length ? current[`section-${section.start}-${section.end}`] : current.range
-        for (const part of cutRange(section, range)) {
-          if (track) updated[`section-${part.start}-${part.end}`] = captionSlice(track, part)
-        }
-      }
+      updated.range = undefined
       return updated
     })
-
-    setSections(remaining)
-    if (remaining.length) {
-      const preferred = parts.find(section => section.start >= range.end) ?? parts.at(-1)
-      const next = preferred ? remaining.findIndex(section => section.start === preferred.start && section.end === preferred.end) : -1
-      reviewSection(remaining, next < 0 ? remaining.length - 1 : next)
-    } else {
-      setSelectedId(null)
-      setReviewIndex(null)
-      setRange({ start: range.start, end: range.start })
-      video.current?.pause()
-    }
+    const added = additions.map(part => ({
+      id: nextId.current++, start: part.start, end: part.end, segments: [{ ...part }], captions: captionSlice(track, part),
+    }))
+    setClips([...survivingClips, ...added])
+    if (sections.length && !trimHitsSection) setSections(sections)
+    else setSections([])
+    setSelectedId(null)
+    setReviewIndex(null)
+    setRange({ start: range.start, end: range.start })
+    video.current?.pause()
+    seek(range.start)
     setNotice('')
-    setEditStatus('Cut removed from the marked ranges.')
+    setEditStatus(total
+      ? `Cut removed. ${total} ${total === 1 ? 'clip' : 'clips'} kept.`
+      : 'Cut removed. Nothing left to keep.')
   }
 
   const renameClip = (id: number, title: string) => {
@@ -1519,41 +1547,14 @@ export function App() {
     setRenaming(null)
   }
 
-  const splitClip = () => {
-    if (!selectedClip || selectedLocked || busy) return
-    const at = playbackClock.get()
-    const next = splitClipAt(selectedClip, at, duration)
-    if (!next) {
-      setNotice('Move the playhead inside the clip before adding a cut.')
-      return
-    }
-    recordEdit()
-    setClips(items => items.map(clip => clip.id === next.id ? next : clip))
-    setRange({ start: next.start, end: next.end })
-    setNotice('')
-    setEditStatus('Cut added inside the clip. Both parts stay in this clip.')
-  }
-
-  const deleteClip = () => {
-    if (!selectedClip || selectedLocked || busy) return
-    recordEdit()
-    setClips(items => items.filter(clip => clip.id !== selectedClip.id))
-    setSelectedId(null)
-    setReviewIndex(null)
-    setRange({ start: 0, end: duration })
-    setNotice('')
-    setEditStatus('Clip removed. The following clips fill its place in the export.')
-  }
-
   const startClipEdgeDrag = (event: ReactPointerEvent, clip: Clip, side: 'start' | 'end') => {
     if (!source || loading || selectedLocked || busy || event.button !== 0 || !track.current) return
     event.stopPropagation()
     event.currentTarget.setPointerCapture(event.pointerId)
     video.current?.pause()
     const rect = track.current.getBoundingClientRect()
-    const pointer = toSource(timelineTime(visibleTime.start, visibleTime.span, (event.clientX - rect.left) / rect.width))
-    clipEdgeDrag.current = { clip, side, axisPointer: timelineTime(visibleTime.start, visibleTime.span, (event.clientX - rect.left) / rect.width),
-      value: clip[side], recorded: false }
+    const pointer = timelineTime(visibleTime.start, visibleTime.span, (event.clientX - rect.left) / rect.width)
+    clipEdgeDrag.current = { clip, side, axisPointer: pointer, value: clip[side], recorded: false }
     seek(clip[side])
   }
 
@@ -1574,43 +1575,6 @@ export function App() {
     setClips(items => items.map(clip => clip.id === next.id ? updated : clip))
     setRange({ start: next.start, end: next.end })
     seek(value)
-  }
-
-  const startClipReorder = (event: ReactPointerEvent, index: number) => {
-    if (timelineView !== 'sequence' || disabled || busy || event.button !== 0 || !track.current) return
-    event.stopPropagation()
-    event.currentTarget.setPointerCapture(event.pointerId)
-    video.current?.pause()
-    clipReorder.current = { index, x: event.clientX, moved: false }
-  }
-
-  const moveClipReorder = (event: ReactPointerEvent) => {
-    const drag = clipReorder.current
-    if (!drag || !track.current || !event.currentTarget.hasPointerCapture(event.pointerId)) return
-    if (Math.abs(event.clientX - drag.x) < 5) return
-    drag.moved = true
-    reorderMoved.current = true
-    const rect = track.current.getBoundingClientRect()
-    const axis = timelineTime(visibleTime.start, visibleTime.span, (event.clientX - rect.left) / rect.width)
-    let target = 0
-    let best = Infinity
-    sequenceSpans.forEach((span, index) => {
-      const distance = Math.abs((span.start + span.end) / 2 - axis)
-      if (distance < best) { best = distance; target = index }
-    })
-    reorderTargetRef.current = target
-    setReorderTarget(target)
-  }
-
-  const finishClipReorder = () => {
-    const drag = clipReorder.current
-    clipReorder.current = null
-    const target = reorderTargetRef.current
-    reorderTargetRef.current = null
-    setReorderTarget(null)
-    if (!drag?.moved || target === null || target === drag.index) return
-    recordEdit()
-    setClips(items => reorderClips(items, drag.index, target))
   }
 
   const exportVideos = async (only?: Clip) => {
@@ -1750,12 +1714,12 @@ export function App() {
   const shortcutState = useRef({
     captionsOpen, settingsOpen, shortcuts, source, loading, timelineZoom,
     closeCaptions, chooseVideo, zoomTimelineTo, editBoundary, seekPlayback, addClip, togglePlay,
-    undoEdit, redoEdit, splitClip, deleteClip,
+    undoEdit, redoEdit,
   })
   shortcutState.current = {
     captionsOpen, settingsOpen, shortcuts, source, loading, timelineZoom,
     closeCaptions, chooseVideo, zoomTimelineTo, editBoundary, seekPlayback, addClip, togglePlay,
-    undoEdit, redoEdit, splitClip, deleteClip,
+    undoEdit, redoEdit,
   }
   useEffect(() => {
     const isTextEditing = (el: Element | null): boolean => {
@@ -1829,16 +1793,6 @@ export function App() {
       if (key === 'enter' && !event.repeat) {
         if (!target?.closest('button, a, input, select, textarea')) state.addClip()
       }
-      if (key === 's' && !event.repeat && !target?.closest('button, a, input, select, textarea')) {
-        state.splitClip()
-        return
-      }
-      if (event.key === 'Delete' || event.key === 'Backspace') {
-        if (!target?.closest('button, a, input, select, textarea')) {
-          event.preventDefault()
-          if (!event.repeat) state.deleteClip()
-        }
-      }
     }
     const playbackShortcut = (event: KeyboardEvent) => {
       const state = shortcutState.current
@@ -1860,7 +1814,7 @@ export function App() {
   const scrub = (event: ReactPointerEvent, edge?: keyof Range, offset = 0) => {
     if (!track.current || !source || loading || (edge && selectedLocked)) return
     const rect = track.current.getBoundingClientRect()
-    const pointer = toSource(timelineTime(visibleTime.start, visibleTime.span, (event.clientX - rect.left - offset) / rect.width))
+    const pointer = timelineTime(visibleTime.start, visibleTime.span, (event.clientX - rect.left - offset) / rect.width)
     const drag = edge ? trimDrag.current : null
     const raw = pointer - (drag?.offset ?? 0)
     const time = Math.max(0, Math.min(duration, edge ? snap(raw) : raw))
@@ -1876,7 +1830,7 @@ export function App() {
     timelinePanned.current = true
     if (edge) {
       const rect = track.current.getBoundingClientRect()
-      const pointer = toSource(timelineTime(visibleTime.start, visibleTime.span, (event.clientX - rect.left) / rect.width))
+      const pointer = timelineTime(visibleTime.start, visibleTime.span, (event.clientX - rect.left) / rect.width)
       trimDrag.current = { range, offset: pointer - range[edge] }
       seek(range[edge])
     } else scrub(event)
@@ -1889,7 +1843,7 @@ export function App() {
     video.current?.pause()
     timelinePanned.current = true
     const rect = track.current.getBoundingClientRect()
-    playheadOffset.current = event.clientX - rect.left - pct(toAxis(playbackClock.get())) * rect.width / 100
+    playheadOffset.current = event.clientX - rect.left - pct(playbackClock.get()) * rect.width / 100
   }
 
   const startTrackDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1914,7 +1868,7 @@ export function App() {
     drag.moved = true
     setGrabbingTimeline(true)
     timelinePanned.current = true
-    setTimelineStart(panTimeline(axisDuration, timelineZoom, drag.start, delta / drag.width))
+    setTimelineStart(panTimeline(duration, timelineZoom, drag.start, delta / drag.width))
   }
 
   const finishTrackDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1922,7 +1876,7 @@ export function App() {
     if (drag && !drag.moved && event.currentTarget.hasPointerCapture(event.pointerId)) {
       video.current?.pause()
       const rect = event.currentTarget.getBoundingClientRect()
-      seek(toSource(timelineTime(drag.start, visibleTime.span, (drag.x - rect.left) / rect.width)))
+      seek(timelineTime(drag.start, visibleTime.span, (drag.x - rect.left) / rect.width))
     }
   }
 
@@ -1936,11 +1890,10 @@ export function App() {
   const trimDisabled = disabled || selectedLocked
   const canSaveRange = validRange(range, duration)
   const editingCaptionJob = captionsRunning && Boolean(captionJob.current?.keys.has(captionKey))
-  const canTrim = !trimDisabled && canSaveRange && !captionsRunning && !captionJob.current && (
-    sections.length ? sections.some(section => rangesOverlap(section, range))
-      : clips.length ? clips.some(clip => clipSegments(clip).some(segment => rangesOverlap(segment, range)))
-        : range.start > 0 || range.end < duration
-  )
+  const trimHitsSection = sections.some(section => rangesOverlap(section, range))
+  const trimHitsClip = clips.some(clip => clipSegments(clip).some(segment => rangesOverlap(segment, range)))
+  const canTrim = !trimDisabled && canSaveRange && !captionsRunning && !captionJob.current
+    && (range.start > 0 || range.end < duration)
   const batchCount = clips.length || (hasSource && !sections.length ? 1 : 0)
   const summary = exportBatch && summarizeExport(exportBatch.weights, exportBatch.states)
   const singleExport = busy ? exportBatch?.ranges.find(clip => clip.id === 0) : undefined
@@ -2141,9 +2094,8 @@ export function App() {
             <TimeField label="Out" value={range.end} disabled={trimDisabled} onChange={value => editBoundary('end', value)} onMark={() => editBoundary('end', activeTime())} />
             <button className="icon-button compact" title="Reset trim range" aria-label="Reset trim range" onClick={resetRange} disabled={trimDisabled}><RotateCcw size={15} /></button>
             <button className="icon-button compact clip-commit" disabled={!selectedLocked && (trimDisabled || !canSaveRange || editingCaptionJob)}
-              aria-label={selectedLocked ? 'New clip' : selectedId === null ? 'Add clip' : 'Update clip'}
-              title={selectedLocked ? 'New clip' : selectedId === null ? 'Add clip' : 'Update clip'}
-              onClick={selectedLocked ? resetRange : addClip}>{selectedLocked || selectedId === null ? <Plus size={16} /> : <Check size={16} />}</button>
+              aria-label={selectedLocked ? 'New clip' : 'Add clip'} title={selectedLocked ? 'New clip' : 'Add clip'}
+              onClick={selectedLocked ? resetRange : addClip}><Plus size={16} /></button>
           </div>
             <div className="transport-tools">
             {sequence.path && <button className="icon-button compact" title="Return to source preview" aria-label="Return to source preview"
@@ -2169,7 +2121,7 @@ export function App() {
               <button className="icon-button compact mute" aria-label={muted ? 'Unmute' : 'Mute'} title={muted ? 'Unmute' : 'Mute'} disabled={!source} onClick={() => {
                 const next = !muted
                 setMuted(next)
-                if (sequence.player.current) sequence.player.current.muted = next
+                if (sequence.player.current) sequence.player.current.setMuted(next)
               }}>
                 {muted || !previewVolume ? <VolumeX size={17} /> : <Volume2 size={17} />}
               </button>
@@ -2178,7 +2130,7 @@ export function App() {
                 onChange={event => {
                   setPreviewVolume(event.target.valueAsNumber)
                   setMuted(false)
-                  if (sequence.player.current) sequence.player.current.muted = false
+                  if (sequence.player.current) sequence.player.current.setMuted(false)
                 }} />
             </div>
             </div>
@@ -2336,6 +2288,8 @@ export function App() {
                     <Sparkles size={15} /> {clip.title ? 'Retitle with AI' : 'Title with AI'}
                   </button>
                   <button onClick={() => { setClipActions(null); setRenaming(clip.id) }}><Pencil size={14} /> Edit title</button>
+                  <button disabled={busy || !validRange(range, duration)} onClick={() => { setClipActions(null); updateClip(clip) }}>
+                    <Check size={14} /> Update from trim range</button>
                   <button disabled={busy || clips.length >= MAX_CLIPS} onClick={() => {
                     const copy = { ...clip, id: nextId.current++, title: clip.title ? `${clip.title.slice(0, 73)} (copy)` : undefined }
                     setClips(items => items.flatMap(item => item.id === clip.id ? [item, copy] : [item]))
@@ -2431,18 +2385,10 @@ export function App() {
         <section className="timeline panel" aria-label="Timeline">
           <div className="panel-heading timeline-heading">
             <div className="source-line"><Scissors size={17} /><span>Timeline</span></div>
-            <div className="segmented timeline-view" role="group" aria-label="Timeline view">
-              <button aria-pressed={timelineView === 'source'} onClick={() => setTimelineView('source')}>Source</button>
-              <button aria-pressed={timelineView === 'sequence'} disabled={!clips.length} onClick={() => setTimelineView('sequence')}>Sequence</button>
-            </div>
             <button className="button outline small trim-section" disabled={!canTrim}
-              title="Remove the In–Out selection from every clip on the timeline" onClick={trimSection}><ScissorsLineDashed size={15} /> Trim</button>
+              title="Remove the In–Out selection — from all saved clips, or from the source if none are saved" onClick={trimSection}><ScissorsLineDashed size={15} /> Trim</button>
             <button className="icon-button compact" title="Undo (Ctrl Z)" aria-label="Undo" disabled={!canUndo} onClick={undoEdit}><Undo2 size={15} /></button>
             <button className="icon-button compact" title="Redo (Ctrl Shift Z)" aria-label="Redo" disabled={!canRedo} onClick={redoEdit}><Redo2 size={15} /></button>
-            <button className="button outline small" title="Add a cut inside the selected clip at the playhead (S)"
-              disabled={!selectedClip || selectedLocked || busy} onClick={splitClip}><Scissors size={14} /> Cut</button>
-            <button className="icon-button compact" title="Remove the selected clip (Delete)" aria-label="Remove selected clip"
-              disabled={!selectedClip || selectedLocked || busy} onClick={deleteClip}><Trash2 size={15} /></button>
             <button className={`icon-button compact ${snapping ? 'active' : ''}`} title={snapping ? 'Snapping on' : 'Snapping off'}
               aria-label="Toggle snapping" aria-pressed={snapping} onClick={() => setSnapping(on => !on)}><Magnet size={15} /></button>
             <div className="timeline-zoom" role="group" aria-label="Timeline zoom">
@@ -2469,7 +2415,7 @@ export function App() {
             </div>
           </div>
           <div className="timeline-body" ref={timelineBody}>
-            <div className={`ruler ${hasSource ? 'seekable' : ''}`} aria-hidden="true" onPointerDown={seekFromRuler}>{[0, 1, 2, 3, 4, 5].map(step => <span key={step}>{axisDuration
+            <div className={`ruler ${hasSource ? 'seekable' : ''}`} aria-hidden="true" onPointerDown={seekFromRuler}>{[0, 1, 2, 3, 4, 5].map(step => <span key={step}>{duration
               ? stamp(timelineTime(visibleTime.start, visibleTime.span, step / 5), visibleTime.span < 5)
               : step === 0 ? '00:00:00' : ''}</span>)}</div>
             <div className={`track ${hasSource ? 'loaded' : ''} ${grabbingTimeline ? 'grabbing' : ''}`} ref={track}
@@ -2478,40 +2424,23 @@ export function App() {
               {hasSource ? (
                 <>
                   <div className="filmstrip" aria-hidden="true">{filmTiles.map(tile => {
-                    const sourceTime = toSource(tile.time)
-                    const overview = overviewTiles[Math.min(9, Math.floor(sourceTime / duration * 10))]
-                    const frame = frames[sourceTime] || frames[overview?.time]
+                    const overview = overviewTiles[Math.min(9, Math.floor(tile.time / duration * 10))]
+                    const frame = frames[tile.time] || frames[overview?.time]
                     return <div className="frame-tile" key={tile.index} style={{ left: `${tile.left}%` }}>
                       {frame && <img draggable={false} alt="" src={frame} />}
                     </div>
                   })}</div>
-                  {timelineView === 'source'
-                    ? clips.flatMap(clip => clipSegments(clip).map((segment, index, all) => ({ clip, segment, index, all })))
-                      .filter(({ segment }) => pct(segment.end) > pct(segment.start))
-                      .map(({ clip, segment, index, all }) => <Fragment key={`${clip.id}-${index}`}>
-                        <div className={`clip-tint ${clip.id === selectedId ? 'selected' : ''}`}
-                          style={{ left: `${pct(segment.start)}%`, width: `${pct(segment.end) - pct(segment.start)}%`, backgroundColor: clipColor(clip.id) + '35', borderColor: clipColor(clip.id) }} />
-                        {index > 0 && inView(segment.start) && <div className="cut-notch" title="Cut point — this part is skipped on export"
-                          style={{ left: `${pct(all[index - 1].end)}%`, borderColor: clipColor(clip.id) }} />}
-                      </Fragment>)
-                    : sequenceMap.pieces.map((piece, index) => <div key={`${piece.clipId}-${index}`}
-                        className={`sequence-piece ${piece.clipId === selectedId ? 'selected' : ''} ${reorderTarget === index ? 'drop-target' : ''}`}
-                        style={{ left: `${pct(piece.start)}%`, width: `${pct(piece.end) - pct(piece.start)}%`,
-                          backgroundColor: clipColor(piece.clipId) + '45', borderColor: clipColor(piece.clipId) }}
-                        title={`${stamp(piece.segment.start, true)} – ${stamp(piece.segment.end, true)} · drag to reorder`}
-                        onPointerDown={event => startClipReorder(event, clips.findIndex(clip => clip.id === piece.clipId))}
-                        onPointerMove={moveClipReorder} onPointerUp={finishClipReorder}
-                        onClick={() => {
-                          if (reorderMoved.current) { reorderMoved.current = false; return }
-                          const clip = clips.find(item => item.id === piece.clipId)
-                          if (clip) selectClip(clip)
-                        }}
-                        onLostPointerCapture={() => { clipReorder.current = null; reorderTargetRef.current = null; setReorderTarget(null) }}>
-                        <span>{stamp(piece.segment.end - piece.segment.start)}</span>
-                      </div>)}
-                  {timelineView === 'source' && overlaps.map(overlap => pct(overlap.end) > pct(overlap.start) && <div key={overlap.start} className="overlap-line"
+                  {clips.flatMap(clip => clipSegments(clip).map((segment, index, all) => ({ clip, segment, index, all })))
+                    .filter(({ segment }) => pct(segment.end) > pct(segment.start))
+                    .map(({ clip, segment, index, all }) => <Fragment key={`${clip.id}-${index}`}>
+                      <div className={`clip-tint ${clip.id === selectedId ? 'selected' : ''}`}
+                        style={{ left: `${pct(segment.start)}%`, width: `${pct(segment.end) - pct(segment.start)}%`, backgroundColor: clipColor(clip.id) + '35', borderColor: clipColor(clip.id) }} />
+                      {index > 0 && inView(segment.start) && <div className="cut-notch" title="Cut point — this part is skipped on export"
+                        style={{ left: `${pct(all[index - 1].end)}%`, borderColor: clipColor(clip.id) }} />}
+                    </Fragment>)}
+                  {overlaps.map(overlap => pct(overlap.end) > pct(overlap.start) && <div key={overlap.start} className="overlap-line"
                     title="Overlapping clips" style={{ left: `${pct(overlap.start)}%`, width: `${pct(overlap.end) - pct(overlap.start)}%` }} />)}
-                  {timelineView === 'source' && <>
+                  <>
                     <div className="range-shade" style={{ width: `${pct(range.start)}%` }} />
                     <div className="range-shade right" style={{ width: `${100 - pct(range.end)}%` }} />
                     <div className="selection" style={{ left: `${pct(range.start)}%`, width: `${pct(range.end) - pct(range.start)}%` }} />
@@ -2520,11 +2449,11 @@ export function App() {
                         style={{ left: `${pct(moment.start)}%`, width: `${pct(moment.end) - pct(moment.start)}%` }} />)}
                     {[...new Set(sections.flatMap(section => [section.start, section.end]))].filter(point => point > 0 && point < duration && inView(point)).map(point =>
                       <div className="section-mark" key={point} style={{ left: `${pct(point)}%` }} />)}
-                  </>}
-                  {(['start', 'end'] as const).filter(edge => inView(toAxis(range[edge]))).map(edge => <button key={edge} className={`handle ${edge}`} disabled={trimDisabled}
+                  </>
+                  {(['start', 'end'] as const).filter(edge => inView(range[edge])).map(edge => <button key={edge} className={`handle ${edge}`} disabled={trimDisabled}
                     aria-label={edge === 'start' ? 'Drag trim start' : 'Drag trim end'}
-                    data-tight={pct(toAxis(range.end)) - pct(toAxis(range.start)) < 5}
-                    style={{ left: `clamp(0px, calc(${pct(toAxis(range[edge]))}% - ${edge === 'end' ? 11 : 0}px), calc(100% - 11px))` }}
+                    data-tight={pct(range.end) - pct(range.start) < 5}
+                    style={{ left: `clamp(0px, calc(${pct(range[edge])}% - ${edge === 'end' ? 11 : 0}px), calc(100% - 11px))` }}
                     onPointerDown={event => startScrub(event, edge)}
                     onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) scrub(event, edge) }}
                     onLostPointerCapture={() => { trimDrag.current = null }}
@@ -2536,21 +2465,21 @@ export function App() {
                       if (editBoundary(edge, value)) seek(value)
                     }}><span /></button>)}
                   {selectedClip && !selectedLocked && !busy && (['start', 'end'] as const)
-                    .filter(side => inView(toAxis(selectedClip[side]))).map(side => <button key={`clip-${side}`}
+                    .filter(side => inView(selectedClip[side])).map(side => <button key={`clip-${side}`}
                       className={`handle clip-edge ${side}`} aria-label={`Drag clip ${side} to trim`}
                       title={`Drag to trim the clip's ${side}`}
-                      style={{ left: `clamp(0px, calc(${pct(toAxis(selectedClip[side]))}% - ${side === 'end' ? 11 : 0}px), calc(100% - 11px))` }}
+                      style={{ left: `clamp(0px, calc(${pct(selectedClip[side])}% - ${side === 'end' ? 11 : 0}px), calc(100% - 11px))` }}
                       onPointerDown={event => startClipEdgeDrag(event, selectedClip, side)}
                       onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) moveClipEdgeDrag(event) }}
                       onLostPointerCapture={() => { clipEdgeDrag.current = null }}><span /></button>)}
-                  <TimelinePlayhead pct={sourceTime => pct(toAxis(sourceTime))} inView={sourceTime => inView(toAxis(sourceTime))} onDrag={startPlayheadDrag}
+                  <TimelinePlayhead pct={pct} inView={inView} onDrag={startPlayheadDrag}
                     onMove={event => {
                       if (event.currentTarget.hasPointerCapture(event.pointerId)) scrub(event, undefined, playheadOffset.current)
                     }} />
                 </>
               ) : <span className="empty-track"><Film size={16} /> Open a video to start trimming</span>}
             </div>
-            {timelineView === 'source' && clips.length > 0 && <div className="clip-strip" aria-label="Saved clip ranges">
+            {clips.length > 0 && <div className="clip-strip" aria-label="Saved clip ranges">
               {clips.flatMap((clip, index) => clipSegments(clip).map((segment, part) => ({ clip, index, segment, part })))
                 .filter(({ segment }) => segment.end > visibleTime.start && segment.start < visibleTime.end)
                 .map(({ clip, index, segment, part }) => <button key={`${clip.id}-${part}`} className={clip.id === selectedId ? 'selected' : ''}
@@ -2593,7 +2522,7 @@ export function App() {
       {shortcuts && <div className="dialog-backdrop" onClick={() => setShortcuts(false)}>
         <section className="shortcut-dialog panel" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" onClick={event => event.stopPropagation()}>
           <div className="section-title"><h2>Keyboard shortcuts</h2><button autoFocus className="icon-button" aria-label="Close shortcuts" onClick={() => setShortcuts(false)}><X size={18} /></button></div>
-          <dl>{[['Open video', 'Ctrl O'], ['Play / pause', 'Space'], ['Zoom in', 'Ctrl + scroll up / Ctrl +'], ['Zoom out', 'Ctrl + scroll down / Ctrl -'], ['Pan timeline', 'Shift scroll / sideways scroll'], ['Fit timeline', 'Ctrl 0'], ['Seek 1 second', '← / →'], ['Seek 5 seconds', 'Shift ← / →'], ['Mark In', 'I'], ['Mark Out', 'O'], ['Add or update clip', 'Enter'], ['Cut inside clip', 'S'], ['Remove selected clip', 'Delete'], ['Undo', 'Ctrl Z'], ['Redo', 'Ctrl Shift Z']].map(([label, key]) =>
+          <dl>{[['Open video', 'Ctrl O'], ['Play / pause', 'Space'], ['Zoom in', 'Ctrl + scroll up / Ctrl +'], ['Zoom out', 'Ctrl + scroll down / Ctrl -'], ['Pan timeline', 'Shift scroll / sideways scroll'], ['Fit timeline', 'Ctrl 0'], ['Seek 1 second', '← / →'], ['Seek 5 seconds', 'Shift ← / →'], ['Mark In', 'I'], ['Mark Out', 'O'], ['Add clip', 'Enter'], ['Undo', 'Ctrl Z'], ['Redo', 'Ctrl Shift Z']].map(([label, key]) =>
             <div key={label}><dt>{label}</dt><dd><Key>{key}</Key></dd></div>)}</dl>
         </section>
       </div>}

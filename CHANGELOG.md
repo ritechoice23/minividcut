@@ -2,19 +2,20 @@
 
 ## Unreleased
 
-- Preview the full clip with intros, outros, transitions, captions and music composited live in the app — no render or temporary file until export.
+- Preview the full clip with intros, outros, transitions, captions and music composited live in the app — no render or temporary file until export. Fixed a stale-closure bug that made the composited preview silently refuse to play when an intro or outro was set, and a crash when an image intro or outro was paused. The timeline playhead now follows the composited preview in source time instead of freezing, preview audio is no longer routed through a Web Audio context that could stay suspended and mute every layer, and Unmute reliably clears an autoplay fallback.
 - Keep playback responsive by isolating time updates, batching thumbnail generation, preparing caption artwork concurrently, and warming hardware encoders ahead of the first export.
 - Verify the source video has not changed before exporting and release temporary asset access after a preview closes.
 
-- Trim now removes the In–Out range from every saved clip at once. A cut leaves each clip as a single object with internal source segments instead of creating “Part 2” duplicates, and deleted sections close up on export.
-- Edit clips directly on the timeline: select a clip, drag its edges, add a cut at the playhead with S, or remove it with Delete. Undo and redo are available from the timeline toolbar or Ctrl Z / Ctrl Shift Z.
-- Clips with internal cuts preview their remaining parts back to back; the Sequence timeline view shows how the export order closes up after cuts.
-- Switch the timeline between source time and a sequence view where cuts and deleted clips close the gaps, and drag clips there to reorder them. Snapping to nearby edit points can be toggled from the timeline toolbar.
+- Trim is active for any valid In–Out range, even when the range sits outside the saved clips or nothing has been saved yet. It cuts overlapping saved clips, and keeps the remaining source parts as clips otherwise, without duplicating footage a clip already covers. A cut leaves each clip as a single object with internal source segments instead of creating “Part 2” duplicates, and deleted sections close up on export.
+- Edit clips directly on the timeline: select a clip and drag its edges to trim it. Undo and redo are available from the timeline toolbar or Ctrl Z / Ctrl Shift Z.
+- Clips with internal cuts preview their remaining parts back to back.
+- Snapping to nearby edit points can be toggled from the timeline toolbar. The add-clip button always adds a new clip; updating an existing clip from the current trim range is an explicit action in its clip menu.
 - The playhead no longer oscillates after a seek, and scrubbing no longer auto-pans the viewport under your pointer.
 - Ctrl + scroll the timeline to zoom in and out around the pointer in discrete steps. Shift + scroll or sideways trackpad swipes pan the viewport and drive the horizontal scrollbar; plain vertical scrolling leaves the timeline untouched so the filmstrip does not shift under the cursor. Wheel state is tracked in refs so rapid ticks do not make the view jump or the thumbnails churn.
 - Cutting speech out of a clip also removes those caption cues, including word timings, and trimming a clip edge keeps its captions inside the new bounds.
 - Music stays continuous across a clip's internal cuts instead of restarting at every segment.
 - Undo and redo now cover caption edits, music and bookend changes, and shared caption styling.
+- Simplified the timeline toolbar: Trim, undo/redo, snapping and zoom only. Clip removal lives in the clip's actions menu, and adding a cut inside a clip is no longer a separate control.
 
 - Keep the music panel focused on Kaino and local audio. Show progress and offer retry when catalog loading or a download fails.
 

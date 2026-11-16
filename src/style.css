@@ -104,6 +104,11 @@ svg { flex-shrink: 0; }
 .kaino-row-progress { width: 100%; height: 4px; accent-color: var(--lime); }
 .kaino-row-error { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .kaino-row-error small { margin: 0; color: #f0b6a7; }
+.kaino-audition { display: grid; gap: 5px; padding: 8px; border: 1px solid #3d4b2d; border-radius: 7px; background: #1b2117; }
+.kaino-audition > small { color: var(--lime); }
+.kaino-audition-hint { color: var(--dim) !important; font-size: 10px; }
+.kaino-waveform { display: block; width: 100%; height: 42px; border-radius: 4px; background: #121410; cursor: ew-resize; touch-action: none; }
+.kaino-waveform:focus-visible { outline: 2px solid var(--lime); outline-offset: 2px; }
 .kaino-empty { padding: 10px; border: 1px dashed #333; border-radius: 7px; color: var(--muted); font-size: 11px; text-align: center; }
 .kaino-pagination { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .kaino-page { color: var(--dim); font: 10px var(--mono); }

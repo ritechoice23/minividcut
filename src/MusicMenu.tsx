@@ -54,7 +54,7 @@ export const MusicMenu = memo(function MusicMenu({ project, clip, disabled, canP
     return () => { current = false }
   }, [visible, savedRetry])
 
-  async function select(value: string | KainoTrack) {
+  async function select(value: string | KainoTrack, start?: number) {
     setError('')
     setFailedTrack(null)
     if (value === 'inherit' || value === 'off') {
@@ -83,7 +83,12 @@ export const MusicMenu = memo(function MusicMenu({ project, clip, disabled, canP
         track = { kind: 'library', id: library.id }
       }
       const path = await invoke<string>('open_music', { track })
-      onChange(target, { track, volume: current?.volume ?? DEFAULT_MUSIC_VOLUME, fade: current?.fade }, path)
+      onChange(target, {
+        track,
+        volume: current?.volume ?? DEFAULT_MUSIC_VOLUME,
+        fade: current?.fade,
+        start: start && start > 0 ? start : undefined,
+      }, path)
     } catch (error) {
       setFailedTrack(chosen)
       setError(error instanceof Error ? error.message : String(error))
@@ -151,7 +156,7 @@ export const MusicMenu = memo(function MusicMenu({ project, clip, disabled, canP
         aria-controls="music-library" onClick={() => setLibraryOpen(!libraryOpen)}>Music library</button>
       <div id="music-library" className="music-library" hidden={!libraryOpen}>
         <KainoLibrary enabled={visible && libraryOpen} canUse={!pending && !disabled} saved={kainoTracks}
-          onSaved={setKainoTracks} onUse={track => void select(track)} onCacheChange={onKainoCacheChange} />
+          onSaved={setKainoTracks} onUse={(track, start) => void select(track, start)} onCacheChange={onKainoCacheChange} />
       </div>
       {checkingSaved && <MusicLoading label="Checking downloaded tracks…" />}
       {savedError && <div className="music-retry">

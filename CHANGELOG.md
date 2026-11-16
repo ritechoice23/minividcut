@@ -24,6 +24,8 @@
 
 - Start a track at a chosen second and add an optional soft fade at each clip's edges, reflected in both previews and the exported audio.
 
+- Show the auditioned sample as a waveform with a draggable start marker, so the in-point can be chosen by ear and by eye.
+
 - Preview the full clip with its intro, outro, transitions, captions, and music. Playback places Play/Pause between the seek buttons and groups preview volume with mute.
 
 - Search Kaino's CC0 music catalog and download individual tracks on demand. Reuse downloads offline or remove them from the music panel.

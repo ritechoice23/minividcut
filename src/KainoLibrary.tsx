@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { convertFileSrc, Channel, invoke } from '@tauri-apps/api/core'
 import { confirm } from '@tauri-apps/plugin-dialog'
 import { Check, Download, LoaderCircle, Pause, Play, RotateCcw, Search, Trash2, X } from 'lucide-react'
+import { Waveform } from './Waveform'
 
 export type KainoTrack = { id: string; title: string }
 type Page = { tracks: KainoTrack[]; nextPage: number | null }
@@ -35,7 +36,7 @@ type Props = {
   canUse: boolean
   saved: KainoTrack[]
   onSaved: (update: KainoTrack[] | ((current: KainoTrack[]) => KainoTrack[])) => void
-  onUse: (track: KainoTrack) => void
+  onUse: (track: KainoTrack, start?: number) => void
   onCacheChange: (id: string, removed: boolean) => void
 }
 
@@ -116,6 +117,9 @@ export function KainoLibrary({ enabled, canUse, saved, onSaved, onUse, onCacheCh
   const [loadingPreview, setLoadingPreview] = useState('')
   const [previewProgress, setPreviewProgress] = useState<Progress | null>(null)
   const [previewError, setPreviewError] = useState('')
+  const [previewDuration, setPreviewDuration] = useState(0)
+  const [previewTime, setPreviewTime] = useState(0)
+  const [inPoints, setInPoints] = useState<Record<string, number>>({})
   const audio = useRef<HTMLAudioElement>(null)
   const previewRequest = useRef(0)
   const notify = useRef(onCacheChange)
@@ -131,6 +135,8 @@ export function KainoLibrary({ enabled, canUse, saved, onSaved, onUse, onCacheCh
     }
     setPreview(null)
     setPreviewError('')
+    setPreviewDuration(0)
+    setPreviewTime(0)
   }, [])
 
   useEffect(() => {
@@ -172,8 +178,9 @@ export function KainoLibrary({ enabled, canUse, saved, onSaved, onUse, onCacheCh
   }
 
   function useTrack(track: KainoTrack) {
+    const start = inPoints[track.id] ?? 0
     stopPreview()
-    onUse(track)
+    onUse(track, start > 0 ? start : undefined)
   }
 
   useEffect(() => {
@@ -294,6 +301,13 @@ export function KainoLibrary({ enabled, canUse, saved, onSaved, onUse, onCacheCh
         : <div className="kaino-rows">{page.tracks.map(track => row(track, saved.some(item => item.id === track.id)))}</div>}
     </div>}
     {loadingPreview && <MusicLoading label={progressLabel(previewProgress, 'Loading preview…')} />}
+    {preview && <div className="kaino-audition">
+      <small role="status">Playing preview · {preview.track.title}</small>
+      <Waveform path={preview.path} duration={previewDuration} position={previewTime}
+        inPoint={inPoints[preview.track.id] ?? 0}
+        onInPoint={seconds => setInPoints(current => ({ ...current, [preview.track.id]: seconds }))} />
+      <small className="kaino-audition-hint">Drag the strip to choose where this track starts when you use it.</small>
+    </div>}
     {previewError && <div className="kaino-row-error" role="alert"><small>{previewError}</small></div>}
     {error && <small role="alert">{error}</small>}
     {!loading && !searchError && (requested.page > 1 || Boolean(nextPage)) && <div className="kaino-pagination">
@@ -303,6 +317,9 @@ export function KainoLibrary({ enabled, canUse, saved, onSaved, onUse, onCacheCh
       <button type="button" className="button outline small" disabled={!nextPage}
         onClick={() => { if (nextPage) setRequested(current => ({ ...current, page: nextPage })) }}>Next</button>
     </div>}
-    <audio ref={audio} hidden preload="none" onEnded={() => setPreview(null)} />
+    <audio ref={audio} hidden preload="none"
+      onLoadedMetadata={event => setPreviewDuration(event.currentTarget.duration)}
+      onTimeUpdate={event => setPreviewTime(event.currentTarget.currentTime)}
+      onEnded={() => setPreview(null)} />
   </div>
 }

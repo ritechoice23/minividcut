@@ -6,8 +6,12 @@ export const MUSIC_LIBRARY = [
 ] as const
 
 type LibraryTrack = typeof MUSIC_LIBRARY[number]['id']
-export type MusicTrack = { kind: 'library'; id: LibraryTrack } | { kind: 'kaino'; id: string; name: string }
+export type KainoCollection = 'music' | 'sfx'
+export type MusicTrack = { kind: 'library'; id: LibraryTrack }
+  | { kind: 'kaino'; id: string; name: string; collection?: KainoCollection }
   | { kind: 'file'; path: string; name: string }
+export const kainoKey = (id: string, collection: KainoCollection = 'music') =>
+  `kaino:${collection === 'sfx' ? 'sfx:' : ''}${id}`
 // `start` is seconds into the track; `fade` softens the clip's first and last
 // moments. Both are optional so drafts saved before they existed still load.
 export type Music = { track: MusicTrack; volume: number; start?: number; fade?: boolean }

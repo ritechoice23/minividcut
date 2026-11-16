@@ -104,6 +104,10 @@ svg { flex-shrink: 0; }
 .kaino-row-progress { width: 100%; height: 4px; accent-color: var(--lime); }
 .kaino-row-error { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .kaino-row-error small { margin: 0; color: #f0b6a7; }
+.kaino-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 3px; border: 1px solid #2c2c2c; border-radius: 7px; background: #151515; }
+.kaino-tabs button { min-height: 25px; padding: 0 6px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); font-size: 11px; }
+.kaino-tabs button:hover { color: #f2f2f0; }
+.kaino-tabs button[aria-selected="true"] { background: #2a3320; color: #dff3bd; }
 .kaino-audition { display: grid; gap: 5px; padding: 8px; border: 1px solid #3d4b2d; border-radius: 7px; background: #1b2117; }
 .kaino-audition > small { color: var(--lime); }
 .kaino-audition-hint { color: var(--dim) !important; font-size: 10px; }

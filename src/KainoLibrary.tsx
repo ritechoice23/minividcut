@@ -3,6 +3,7 @@ import { convertFileSrc, Channel, invoke } from '@tauri-apps/api/core'
 import { confirm } from '@tauri-apps/plugin-dialog'
 import { Check, Download, LoaderCircle, Pause, Play, RotateCcw, Search, Trash2, X } from 'lucide-react'
 import { Waveform } from './Waveform'
+import type { KainoCollection } from './music'
 
 export type KainoTrack = { id: string; title: string }
 type Page = { tracks: KainoTrack[]; nextPage: number | null }
@@ -42,11 +43,13 @@ function progressLabel(progress: Progress | null, fallback: string) {
 
 type Props = {
   enabled: boolean
+  collection: KainoCollection
+  onCollectionChange: (collection: KainoCollection) => void
   canUse: boolean
   saved: KainoTrack[]
   onSaved: (update: KainoTrack[] | ((current: KainoTrack[]) => KainoTrack[])) => void
   onUse: (track: KainoTrack, start?: number) => void
-  onCacheChange: (id: string, removed: boolean) => void
+  onCacheChange: (id: string, removed: boolean, collection: KainoCollection) => void
 }
 
 type RowProps = {
@@ -121,7 +124,7 @@ function TrackRow({ track, installed, download, queued, removing, previewing, pr
   </div>
 }
 
-export function KainoLibrary({ enabled, canUse, saved, onSaved, onUse, onCacheChange }: Props) {
+export function KainoLibrary({ enabled, collection, onCollectionChange, canUse, saved, onSaved, onUse, onCacheChange }: Props) {
   const [query, setQuery] = useState('')
   const [requested, setRequested] = useState({ query: '', page: 1 })
   const [page, setPage] = useState<Page | null>(null)
@@ -186,7 +189,7 @@ export function KainoLibrary({ enabled, canUse, saved, onSaved, onUse, onCacheCh
       if (request === previewRequest.current) setPreviewProgress(update)
     })
     try {
-      const path = await invoke<string>('preview_kaino', { id: track.id, progress })
+      const path = await invoke<string>('preview_kaino', { id: track.id, collection, progress })
       if (request === previewRequest.current) setPreview({ track, path })
     } catch (cause) {
       if (request === previewRequest.current) setPreviewError(String(cause))
@@ -211,7 +214,7 @@ export function KainoLibrary({ enabled, canUse, saved, onSaved, onUse, onCacheCh
     setSearchProgress(null)
     setSearchError('')
     const progress = new Channel<Progress>(update => { if (current) setSearchProgress(update) })
-    void invoke<Page>('search_kaino', { ...requested, progress }).then(result => {
+    void invoke<Page>('search_kaino', { ...requested, collection, progress }).then(result => {
       if (current) setPage(result)
     }).catch(cause => {
       if (current) setSearchError(String(cause))
@@ -219,7 +222,7 @@ export function KainoLibrary({ enabled, canUse, saved, onSaved, onUse, onCacheCh
       if (current) setLoading(false)
     })
     return () => { current = false }
-  }, [enabled, requested])
+  }, [enabled, requested, collection])
 
   function setDownload(id: string, update: Partial<DownloadState>) {
     setDownloads(current => ({
@@ -247,10 +250,10 @@ export function KainoLibrary({ enabled, canUse, saved, onSaved, onUse, onCacheCh
       })
     })
     try {
-      const downloaded = await invoke<KainoTrack>('download_kaino', { id: track.id, progress })
+      const downloaded = await invoke<KainoTrack>('download_kaino', { id: track.id, collection, progress })
       onSaved(current => [...current.filter(item => item.id !== downloaded.id), downloaded]
         .sort((a, b) => a.title.localeCompare(b.title)))
-      notify.current(track.id, false)
+      notify.current(track.id, false, collection)
       setDownloads(current => {
         const next = { ...current }
         delete next[track.id]
@@ -295,9 +298,9 @@ export function KainoLibrary({ enabled, canUse, saved, onSaved, onUse, onCacheCh
     try {
       if (!await confirm(`Remove “${track.title}” from this computer? Drafts using it will need the track downloaded again.`,
         { title: 'Remove downloaded music?', okLabel: 'Remove', kind: 'warning' })) return
-      await invoke('remove_kaino', { id: track.id })
+      await invoke('remove_kaino', { id: track.id, collection })
       onSaved(current => current.filter(item => item.id !== track.id))
-      notify.current(track.id, true)
+      notify.current(track.id, true, collection)
       if (preview?.track.id === track.id) stopPreview()
     } catch (cause) {
       setError(String(cause))
@@ -324,8 +327,14 @@ export function KainoLibrary({ enabled, canUse, saved, onSaved, onUse, onCacheCh
 
   return <div className="kaino-library">
     <div className="kaino-heading">
-      <strong>Kaino music</strong>
+      <strong>Kaino library</strong>
       <span className="kaino-badge">CC0 · no attribution</span>
+    </div>
+    <div className="kaino-tabs" role="tablist" aria-label="Kaino collection">
+      <button type="button" role="tab" aria-selected={collection === 'music'}
+        onClick={() => onCollectionChange('music')}>Music</button>
+      <button type="button" role="tab" aria-selected={collection === 'sfx'}
+        onClick={() => onCollectionChange('sfx')}>Sound effects</button>
     </div>
     {(active.length > 0 || queued > 0) && <div className="kaino-session" role="status">
       <LoaderCircle size={13} className="spin" />
@@ -354,9 +363,9 @@ export function KainoLibrary({ enabled, canUse, saved, onSaved, onUse, onCacheCh
       <div className="kaino-rows">{saved.map(track => row(track, true))}</div>
     </details>}
     {page && !loading && !searchError && <div className="kaino-results">
-      <div className="kaino-section-label">{requested.query ? 'Search results' : 'Popular tracks'}</div>
+      <div className="kaino-section-label">{requested.query ? 'Search results' : collection === 'sfx' ? 'Popular effects' : 'Popular tracks'}</div>
       {page.tracks.length === 0
-        ? <p className="kaino-empty">No tracks found. Try a different search.</p>
+        ? <p className="kaino-empty">No {collection === 'sfx' ? 'sounds' : 'tracks'} found. Try a different search.</p>
         : <div className="kaino-rows">{page.tracks.map(track => row(track, saved.some(item => item.id === track.id)))}</div>}
     </div>}
     {loadingPreview && <MusicLoading label={progressLabel(previewProgress, 'Loading preview…')} />}

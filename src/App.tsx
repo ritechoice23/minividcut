@@ -31,8 +31,8 @@ import type { CaptionCue, CaptionStyle, CaptionTrack } from './captions'
 import { DEFAULT_MOMENT_QUERY, missingTranscriptRanges, MOMENT_BATCH_SECONDS, momentCandidates, momentLimit } from './moments'
 import type { Moment } from './moments'
 import { MusicMenu } from './MusicMenu'
-import { effectiveMusic, musicGain, musicPosition } from './music'
-import type { Music, MusicTrack } from './music'
+import { effectiveMusic, kainoKey, musicGain, musicPosition } from './music'
+import type { KainoCollection, Music, MusicTrack } from './music'
 import { BookendsMenu } from './BookendsMenu'
 import { effectiveBookends } from './bookends'
 import { useSequenceCompositor } from './sequence-compositor'
@@ -78,7 +78,8 @@ const FORMATS = {
   portrait: { ratio: '9:16', aspect: 9 / 16, size: '1080 × 1920', label: 'Portrait', icon: Smartphone },
 }
 const message = (error: unknown) => error instanceof Error ? error.message : String(error)
-const trackKey = (track: MusicTrack) => track.kind === 'file' ? `file:${track.path}` : `${track.kind}:${track.id}`
+const trackKey = (track: MusicTrack) => track.kind === 'file' ? `file:${track.path}`
+  : track.kind === 'kaino' ? kainoKey(track.id, track.collection) : `${track.kind}:${track.id}`
 
 function Key({ children }: { children: ReactNode }) {
   return <kbd>{children}</kbd>
@@ -516,8 +517,8 @@ export function App() {
     return () => { active = false }
   }, [musicKey, musicTrack, musicCacheRevision])
 
-  const refreshKainoTrack = (id: string, removed: boolean) => {
-    const key = `kaino:${id}`
+  const refreshKainoTrack = (id: string, removed: boolean, collection: KainoCollection = 'music') => {
+    const key = kainoKey(id, collection)
     if (removed) {
       musicPaths.current.delete(key)
       setPreviewMusic(current => current?.key === key ? null : current)

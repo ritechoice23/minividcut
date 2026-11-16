@@ -28,6 +28,8 @@
 
 - Cancel a download in progress or waiting in the queue. Downloads run two at a time with the rest queued and clearly labelled.
 
+- Browse Kaino's CC0 sound effects alongside music. Audition, download and use effects with the same controls, stored separately from your music.
+
 - Preview the full clip with its intro, outro, transitions, captions, and music. Playback places Play/Pause between the seek buttons and groups preview volume with mute.
 
 - Search Kaino's CC0 music catalog and download individual tracks on demand. Reuse downloads offline or remove them from the music panel.

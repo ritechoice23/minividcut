@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { Pause, Play, X } from 'lucide-react'
 import { DEFAULT_MUSIC_VOLUME, effectiveMusic, MUSIC_LIBRARY } from './music'
-import type { Music, MusicTrack } from './music'
+import type { KainoCollection, Music, MusicTrack } from './music'
 import { KainoLibrary, MusicLoading } from './KainoLibrary'
 import type { KainoTrack } from './KainoLibrary'
 
@@ -17,7 +17,7 @@ type Props = {
   onClose: () => void
   onPreview: () => void
   onChange: (scope: 'project' | 'clip', music: Music | null | undefined, path?: string) => void
-  onKainoCacheChange: (id: string, removed: boolean) => void
+  onKainoCacheChange: (id: string, removed: boolean, collection?: KainoCollection) => void
 }
 
 const AUDIO_EXTENSIONS = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus']
@@ -28,6 +28,8 @@ export const MusicMenu = memo(function MusicMenu({ project, clip, disabled, canP
   const [error, setError] = useState('')
   const [libraryOpen, setLibraryOpen] = useState(false)
   const [kainoTracks, setKainoTracks] = useState<KainoTrack[]>([])
+  const [sfxTracks, setSfxTracks] = useState<KainoTrack[]>([])
+  const [libraryCollection, setLibraryCollection] = useState<KainoCollection>('music')
   const [checkingSaved, setCheckingSaved] = useState(false)
   const [savedError, setSavedError] = useState('')
   const [savedRetry, setSavedRetry] = useState(0)
@@ -35,17 +37,25 @@ export const MusicMenu = memo(function MusicMenu({ project, clip, disabled, canP
   const target = clip ? scope : 'project'
   const current = target === 'project' ? project : clip?.music
   const active = effectiveMusic(project, clip?.music)
+  const activeKaino = current?.track.kind === 'kaino' ? current.track : null
   const canAudition = active && (target === 'clip' || active === project)
   const value = current === undefined ? 'inherit' : current === null ? 'off'
-    : current.track.kind === 'kaino' ? `kaino:${current.track.id}` : current.track.kind === 'library' ? current.track.id : 'file'
+    : current.track.kind === 'kaino' ? `${current.track.collection === 'sfx' ? 'kaino-sfx' : 'kaino'}:${current.track.id}`
+    : current.track.kind === 'library' ? current.track.id : 'file'
 
   useEffect(() => {
     if (!visible) return
     let current = true
     setCheckingSaved(true)
     setSavedError('')
-    void invoke<KainoTrack[]>('local_kaino_tracks').then(tracks => {
-      if (current) setKainoTracks(tracks)
+    void Promise.all([
+      invoke<KainoTrack[]>('local_kaino_tracks', { collection: 'music' }),
+      invoke<KainoTrack[]>('local_kaino_tracks', { collection: 'sfx' }),
+    ]).then(([music, sfx]) => {
+      if (current) {
+        setKainoTracks(music)
+        setSfxTracks(sfx)
+      }
     }).catch(error => {
       if (current) setSavedError(String(error))
     }).finally(() => {
@@ -54,7 +64,7 @@ export const MusicMenu = memo(function MusicMenu({ project, clip, disabled, canP
     return () => { current = false }
   }, [visible, savedRetry])
 
-  async function select(value: string | KainoTrack, start?: number) {
+  async function select(value: string | KainoTrack, start?: number, collection: KainoCollection = 'music') {
     setError('')
     setFailedTrack(null)
     if (value === 'inherit' || value === 'off') {
@@ -67,12 +77,18 @@ export const MusicMenu = memo(function MusicMenu({ project, clip, disabled, canP
       let track: MusicTrack
       if (typeof value !== 'string') {
         chosen = value
-        track = { kind: 'kaino', id: value.id, name: value.title }
+        track = { kind: 'kaino', id: value.id, name: value.title, collection }
+      } else if (value.startsWith('kaino-sfx:')) {
+        const downloaded = sfxTracks.find(track => `kaino-sfx:${track.id}` === value)
+        if (!downloaded) return
+        collection = 'sfx'
+        chosen = downloaded
+        track = { kind: 'kaino', id: downloaded.id, name: downloaded.title, collection }
       } else if (value.startsWith('kaino:')) {
         const downloaded = kainoTracks.find(track => `kaino:${track.id}` === value)
         if (!downloaded) return
         chosen = downloaded
-        track = { kind: 'kaino', id: downloaded.id, name: downloaded.title }
+        track = { kind: 'kaino', id: downloaded.id, name: downloaded.title, collection }
       } else if (value === 'browse') {
         const path = await open({ title: 'Choose background music', filters: [{ name: 'Audio files', extensions: AUDIO_EXTENSIONS }] })
         if (!path) return
@@ -122,9 +138,11 @@ export const MusicMenu = memo(function MusicMenu({ project, clip, disabled, canP
           <option value="off">No music</option>
           {current?.track.kind === 'file' && <option value="file" disabled>{current.track.name}</option>}
           <option value="browse">Choose an audio file…</option>
-          {current?.track.kind === 'kaino' && !kainoTracks.some(track => `kaino:${track.id}` === value) &&
-            <option value={value} disabled>{current.track.name} (download required)</option>}
-          {kainoTracks.map(track => <option key={track.id} value={`kaino:${track.id}`}>{track.title}</option>)}
+          {activeKaino && !(activeKaino.collection === 'sfx' ? sfxTracks : kainoTracks)
+            .some(track => `kaino${activeKaino.collection === 'sfx' ? '-sfx' : ''}:${track.id}` === value) &&
+            <option value={value} disabled>{activeKaino.name} (download required)</option>}
+          {kainoTracks.map(track => <option key={`music-${track.id}`} value={`kaino:${track.id}`}>{track.title}</option>)}
+          {sfxTracks.map(track => <option key={`sfx-${track.id}`} value={`kaino-sfx:${track.id}`}>SFX · {track.title}</option>)}
           {MUSIC_LIBRARY.filter(track => track.id === value)
             .map(track => <option key={track.id} value={track.id}>{track.name}</option>)}
         </select>
@@ -155,8 +173,12 @@ export const MusicMenu = memo(function MusicMenu({ project, clip, disabled, canP
       <button type="button" className="text-button media-library-trigger" aria-expanded={libraryOpen}
         aria-controls="music-library" onClick={() => setLibraryOpen(!libraryOpen)}>Music library</button>
       <div id="music-library" className="music-library" hidden={!libraryOpen}>
-        <KainoLibrary enabled={visible && libraryOpen} canUse={!pending && !disabled} saved={kainoTracks}
-          onSaved={setKainoTracks} onUse={(track, start) => void select(track, start)} onCacheChange={onKainoCacheChange} />
+        <KainoLibrary enabled={visible && libraryOpen} collection={libraryCollection}
+          onCollectionChange={setLibraryCollection} canUse={!pending && !disabled}
+          saved={libraryCollection === 'sfx' ? sfxTracks : kainoTracks}
+          onSaved={libraryCollection === 'sfx' ? setSfxTracks : setKainoTracks}
+          onUse={(track, start) => void select(track, start, libraryCollection)}
+          onCacheChange={onKainoCacheChange} />
       </div>
       {checkingSaved && <MusicLoading label="Checking downloaded tracks…" />}
       {savedError && <div className="music-retry">

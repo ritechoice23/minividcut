@@ -1,11 +1,25 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { captionAt, captionCut, captionDisplayText, captionSlice, captionStates, clipsNeedingCaptions, fitCaptionTiming, offsetCaption, restyleCaptionedClip, timedWords } from '../src/captions.ts'
+import { captionAt, captionCut, captionDisplayText, captionSlice, captionStates, captionsForKept, clipsNeedingCaptions, fitCaptionTiming, offsetCaption, restyleCaptionedClip, timedWords } from '../src/captions.ts'
 
 const track = {
   style: { preset: 'classic', position: 'bottom', size: 'medium' },
   cues: [{ start: 3, end: 5, text: 'Hello' }, { start: 5, end: 8, text: 'there' }],
 }
+
+test('captions follow the edited timeline after a ripple delete', () => {
+  const source = { ...track, cues: [
+    { start: 1, end: 2, text: 'before', words: [{ start: 1, end: 2, text: 'before' }] },
+    { start: 3, end: 4, text: 'deleted' },
+    { start: 6, end: 7, text: 'after', words: [{ start: 6, end: 7, text: 'after' }] },
+  ] }
+  const kept = [{ start: 0, end: 2 }, { start: 5, end: 8 }]
+  assert.deepEqual(
+    captionsForKept(source, kept).cues.map(cue => ({ start: cue.start, end: cue.end, text: cue.text })),
+    [{ start: 1, end: 2, text: 'before' }, { start: 3, end: 4, text: 'after' }],
+  )
+  assert.deepEqual(captionsForKept(source, kept).cues[1].words, [{ start: 3, end: 4, text: 'after' }])
+})
 
 test('batch generation skips clips with edited captions and fills empty tracks', () => {
   const saved = { id: 1, start: 0, end: 3, captions: track }

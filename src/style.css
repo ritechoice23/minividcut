@@ -316,6 +316,7 @@ h2 { font-size: 13px; font-weight: 660; letter-spacing: .03px; }
 .clip-tint.selected { border-top: 2px solid; }
 .cut-notch { position: absolute; top: 0; height: 100%; width: 2px; z-index: 1; border-left: 2px dashed; pointer-events: none; opacity: .85; }
 .overlap-line { position: absolute; top: 0; height: 3px; z-index: 2; background: #fff0ac; pointer-events: none; }
+.deleted-range { position: absolute; top: 0; bottom: 0; z-index: 2; pointer-events: none; background: repeating-linear-gradient(135deg, #1a0e0ecc 0 5px, #2b1414cc 5px 10px); border-inline: 1px solid #a4564a; }
 .range-shade { position: absolute; height: 100%; top: 0; left: 0; background: #090909c4; pointer-events: none; }
 .range-shade.right { left: auto; right: 0; }
 .selection { position: absolute; top: 0; height: 100%; border-block: 2px solid var(--lime); background: #cefa7235; pointer-events: none; }

@@ -576,6 +576,16 @@ export function App() {
   const bookends = useMemo(() => effectiveBookends(projectBookends, selectedClip?.bookends), [projectBookends, selectedClip?.bookends])
   const hasKeptEdit = keptRanges.length > 0 && (keptRanges.length > 1
     || keptRanges[0].start > 0.000001 || keptRanges[keptRanges.length - 1].end < duration - 0.000001)
+  const deletedRanges = useMemo(() => {
+    const gaps: Range[] = []
+    let previous = 0
+    for (const kept of keptRanges) {
+      if (kept.start > previous + 0.000001) gaps.push({ start: previous, end: kept.start })
+      previous = Math.max(previous, kept.end)
+    }
+    if (previous < duration - 0.000001) gaps.push({ start: previous, end: duration })
+    return gaps
+  }, [keptRanges, duration])
   const previewSegments = useMemo(() => hasKeptEdit ? keptRanges
     : selectedClip ? clipSegments(selectedClip) : [{ start: range.start, end: range.end }],
   [hasKeptEdit, keptRanges, selectedClip, range])
@@ -2383,6 +2393,9 @@ export function App() {
                     </Fragment>)}
                   {overlaps.map(overlap => pct(overlap.end) > pct(overlap.start) && <div key={overlap.start} className="overlap-line"
                     title="Overlapping clips" style={{ left: `${pct(overlap.start)}%`, width: `${pct(overlap.end) - pct(overlap.start)}%` }} />)}
+                  {deletedRanges.map(gap => pct(gap.end) > pct(gap.start) && <div key={`deleted-${gap.start}`}
+                    className="deleted-range" title="Removed from the video"
+                    style={{ left: `${pct(gap.start)}%`, width: `${pct(gap.end) - pct(gap.start)}%` }} />)}
                   <>
                     <div className="range-shade" style={{ width: `${pct(range.start)}%` }} />
                     <div className="range-shade right" style={{ width: `${100 - pct(range.end)}%` }} />

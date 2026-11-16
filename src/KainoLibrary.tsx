@@ -1,14 +1,16 @@
-import { useEffect, useRef, useState } from 'react'
-import { Channel, invoke } from '@tauri-apps/api/core'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { convertFileSrc, Channel, invoke } from '@tauri-apps/api/core'
 import { confirm } from '@tauri-apps/plugin-dialog'
+import { Check, Download, LoaderCircle, Pause, Play, RotateCcw, Search, Trash2, X } from 'lucide-react'
 
 export type KainoTrack = { id: string; title: string }
 type Page = { tracks: KainoTrack[]; nextPage: number | null }
 type Progress = {
-  stage: 'loadingCatalog' | 'retrying' | 'checkingTrack' | 'downloading' | 'saving'
+  stage: 'loadingCatalog' | 'retrying' | 'checkingTrack' | 'previewing' | 'downloading' | 'saving'
   attempt: number
   fraction?: number | null
 }
+type DownloadState = { title: string; progress: Progress | null; error: string }
 
 export function MusicLoading({ label, fraction }: { label: string; fraction?: number | null }) {
   return <div className="music-loading">
@@ -19,20 +21,84 @@ export function MusicLoading({ label, fraction }: { label: string; fraction?: nu
 
 function progressLabel(progress: Progress | null, fallback: string) {
   switch (progress?.stage) {
-    case 'retrying': return `Reconnecting to Kaino · attempt ${progress.attempt} of 3…`
+    case 'retrying': return `Reconnecting · attempt ${progress.attempt} of 3`
     case 'checkingTrack': return 'Checking track…'
-    case 'downloading': return 'Downloading track…'
-    case 'saving': return 'Verifying and saving track…'
+    case 'previewing': return 'Loading preview…'
+    case 'downloading': return 'Downloading…'
+    case 'saving': return 'Verifying and saving…'
     default: return fallback
   }
 }
+
 type Props = {
   enabled: boolean
   canUse: boolean
   saved: KainoTrack[]
-  onSaved: (tracks: KainoTrack[]) => void
+  onSaved: (update: KainoTrack[] | ((current: KainoTrack[]) => KainoTrack[])) => void
   onUse: (track: KainoTrack) => void
   onCacheChange: (id: string, removed: boolean) => void
+}
+
+type RowProps = {
+  track: KainoTrack
+  installed: boolean
+  download?: DownloadState
+  removing: boolean
+  previewing: boolean
+  previewLoading: boolean
+  canUse: boolean
+  onPreview: () => void
+  onUse: () => void
+  onDownload: () => void
+  onRetry: () => void
+  onRemove: () => void
+}
+
+function TrackRow({ track, installed, download, removing, previewing, previewLoading, canUse,
+  onPreview, onUse, onDownload, onRetry, onRemove }: RowProps) {
+  const busy = Boolean(download && !download.error)
+  const failed = Boolean(download?.error)
+  const meta = failed ? 'Download failed'
+    : busy ? progressLabel(download!.progress, 'Starting download…')
+    : removing ? 'Removing from this device…'
+    : previewing ? 'Playing preview'
+    : installed ? 'In your library'
+    : 'CC0 · Free to use'
+  return <div className={`kaino-row${previewing ? ' previewing' : ''}${failed ? ' failed' : ''}`}
+    aria-busy={busy || removing}>
+    <div className="kaino-row-main">
+      <span className="kaino-row-title">{track.title}</span>
+      <span className="kaino-row-meta">{meta}</span>
+    </div>
+    <div className="kaino-row-actions">
+      <button type="button" className={`icon-button compact preview${previewing ? ' active' : ''}`}
+        disabled={removing} aria-label={previewing ? `Stop preview of ${track.title}` : `Preview ${track.title}`}
+        aria-pressed={previewing} title={previewing ? 'Stop preview' : 'Preview before downloading'}
+        onClick={onPreview}>
+        {previewLoading ? <LoaderCircle size={14} className="spin" />
+          : previewing ? <Pause size={13} /> : <Play size={13} />}
+      </button>
+      {installed && <button type="button" className="button outline small action" disabled={!canUse || removing}
+        aria-label={`Use ${track.title}`} onClick={onUse}><Check size={12} />Use</button>}
+      {!installed && <button type="button" className="button outline small action" disabled={busy || removing}
+        aria-label={failed ? `Retry downloading ${track.title}` : `Download ${track.title}`}
+        onClick={failed ? onRetry : onDownload}>
+        {failed ? <><RotateCcw size={12} />Retry</>
+          : busy ? <><LoaderCircle size={12} className="spin" />Working</>
+          : <><Download size={12} />Download</>}
+      </button>}
+      {installed && <button type="button" className="icon-button compact remove" disabled={removing}
+        aria-label={`Remove ${track.title}`} title="Remove from this device" onClick={onRemove}>
+        {removing ? <LoaderCircle size={14} className="spin" /> : <Trash2 size={13} />}
+      </button>}
+    </div>
+    {busy && <progress className="kaino-row-progress" aria-label={`Downloading ${track.title}`}
+      max={1} value={download!.progress?.fraction ?? undefined} />}
+    {download?.error && <div className="kaino-row-error" role="alert">
+      <small>{download.error}</small>
+      <button type="button" className="text-button" onClick={onRetry}>Try again</button>
+    </div>}
+  </div>
 }
 
 export function KainoLibrary({ enabled, canUse, saved, onSaved, onUse, onCacheChange }: Props) {
@@ -43,11 +109,72 @@ export function KainoLibrary({ enabled, canUse, saved, onSaved, onUse, onCacheCh
   const [searchProgress, setSearchProgress] = useState<Progress | null>(null)
   const [searchError, setSearchError] = useState('')
   const [error, setError] = useState('')
-  const [download, setDownload] = useState<{ track: KainoTrack; progress: Progress | null } | null>(null)
-  const [failedDownload, setFailedDownload] = useState<{ track: KainoTrack; error: string } | null>(null)
-  const [removing, setRemoving] = useState(false)
+  // Each track owns its own download/removal state so operations stay independent.
+  const [downloads, setDownloads] = useState<Record<string, DownloadState>>({})
+  const [removing, setRemoving] = useState<Record<string, boolean>>({})
+  const [preview, setPreview] = useState<{ track: KainoTrack; path: string } | null>(null)
+  const [loadingPreview, setLoadingPreview] = useState('')
+  const [previewProgress, setPreviewProgress] = useState<Progress | null>(null)
+  const [previewError, setPreviewError] = useState('')
+  const audio = useRef<HTMLAudioElement>(null)
+  const previewRequest = useRef(0)
   const notify = useRef(onCacheChange)
   useEffect(() => { notify.current = onCacheChange }, [onCacheChange])
+
+  const stopPreview = useCallback(() => {
+    ++previewRequest.current
+    const element = audio.current
+    if (element) {
+      element.pause()
+      element.removeAttribute('src')
+      element.load()
+    }
+    setPreview(null)
+    setPreviewError('')
+  }, [])
+
+  useEffect(() => {
+    if (!enabled) stopPreview()
+  }, [enabled, stopPreview])
+  useEffect(() => stopPreview, [stopPreview])
+
+  useEffect(() => {
+    const element = audio.current
+    if (!element || !preview) return
+    element.src = convertFileSrc(preview.path)
+    element.currentTime = 0
+    void element.play().catch(() => setPreviewError('This preview could not play here.'))
+  }, [preview])
+
+  async function previewTrack(track: KainoTrack) {
+    if (preview?.track.id === track.id) {
+      stopPreview()
+      return
+    }
+    stopPreview()
+    const request = ++previewRequest.current
+    setLoadingPreview(track.id)
+    setError('')
+    const progress = new Channel<Progress>(update => {
+      if (request === previewRequest.current) setPreviewProgress(update)
+    })
+    try {
+      const path = await invoke<string>('preview_kaino', { id: track.id, progress })
+      if (request === previewRequest.current) setPreview({ track, path })
+    } catch (cause) {
+      if (request === previewRequest.current) setPreviewError(String(cause))
+    } finally {
+      if (request === previewRequest.current) {
+        setLoadingPreview('')
+        setPreviewProgress(null)
+      }
+    }
+  }
+
+  function useTrack(track: KainoTrack) {
+    stopPreview()
+    onUse(track)
+  }
 
   useEffect(() => {
     if (!enabled) return
@@ -58,70 +185,96 @@ export function KainoLibrary({ enabled, canUse, saved, onSaved, onUse, onCacheCh
     const progress = new Channel<Progress>(update => { if (current) setSearchProgress(update) })
     void invoke<Page>('search_kaino', { ...requested, progress }).then(result => {
       if (current) setPage(result)
-    }).catch(error => {
-      if (current) {
-        setSearchError(String(error))
-      }
+    }).catch(cause => {
+      if (current) setSearchError(String(cause))
     }).finally(() => {
       if (current) setLoading(false)
     })
     return () => { current = false }
   }, [enabled, requested])
 
+  function setDownload(id: string, update: Partial<DownloadState>) {
+    setDownloads(current => ({
+      ...current,
+      [id]: { ...(current[id] ?? { title: id, progress: null, error: '' }), ...update },
+    }))
+  }
+
   async function downloadTrack(track: KainoTrack) {
     setError('')
-    setFailedDownload(null)
-    setDownload({ track, progress: null })
+    setDownload(track.id, { title: track.title, progress: null, error: '' })
     const progress = new Channel<Progress>(update => {
-      setDownload(current => current?.track.id === track.id ? { ...current, progress: update } : current)
+      setDownloads(current => {
+        const state = current[track.id]
+        return state && !state.error
+          ? { ...current, [track.id]: { ...state, progress: update } }
+          : current
+      })
     })
     try {
       const downloaded = await invoke<KainoTrack>('download_kaino', { id: track.id, progress })
-      onSaved([...saved.filter(item => item.id !== downloaded.id), downloaded])
+      onSaved(current => [...current.filter(item => item.id !== downloaded.id), downloaded]
+        .sort((a, b) => a.title.localeCompare(b.title)))
       notify.current(track.id, false)
-    } catch (error) {
-      setFailedDownload({ track, error: String(error) })
-    } finally {
-      setDownload(null)
+      setDownloads(current => {
+        const next = { ...current }
+        delete next[track.id]
+        return next
+      })
+    } catch (cause) {
+      setDownload(track.id, { error: String(cause) })
     }
   }
 
   async function removeTrack(track: KainoTrack) {
-    setRemoving(true)
+    setRemoving(current => ({ ...current, [track.id]: true }))
     setError('')
     try {
       if (!await confirm(`Remove “${track.title}” from this computer? Drafts using it will need the track downloaded again.`,
         { title: 'Remove downloaded music?', okLabel: 'Remove', kind: 'warning' })) return
       await invoke('remove_kaino', { id: track.id })
-      onSaved(saved.filter(item => item.id !== track.id))
+      onSaved(current => current.filter(item => item.id !== track.id))
       notify.current(track.id, true)
-    } catch (error) {
-      setError(String(error))
+      if (preview?.track.id === track.id) stopPreview()
+    } catch (cause) {
+      setError(String(cause))
     } finally {
-      setRemoving(false)
+      setRemoving(current => {
+        const next = { ...current }
+        delete next[track.id]
+        return next
+      })
     }
   }
 
-  const working = Boolean(download) || removing
+  const active = Object.values(downloads).filter(state => !state.error)
   const nextPage = page?.nextPage
+  const row = (track: KainoTrack, installed: boolean) => <TrackRow key={track.id} track={track}
+    installed={installed} download={downloads[track.id]} removing={Boolean(removing[track.id])}
+    previewing={preview?.track.id === track.id} previewLoading={loadingPreview === track.id}
+    canUse={canUse} onPreview={() => void previewTrack(track)} onUse={() => useTrack(track)}
+    onDownload={() => void downloadTrack(track)} onRetry={() => void downloadTrack(track)}
+    onRemove={() => void removeTrack(track)} />
+
   return <div className="kaino-library">
-    <div className="kaino-heading"><strong>Kaino music</strong><small>CC0 · No attribution required</small></div>
-    {saved.length > 0 && <details>
-      <summary>Downloaded ({saved.length})</summary>
-      {saved.map(track => <div className="music-library-row" key={track.id}>
-        <span>{track.title}</span>
-        <button type="button" className="button outline small" disabled={!canUse || working}
-          aria-label={`Use ${track.title}`} onClick={() => onUse(track)}>Use</button>
-        <button type="button" className="text-button" disabled={working}
-          aria-label={`Remove ${track.title}`} onClick={() => void removeTrack(track)}>Remove</button>
-      </div>)}
-    </details>}
+    <div className="kaino-heading">
+      <strong>Kaino music</strong>
+      <span className="kaino-badge">CC0 · no attribution</span>
+    </div>
+    {active.length > 0 && <div className="kaino-session" role="status">
+      <LoaderCircle size={13} className="spin" />
+      <span>{active.length === 1 ? `Downloading “${active[0].title}”` : `Downloading ${active.length} tracks`}</span>
+      <span className="kaino-session-count">{active.length}</span>
+    </div>}
     <form className="kaino-search" onSubmit={event => {
       event.preventDefault()
       setRequested({ query: query.trim(), page: 1 })
     }}>
-      <input type="search" aria-label="Search Kaino music" placeholder="Search tracks" maxLength={100}
+      <span className="kaino-search-icon"><Search size={13} /></span>
+      <input type="search" aria-label="Search Kaino music" placeholder="Search CC0 tracks" maxLength={100}
         value={query} onChange={event => setQuery(event.target.value)} />
+      {query && <button type="button" className="icon-button compact clear" aria-label="Clear search"
+        onClick={() => setQuery('')}><X size={13} /></button>}
       <button className="button outline small" type="submit">Search</button>
     </form>
     {loading && <MusicLoading label={progressLabel(searchProgress, 'Loading Kaino tracks…')} />}
@@ -130,33 +283,26 @@ export function KainoLibrary({ enabled, canUse, saved, onSaved, onUse, onCacheCh
       <button type="button" className="button outline small"
         onClick={() => setRequested(current => ({ ...current }))}>Retry catalog</button>
     </div>}
-    {!loading && !searchError && page?.tracks.length === 0 && <small>No tracks found.</small>}
-    {!loading && page?.tracks.map(track => {
-          const installed = saved.some(item => item.id === track.id)
-          const downloading = download?.track.id === track.id
-          return <div className="music-library-row" key={track.id}>
-            <span>{track.title}</span>
-            <button type="button" className="button outline small" disabled={working || (installed && !canUse)}
-              aria-label={installed ? `Use ${track.title} from Kaino` : `Download ${track.title}`}
-              onClick={() => installed ? onUse(track) : void downloadTrack(track)}>
-              {downloading ? 'Downloading…' : installed ? 'Use' : 'Download'}
-            </button>
-          </div>
-        })}
-    {download && <MusicLoading label={progressLabel(download.progress, `Opening ${download.track.title}…`)}
-      fraction={download.progress?.fraction} />}
-    {failedDownload && <div className="music-retry">
-      <small role="alert">{failedDownload.track.title} · {failedDownload.error}</small>
-      <button type="button" className="button outline small" disabled={working}
-        onClick={() => void downloadTrack(failedDownload.track)}>Retry download</button>
+    {saved.length > 0 && <details className="kaino-saved" open>
+      <summary>In your library <span className="kaino-count">{saved.length}</span></summary>
+      <div className="kaino-rows">{saved.map(track => row(track, true))}</div>
+    </details>}
+    {page && !loading && !searchError && <div className="kaino-results">
+      <div className="kaino-section-label">{requested.query ? 'Search results' : 'Popular tracks'}</div>
+      {page.tracks.length === 0
+        ? <p className="kaino-empty">No tracks found. Try a different search.</p>
+        : <div className="kaino-rows">{page.tracks.map(track => row(track, saved.some(item => item.id === track.id)))}</div>}
     </div>}
-    {removing && <MusicLoading label="Removing track…" />}
+    {loadingPreview && <MusicLoading label={progressLabel(previewProgress, 'Loading preview…')} />}
+    {previewError && <div className="kaino-row-error" role="alert"><small>{previewError}</small></div>}
+    {error && <small role="alert">{error}</small>}
     {!loading && !searchError && (requested.page > 1 || Boolean(nextPage)) && <div className="kaino-pagination">
       <button type="button" className="button outline small" disabled={requested.page <= 1}
         onClick={() => setRequested(current => ({ ...current, page: current.page - 1 }))}>Previous</button>
+      <span className="kaino-page">Page {requested.page}</span>
       <button type="button" className="button outline small" disabled={!nextPage}
         onClick={() => { if (nextPage) setRequested(current => ({ ...current, page: nextPage })) }}>Next</button>
     </div>}
-    {error && <small role="alert">{error}</small>}
+    <audio ref={audio} hidden preload="none" onEnded={() => setPreview(null)} />
   </div>
 }

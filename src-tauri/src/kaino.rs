@@ -13,6 +13,10 @@ const BASE: &str = "https://kaino.dev";
 const DOWNLOAD_HOST: &str = "a3abcd2451736f6a3867db58e7c8ec05.r2.cloudflarestorage.com";
 const MAX_AUDIO: usize = 32 * 1024 * 1024;
 const NETWORK_ATTEMPTS: u8 = 3;
+// Auditions are a short, partial fetch kept apart from the downloaded library.
+const PREVIEW_BYTES: usize = 512 * 1024;
+const PREVIEW_MIN_BYTES: usize = 4 * 1024;
+const PREVIEW_DIR: &str = ".previews";
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Track {
@@ -26,6 +30,75 @@ struct PublishedTrack {
     track: Track,
     collection: String,
     licence: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Details {
+    #[serde(flatten)]
+    published: PublishedTrack,
+    downloads: Vec<Download>,
+}
+
+#[derive(Deserialize)]
+struct Download {
+    format: String,
+    bytes: Option<usize>,
+}
+
+fn preview_dir(root: &Path) -> PathBuf {
+    root.join(PREVIEW_DIR)
+}
+
+fn preview_path(root: &Path, id: &str) -> Result<PathBuf> {
+    if !valid_id(id) {
+        return Err("Invalid Kaino track.".into());
+    }
+    Ok(preview_dir(root).join(format!("{id}.mp3")))
+}
+
+fn preview_usable(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|meta| {
+        meta.is_file()
+            && meta.len() >= PREVIEW_MIN_BYTES as u64
+            && meta.len() <= PREVIEW_BYTES as u64
+    })
+}
+
+fn looks_like_mp3(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"ID3") || (bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] & 0xE0 == 0xE0)
+}
+
+async fn track_details(
+    client: &reqwest::Client,
+    progress: &Channel<MusicProgress>,
+    id: &str,
+) -> Result<Details> {
+    let url = format!("{BASE}/api/library/music/{id}");
+    let details = retry_network(progress, |attempt| {
+        let (client, url, progress) = (client, &url, progress);
+        async move {
+            report(progress, "checkingTrack", attempt, None);
+            let response = client
+                .get(url.as_str())
+                .send()
+                .await
+                .map_err(network_error)?;
+            read_json::<Details>(response).await
+        }
+    })
+    .await?;
+    if !eligible(&details.published) || details.published.track.id != id {
+        return Err("This track is no longer available from Kaino under CC0.".into());
+    }
+    Ok(details)
+}
+
+fn mp3_download(details: &Details) -> Result<&Download> {
+    details
+        .downloads
+        .iter()
+        .find(|file| file.format == "mp3")
+        .ok_or_else(|| "Kaino does not offer an MP3 for this track.".into())
 }
 
 #[derive(Deserialize)]
@@ -313,48 +386,15 @@ pub async fn download_kaino(
     id: String,
     progress: Channel<MusicProgress>,
 ) -> Result<Track> {
-    #[derive(Deserialize)]
-    struct Details {
-        #[serde(flatten)]
-        published: PublishedTrack,
-        downloads: Vec<Download>,
-    }
-    #[derive(Deserialize)]
-    struct Download {
-        format: String,
-        bytes: Option<usize>,
-    }
-
     let root = root(&app)?;
     let directory = track_dir(&root, &id)?;
     if let Some(track) = cached_track(&directory, &id) {
         return Ok(track);
     }
     let client = client(Duration::from_secs(90))?;
-    let url = format!("{BASE}/api/library/music/{id}");
-    let details = retry_network(&progress, |attempt| {
-        let (client, url, progress) = (&client, &url, &progress);
-        async move {
-            report(&progress, "checkingTrack", attempt, None);
-            let response = client
-                .get(url.as_str())
-                .send()
-                .await
-                .map_err(network_error)?;
-            read_json::<Details>(response).await
-        }
-    })
-    .await?;
-    if !eligible(&details.published) || details.published.track.id != id {
-        return Err("This track is no longer available from Kaino under CC0.".into());
-    }
-    let listed_size = details
-        .downloads
-        .iter()
-        .find(|file| file.format == "mp3")
-        .ok_or("Kaino does not offer an MP3 for this track.")?
-        .bytes;
-    let download_url = format!("{url}/download?format=mp3");
+    let details = track_details(&client, &progress, &id).await?;
+    let listed_size = mp3_download(&details)?.bytes;
+    let download_url = format!("{BASE}/api/library/music/{id}/download?format=mp3");
     let bytes = retry_network(&progress, |attempt| {
         let (client, download_url, progress) = (&client, &download_url, &progress);
         async move {
@@ -429,6 +469,97 @@ fn save_track(root: &Path, directory: &Path, track: Track, bytes: &[u8]) -> Resu
         Err(error) => cached_track(directory, &track.id)
             .ok_or_else(|| format!("Could not save the track: {error}")),
     }
+}
+
+async fn fetch_preview(
+    client: &reqwest::Client,
+    progress: &Channel<MusicProgress>,
+    id: &str,
+) -> Result<Vec<u8>> {
+    let url = format!("{BASE}/api/library/music/{id}/download?format=mp3");
+    retry_network(progress, |attempt| {
+        let (client, url, progress) = (client, &url, progress);
+        async move {
+            report(progress, "previewing", attempt, None);
+            let mut response = client
+                .get(url.as_str())
+                .header(
+                    reqwest::header::RANGE,
+                    format!("bytes=0-{}", PREVIEW_BYTES - 1),
+                )
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+                .map_err(network_error)?;
+            if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+                let range = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_RANGE)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
+                if !range.starts_with("bytes 0-") {
+                    return Err("Kaino returned an unexpected preview range.".into());
+                }
+            }
+            // Stop reading once we have enough for an audition, even if the
+            // server ignored the range request and started sending the full file.
+            let mut bytes = Vec::with_capacity(PREVIEW_BYTES);
+            while bytes.len() < PREVIEW_BYTES {
+                let Some(chunk) = response.chunk().await.map_err(network_error)? else {
+                    break;
+                };
+                bytes.extend_from_slice(&chunk);
+            }
+            bytes.truncate(PREVIEW_BYTES);
+            if bytes.len() < PREVIEW_MIN_BYTES || !looks_like_mp3(&bytes) {
+                return Err(RequestError {
+                    message: "Kaino did not return a readable preview.".into(),
+                    retry: true,
+                });
+            }
+            Ok(bytes)
+        }
+    })
+    .await
+}
+
+/// Fetch a short, playable sample of a Kaino track without adding it to the
+/// downloaded library. The partial MP3 is cached separately so repeated
+/// auditions work offline and never count as an installed track.
+#[tauri::command]
+pub async fn preview_kaino(
+    app: AppHandle,
+    id: String,
+    progress: Channel<MusicProgress>,
+) -> Result<PathBuf> {
+    let root = root(&app)?;
+    let path = preview_path(&root, &id)?;
+    if preview_usable(&path) {
+        app.asset_protocol_scope()
+            .allow_file(&path)
+            .map_err(|error| error.to_string())?;
+        return Ok(path);
+    }
+    let client = client(Duration::from_secs(30))?;
+    let details = track_details(&client, &progress, &id).await?;
+    mp3_download(&details)?;
+    let bytes = fetch_preview(&client, &progress, &id).await?;
+    report(&progress, "saving", 1, None);
+    let path = video::background(move || {
+        let directory = preview_dir(&root);
+        let path = preview_path(&root, &id)?;
+        fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        let stage = tempfile::tempdir_in(&directory).map_err(|error| error.to_string())?;
+        let file = stage.path().join("preview.mp3");
+        fs::write(&file, &bytes).map_err(|error| error.to_string())?;
+        fs::rename(&file, &path).map_err(|error| error.to_string())?;
+        Ok::<PathBuf, String>(path)
+    })
+    .await?;
+    app.asset_protocol_scope()
+        .allow_file(&path)
+        .map_err(|error| error.to_string())?;
+    Ok(path)
 }
 
 #[tauri::command]
@@ -509,6 +640,55 @@ mod tests {
         for id in ["../track", "con.mp3", "a--b", "a/b", "a%2fb"] {
             assert!(track_dir(Path::new("music"), id).is_err());
         }
+    }
+
+    #[test]
+    fn previews_use_a_separate_cache_and_are_never_mistaken_for_downloaded_tracks() {
+        let root = Path::new("music");
+        assert!(!valid_id(PREVIEW_DIR));
+        assert_eq!(
+            preview_path(root, "afrobeat-01").unwrap(),
+            preview_dir(root).join("afrobeat-01.mp3")
+        );
+        for id in ["../track", "a--b", "A-ok"] {
+            assert!(preview_path(root, id).is_err());
+        }
+    }
+
+    #[test]
+    fn only_short_readable_samples_are_reused_as_previews() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("afrobeat-01.mp3");
+        assert!(!preview_usable(&path));
+        fs::write(&path, vec![0; PREVIEW_MIN_BYTES - 1]).unwrap();
+        assert!(!preview_usable(&path));
+        fs::write(&path, vec![0; PREVIEW_MIN_BYTES]).unwrap();
+        assert!(preview_usable(&path));
+        fs::write(&path, vec![0; PREVIEW_BYTES + 1]).unwrap();
+        assert!(!preview_usable(&path));
+    }
+
+    #[test]
+    fn previews_reject_non_audio_responses() {
+        assert!(looks_like_mp3(b"ID3\x04\0\0\0\0\0\0"));
+        assert!(looks_like_mp3(&[0xFF, 0xFB, 0x90, 0x64]));
+        assert!(!looks_like_mp3(b"<!doctype html>"));
+        assert!(!looks_like_mp3(b""));
+    }
+
+    #[test]
+    #[ignore = "requires network access to kaino.dev"]
+    fn fetches_a_playable_preview_from_kaino() {
+        tauri::async_runtime::block_on(async {
+            let progress = Channel::new(|_| Ok(()));
+            let client = client(Duration::from_secs(30)).unwrap();
+            let bytes = fetch_preview(&client, &progress, "acoustic-folk-01")
+                .await
+                .unwrap();
+            assert!(bytes.len() >= PREVIEW_MIN_BYTES);
+            assert!(bytes.len() <= PREVIEW_BYTES);
+            assert!(looks_like_mp3(&bytes));
+        });
     }
 
     #[test]

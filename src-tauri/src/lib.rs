@@ -33,6 +33,7 @@ pub fn run() {
             bookends::inspect_bookend,
             kaino::search_kaino,
             kaino::local_kaino_tracks,
+            kaino::preview_kaino,
             kaino::download_kaino,
             kaino::remove_kaino,
             video::thumbnails,

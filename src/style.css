@@ -99,7 +99,7 @@ svg { flex-shrink: 0; }
 .kaino-row-actions .button.action { border-color: #3e4a30; background: #20271a; color: #dcecbf; }
 .kaino-row-actions .button.action:hover:not(:disabled) { border-color: #566b3c; background: #2a3520; color: #fff; }
 .kaino-row-actions .preview.active { border-color: #4a5c34; background: #2b371e; color: var(--lime); }
-.kaino-row-actions .remove:hover:not(:disabled) { border-color: #5d3a32; color: #f0b6a7; }
+.kaino-row-actions .remove:hover:not(:disabled), .kaino-row-actions .cancel:hover:not(:disabled) { border-color: #5d3a32; color: #f0b6a7; }
 .kaino-row-progress, .kaino-row-error { grid-column: 1 / -1; }
 .kaino-row-progress { width: 100%; height: 4px; accent-color: var(--lime); }
 .kaino-row-error { display: flex; align-items: center; justify-content: space-between; gap: 8px; }

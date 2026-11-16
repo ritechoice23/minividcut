@@ -2,12 +2,17 @@ use crate::video::{self, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
+    collections::HashMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
-use tauri::{ipc::Channel, AppHandle, Manager};
+use tauri::{ipc::Channel, AppHandle, Manager, State};
 
 const BASE: &str = "https://kaino.dev";
 const DOWNLOAD_HOST: &str = "a3abcd2451736f6a3867db58e7c8ec05.r2.cloudflarestorage.com";
@@ -17,6 +22,61 @@ const NETWORK_ATTEMPTS: u8 = 3;
 const PREVIEW_BYTES: usize = 512 * 1024;
 const PREVIEW_MIN_BYTES: usize = 4 * 1024;
 const PREVIEW_DIR: &str = ".previews";
+const CANCELLED: &str = "Download canceled.";
+
+#[derive(Default)]
+pub struct DownloadCancels {
+    jobs: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+impl DownloadCancels {
+    fn begin(&self, id: &str) -> Arc<AtomicBool> {
+        let flag = Arc::new(AtomicBool::new(false));
+        if let Ok(mut jobs) = self.jobs.lock() {
+            jobs.insert(id.to_owned(), Arc::clone(&flag));
+        }
+        flag
+    }
+
+    fn cancel(&self, id: &str) {
+        if let Ok(jobs) = self.jobs.lock() {
+            if let Some(flag) = jobs.get(id) {
+                flag.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn finish(&self, id: &str) {
+        if let Ok(mut jobs) = self.jobs.lock() {
+            jobs.remove(id);
+        }
+    }
+}
+
+struct CancelGuard<'a> {
+    cancels: &'a DownloadCancels,
+    id: String,
+}
+
+impl Drop for CancelGuard<'_> {
+    fn drop(&mut self) {
+        self.cancels.finish(&self.id);
+    }
+}
+
+#[tauri::command]
+pub fn cancel_kaino(id: String, cancels: State<'_, DownloadCancels>) -> Result<()> {
+    cancels.cancel(&id);
+    Ok(())
+}
+
+fn check_cancel(flag: &AtomicBool) -> Result<()> {
+    if flag.load(Ordering::Relaxed) {
+        Err(CANCELLED.into())
+    } else {
+        Ok(())
+    }
+}
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Track {
@@ -385,19 +445,26 @@ pub async fn download_kaino(
     app: AppHandle,
     id: String,
     progress: Channel<MusicProgress>,
+    cancels: State<'_, DownloadCancels>,
 ) -> Result<Track> {
     let root = root(&app)?;
     let directory = track_dir(&root, &id)?;
     if let Some(track) = cached_track(&directory, &id) {
         return Ok(track);
     }
+    let flag = cancels.begin(&id);
+    let _guard = CancelGuard { cancels: &cancels, id: id.clone() };
+    check_cancel(&flag)?;
     let client = client(Duration::from_secs(90))?;
     let details = track_details(&client, &progress, &id).await?;
+    check_cancel(&flag)?;
     let listed_size = mp3_download(&details)?.bytes;
     let download_url = format!("{BASE}/api/library/music/{id}/download?format=mp3");
     let bytes = retry_network(&progress, |attempt| {
         let (client, download_url, progress) = (&client, &download_url, &progress);
+        let flag = Arc::clone(&flag);
         async move {
+            check_cancel(&flag).map_err(|message| RequestError { message, retry: false })?;
             report(&progress, "downloading", attempt, None);
             let mut response = client
                 .get(download_url.as_str())
@@ -414,6 +481,7 @@ pub async fn download_kaino(
             let mut bytes = Vec::with_capacity(expected.unwrap_or(0));
             let mut last_percent = None;
             while let Some(chunk) = response.chunk().await.map_err(network_error)? {
+                check_cancel(&flag).map_err(|message| RequestError { message, retry: false })?;
                 if bytes.len() + chunk.len() > expected.unwrap_or(MAX_AUDIO) {
                     return Err("Invalid track size.".into());
                 }
@@ -441,6 +509,7 @@ pub async fn download_kaino(
         }
     })
     .await?;
+    check_cancel(&flag)?;
     report(&progress, "saving", 1, None);
     let track = details.published.track;
     video::background(move || save_track(&root, &directory, track, &bytes)).await
@@ -640,6 +709,21 @@ mod tests {
         for id in ["../track", "con.mp3", "a--b", "a/b", "a%2fb"] {
             assert!(track_dir(Path::new("music"), id).is_err());
         }
+    }
+
+    #[test]
+    fn cancellation_is_scoped_to_one_download_and_cleared_when_it_finishes() {
+        let cancels = DownloadCancels::default();
+        let first = cancels.begin("track-a");
+        let second = cancels.begin("track-b");
+        assert!(check_cancel(&first).is_ok());
+        assert!(check_cancel(&second).is_ok());
+        cancels.cancel("track-a");
+        assert_eq!(check_cancel(&first).unwrap_err(), CANCELLED);
+        assert!(check_cancel(&second).is_ok());
+        cancels.finish("track-a");
+        let fresh = cancels.begin("track-a");
+        assert!(check_cancel(&fresh).is_ok());
     }
 
     #[test]

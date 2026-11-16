@@ -11,7 +11,16 @@ type Progress = {
   attempt: number
   fraction?: number | null
 }
-type DownloadState = { title: string; progress: Progress | null; error: string }
+type DownloadState = {
+  title: string
+  progress: Progress | null
+  error: string
+  queued?: boolean
+  canceled?: boolean
+}
+
+const MAX_CONCURRENT_DOWNLOADS = 2
+const CANCEL_MESSAGE = 'Download canceled.'
 
 export function MusicLoading({ label, fraction }: { label: string; fraction?: number | null }) {
   return <div className="music-loading">
@@ -44,6 +53,7 @@ type RowProps = {
   track: KainoTrack
   installed: boolean
   download?: DownloadState
+  queued: boolean
   removing: boolean
   previewing: boolean
   previewLoading: boolean
@@ -52,14 +62,18 @@ type RowProps = {
   onUse: () => void
   onDownload: () => void
   onRetry: () => void
+  onCancel: () => void
   onRemove: () => void
 }
 
-function TrackRow({ track, installed, download, removing, previewing, previewLoading, canUse,
-  onPreview, onUse, onDownload, onRetry, onRemove }: RowProps) {
-  const busy = Boolean(download && !download.error)
+function TrackRow({ track, installed, download, queued, removing, previewing, previewLoading, canUse,
+  onPreview, onUse, onDownload, onRetry, onCancel, onRemove }: RowProps) {
+  const busy = Boolean(download && !download.error && !queued)
   const failed = Boolean(download?.error)
-  const meta = failed ? 'Download failed'
+  const canceled = Boolean(download?.canceled)
+  const meta = queued ? 'Queued…'
+    : canceled ? 'Canceled'
+    : failed ? 'Download failed'
     : busy ? progressLabel(download!.progress, 'Starting download…')
     : removing ? 'Removing from this device…'
     : previewing ? 'Playing preview'
@@ -81,12 +95,17 @@ function TrackRow({ track, installed, download, removing, previewing, previewLoa
       </button>
       {installed && <button type="button" className="button outline small action" disabled={!canUse || removing}
         aria-label={`Use ${track.title}`} onClick={onUse}><Check size={12} />Use</button>}
-      {!installed && <button type="button" className="button outline small action" disabled={busy || removing}
-        aria-label={failed ? `Retry downloading ${track.title}` : `Download ${track.title}`}
-        onClick={failed ? onRetry : onDownload}>
-        {failed ? <><RotateCcw size={12} />Retry</>
+      {!installed && <button type="button" className="button outline small action" disabled={busy || queued || removing}
+        aria-label={queued ? `${track.title} is queued` : failed ? `Retry downloading ${track.title}` : `Download ${track.title}`}
+        onClick={queued ? onCancel : failed ? onRetry : onDownload}>
+        {queued ? <><LoaderCircle size={12} className="spin" />Queued</>
+          : failed ? <><RotateCcw size={12} />Retry</>
           : busy ? <><LoaderCircle size={12} className="spin" />Working</>
           : <><Download size={12} />Download</>}
+      </button>}
+      {(busy || queued) && <button type="button" className="icon-button compact cancel" disabled={removing}
+        aria-label={`Cancel download of ${track.title}`} title="Cancel download" onClick={onCancel}>
+        <X size={13} />
       </button>}
       {installed && <button type="button" className="icon-button compact remove" disabled={removing}
         aria-label={`Remove ${track.title}`} title="Remove from this device" onClick={onRemove}>
@@ -122,6 +141,8 @@ export function KainoLibrary({ enabled, canUse, saved, onSaved, onUse, onCacheCh
   const [inPoints, setInPoints] = useState<Record<string, number>>({})
   const audio = useRef<HTMLAudioElement>(null)
   const previewRequest = useRef(0)
+  const downloadQueue = useRef<KainoTrack[]>([])
+  const activeDownloads = useRef(new Set<string>())
   const notify = useRef(onCacheChange)
   useEffect(() => { notify.current = onCacheChange }, [onCacheChange])
 
@@ -207,13 +228,20 @@ export function KainoLibrary({ enabled, canUse, saved, onSaved, onUse, onCacheCh
     }))
   }
 
-  async function downloadTrack(track: KainoTrack) {
-    setError('')
-    setDownload(track.id, { title: track.title, progress: null, error: '' })
+  function pumpQueue() {
+    while (activeDownloads.current.size < MAX_CONCURRENT_DOWNLOADS && downloadQueue.current.length) {
+      const next = downloadQueue.current.shift()
+      if (next) void startDownload(next)
+    }
+  }
+
+  async function startDownload(track: KainoTrack) {
+    activeDownloads.current.add(track.id)
+    setDownload(track.id, { title: track.title, progress: null, error: '', queued: false, canceled: false })
     const progress = new Channel<Progress>(update => {
       setDownloads(current => {
         const state = current[track.id]
-        return state && !state.error
+        return state && !state.error && !state.canceled
           ? { ...current, [track.id]: { ...state, progress: update } }
           : current
       })
@@ -229,7 +257,35 @@ export function KainoLibrary({ enabled, canUse, saved, onSaved, onUse, onCacheCh
         return next
       })
     } catch (cause) {
-      setDownload(track.id, { error: String(cause) })
+      const message = String(cause)
+      setDownload(track.id, { error: message, canceled: message.includes('canceled') })
+    } finally {
+      activeDownloads.current.delete(track.id)
+      pumpQueue()
+    }
+  }
+
+  function downloadTrack(track: KainoTrack) {
+    setError('')
+    setDownload(track.id, { title: track.title, progress: null, error: '', queued: false, canceled: false })
+    if (activeDownloads.current.size >= MAX_CONCURRENT_DOWNLOADS) {
+      downloadQueue.current.push(track)
+      setDownload(track.id, { queued: true })
+      return
+    }
+    void startDownload(track)
+  }
+
+  async function cancelDownload(track: KainoTrack) {
+    if (downloads[track.id]?.queued) {
+      downloadQueue.current = downloadQueue.current.filter(item => item.id !== track.id)
+      setDownload(track.id, { error: CANCEL_MESSAGE, canceled: true, queued: false })
+      return
+    }
+    try {
+      await invoke('cancel_kaino', { id: track.id })
+    } catch (cause) {
+      setError(String(cause))
     }
   }
 
@@ -254,24 +310,27 @@ export function KainoLibrary({ enabled, canUse, saved, onSaved, onUse, onCacheCh
     }
   }
 
-  const active = Object.values(downloads).filter(state => !state.error)
+  const states = Object.values(downloads)
+  const active = states.filter(state => !state.error && !state.queued)
+  const queued = states.filter(state => state.queued).length
   const nextPage = page?.nextPage
   const row = (track: KainoTrack, installed: boolean) => <TrackRow key={track.id} track={track}
-    installed={installed} download={downloads[track.id]} removing={Boolean(removing[track.id])}
+    installed={installed} download={downloads[track.id]} queued={Boolean(downloads[track.id]?.queued)}
+    removing={Boolean(removing[track.id])}
     previewing={preview?.track.id === track.id} previewLoading={loadingPreview === track.id}
     canUse={canUse} onPreview={() => void previewTrack(track)} onUse={() => useTrack(track)}
     onDownload={() => void downloadTrack(track)} onRetry={() => void downloadTrack(track)}
-    onRemove={() => void removeTrack(track)} />
+    onCancel={() => void cancelDownload(track)} onRemove={() => void removeTrack(track)} />
 
   return <div className="kaino-library">
     <div className="kaino-heading">
       <strong>Kaino music</strong>
       <span className="kaino-badge">CC0 · no attribution</span>
     </div>
-    {active.length > 0 && <div className="kaino-session" role="status">
+    {(active.length > 0 || queued > 0) && <div className="kaino-session" role="status">
       <LoaderCircle size={13} className="spin" />
-      <span>{active.length === 1 ? `Downloading “${active[0].title}”` : `Downloading ${active.length} tracks`}</span>
-      <span className="kaino-session-count">{active.length}</span>
+      <span>{active.length === 1 ? `Downloading “${active[0].title}”` : `Downloading ${active.length} tracks`}{queued ? ` · ${queued} queued` : ''}</span>
+      <span className="kaino-session-count">{active.length + queued}</span>
     </div>}
     <form className="kaino-search" onSubmit={event => {
       event.preventDefault()

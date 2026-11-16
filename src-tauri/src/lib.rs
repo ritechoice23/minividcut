@@ -18,6 +18,7 @@ pub fn run() {
         .manage(captions::CaptionEngine::default())
         .manage(titles::TitleEngine::default())
         .manage(caption_overlay::CaptionOverlays::default())
+        .manage(kaino::DownloadCancels::default())
         .invoke_handler(tauri::generate_handler![
             captions::caption_model,
             captions::generate_captions,
@@ -37,6 +38,7 @@ pub fn run() {
             kaino::local_kaino_tracks,
             kaino::preview_kaino,
             kaino::download_kaino,
+            kaino::cancel_kaino,
             kaino::remove_kaino,
             video::thumbnails,
             video::clip_thumbnails,

@@ -26,6 +26,8 @@
 
 - Show the auditioned sample as a waveform with a draggable start marker, so the in-point can be chosen by ear and by eye.
 
+- Cancel a download in progress or waiting in the queue. Downloads run two at a time with the rest queued and clearly labelled.
+
 - Preview the full clip with its intro, outro, transitions, captions, and music. Playback places Play/Pause between the seek buttons and groups preview volume with mute.
 
 - Search Kaino's CC0 music catalog and download individual tracks on demand. Reuse downloads offline or remove them from the music panel.

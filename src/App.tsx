@@ -31,7 +31,7 @@ import type { CaptionCue, CaptionStyle, CaptionTrack } from './captions'
 import { DEFAULT_MOMENT_QUERY, missingTranscriptRanges, MOMENT_BATCH_SECONDS, momentCandidates, momentLimit } from './moments'
 import type { Moment } from './moments'
 import { MusicMenu } from './MusicMenu'
-import { effectiveMusic, musicPosition } from './music'
+import { effectiveMusic, musicGain, musicPosition } from './music'
 import type { Music, MusicTrack } from './music'
 import { BookendsMenu } from './BookendsMenu'
 import { effectiveBookends } from './bookends'
@@ -532,10 +532,11 @@ export function App() {
     const audio = musicPlayer.current
     const player = video.current
     if (!audio || !player) return
-    audio.volume = (activeMusic?.volume ?? 0) * previewVolume / 10_000
+    const gain = musicGain(player.currentTime, range.start, range.end, activeMusic?.fade)
+    audio.volume = (activeMusic?.volume ?? 0) * previewVolume / 10_000 * gain
     audio.muted = muted
     if (audio.readyState === 0) return
-    const target = musicPosition(player.currentTime, range.start, audio.duration)
+    const target = musicPosition(player.currentTime, range.start, audio.duration, activeMusic?.start)
     const drift = Math.abs(audio.currentTime - target)
     if (force || Math.min(drift, Math.max(0, audio.duration - drift)) > 0.25) audio.currentTime = target
     if (player.paused || player.ended || player.seeking || player.readyState < 3 ||
@@ -546,7 +547,7 @@ export function App() {
         if (error?.name !== 'AbortError') setNotice('Could not play the music preview.')
       })
     }
-  }, [activeMusic?.volume, muted, previewVolume, range.start, range.end])
+  }, [activeMusic?.volume, activeMusic?.start, activeMusic?.fade, muted, previewVolume, range.start, range.end])
 
   useEffect(() => {
     syncMusic()
@@ -1690,7 +1691,7 @@ export function App() {
             start: unit.segment.start, end: unit.segment.end,
             title: unit.first ? unit.clip.title : undefined,
             captionOverlay,
-            music: music ? { ...music, start: musicOffset } : null,
+            music: music ? { ...music, start: musicOffset + (music.start ?? 0) } : null,
             bookends: {
               intro: unit.first ? ends.intro : null,
               outro: unit.last ? ends.outro : null,

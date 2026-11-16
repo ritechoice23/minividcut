@@ -83,7 +83,7 @@ export const MusicMenu = memo(function MusicMenu({ project, clip, disabled, canP
         track = { kind: 'library', id: library.id }
       }
       const path = await invoke<string>('open_music', { track })
-      onChange(target, { track, volume: current?.volume ?? DEFAULT_MUSIC_VOLUME }, path)
+      onChange(target, { track, volume: current?.volume ?? DEFAULT_MUSIC_VOLUME, fade: current?.fade }, path)
     } catch (error) {
       setFailedTrack(chosen)
       setError(error instanceof Error ? error.message : String(error))
@@ -129,6 +129,22 @@ export const MusicMenu = memo(function MusicMenu({ project, clip, disabled, canP
         <input aria-label="Music volume" type="range" min={0} max={100} value={current.volume} disabled={pending || disabled}
           onChange={event => onChange(target, { ...current, volume: event.target.valueAsNumber })} />
       </label>}
+      {current && <div className="music-tuning">
+        <label>Start at (seconds)
+          <input type="number" aria-label="Music start offset in seconds" min={0} max={3600} step={0.1}
+            value={current.start ?? 0} disabled={pending || disabled}
+            onChange={event => {
+              const value = event.target.valueAsNumber
+              onChange(target, { ...current, start: Number.isFinite(value) && value > 0 ? value : undefined })
+            }} />
+        </label>
+        <label className="music-fade">
+          <input type="checkbox" aria-label="Fade music in and out" checked={current.fade ?? false}
+            disabled={pending || disabled}
+            onChange={event => onChange(target, { ...current, fade: event.target.checked })} />
+          Soft fade
+        </label>
+      </div>}
       {canAudition && <button type="button" className="button outline small" disabled={!canPreview || pending || disabled}
         onClick={onPreview}>{playing ? <Pause size={13} /> : <Play size={13} />}{playing ? 'Pause preview' : 'Preview mix'}</button>}
       <button type="button" className="text-button media-library-trigger" aria-expanded={libraryOpen}

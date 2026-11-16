@@ -9,6 +9,7 @@ import { captionAt } from './captions'
 import { captionDimensions, captionLayouts, captionSequence, renderCaptionSprite } from './caption-artwork'
 import type { FramePosition, Framing } from './framing'
 import type { Music } from './music'
+import { musicGain } from './music'
 import { buildCompositionPlan, layerState, outroLayerState } from './sequence-plan'
 import type { BookendMedia, CompositionPlan, Format, LayerState } from './sequence-plan'
 
@@ -135,8 +136,10 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
     }
     const audio = musicRef.current
     if (audio && current.music) {
-      const local = audio.duration > 0 ? time % audio.duration : time
-      audio.volume = current.music.volume / 100 * player.current.volume
+      const offset = Math.max(0, current.music.start ?? 0)
+      const local = audio.duration > 0 ? (time + offset) % audio.duration : time + offset
+      const gain = musicGain(time, 0, current.total, current.music.fade)
+      audio.volume = current.music.volume / 100 * player.current.volume * gain
       audio.muted = player.current.muted || forceMute.current
       if (!visible.current.music || Math.abs(audio.currentTime - local) > 0.4) audio.currentTime = local
       if (player.current.paused) audio.pause()

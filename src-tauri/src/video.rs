@@ -629,6 +629,8 @@ pub struct MusicSettings {
     // internal cuts keeps one continuous music line across its segments.
     #[serde(default)]
     start: f64,
+    #[serde(default)]
+    fade: bool,
 }
 
 struct MusicMix {
@@ -636,6 +638,19 @@ struct MusicMix {
     volume: u8,
     source_audio: bool,
     start: f64,
+    fade: bool,
+}
+
+/// Add gentle ramps at the segment edges when the track opted into fading.
+fn music_level_filter(level: String, duration: f64, fade: bool) -> String {
+    if !fade || !duration.is_finite() || duration <= 0.0 {
+        return level;
+    }
+    let seconds = 0.8_f64.min(duration / 3.0);
+    format!(
+        "{level},afade=t=in:st=0:d={seconds:.3},afade=t=out:st={:.3}:d={seconds:.3}",
+        duration - seconds
+    )
 }
 
 pub(crate) fn caption_audio(path: &Path, mut range: Clip, duration: f64, pcm: &Path) -> Result<f64> {
@@ -1010,8 +1025,11 @@ fn encode_with(
         }
         cmd.args(["-stream_loop", "-1", "-format_whitelist", MUSIC_FORMATS]);
         input(&mut cmd, &music.path);
-        let level =
-            format!("[{index}:a:0]aformat=sample_rates=48000:channel_layouts=stereo,volume={gain}");
+        let level = music_level_filter(
+            format!("[{index}:a:0]aformat=sample_rates=48000:channel_layouts=stereo,volume={gain}"),
+            duration,
+            music.fade,
+        );
         if music.source_audio {
             graph.push(format!("{level}[music]"));
             graph.push("[0:a:0]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo[original]".into());
@@ -1257,6 +1275,7 @@ fn resolve_clip_media(
                 volume: music.volume,
                 source_audio,
                 start: if music.start.is_finite() && music.start >= 0.0 { music.start } else { 0.0 },
+                fade: music.fade,
             })
         })
         .transpose()?;
@@ -1771,6 +1790,7 @@ mod tests {
             volume: 15,
             source_audio: false,
             start: 0.0,
+            fade: false,
         };
         encode_with(
             &path,
@@ -1927,6 +1947,22 @@ mod tests {
     }
 
     #[test]
+    fn music_fades_only_when_requested_and_scaled_to_short_segments() {
+        let level = "[1:a:0]volume=0.2".to_string();
+        assert_eq!(music_level_filter(level.clone(), 4.0, false), level);
+        assert_eq!(
+            music_level_filter(level.clone(), -1.0, true),
+            level
+        );
+        let short = music_level_filter(level.clone(), 0.6, true);
+        assert!(short.contains("afade=t=in:st=0:d=0.200"));
+        assert!(short.contains("afade=t=out:st=0.400:d=0.200"));
+        let long = music_level_filter(level, 10.0, true);
+        assert!(long.contains("afade=t=in:st=0:d=0.800"));
+        assert!(long.contains("afade=t=out:st=9.200:d=0.800"));
+    }
+
+    #[test]
     fn exports_looped_music_at_the_requested_gain_with_or_without_source_audio() {
         let folder = tempfile::tempdir().unwrap();
         let music = folder.path().join("background music.wav");
@@ -1977,6 +2013,7 @@ mod tests {
                     volume: 25,
                     source_audio,
                     start: 0.0,
+                    fade: false,
                 }),
                 None,
                 &AtomicBool::new(false),

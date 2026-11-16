@@ -48,6 +48,10 @@ svg { flex-shrink: 0; }
 .editor-media-fields { display: grid; gap: 12px; padding: 14px; overflow: auto; overscroll-behavior: contain; }
 .editor-media-panel input { margin: 0; width: 100%; accent-color: var(--lime); }
 .music-level { display: flex; justify-content: space-between; }
+.music-tuning { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 8px; }
+.music-tuning input[type="number"] { min-width: 0; width: 100%; padding: 5px 7px; border: 1px solid #393939; border-radius: 5px; background: #202020; color: inherit; font: inherit; font-size: 11px; }
+.music-fade { display: flex !important; align-items: center; gap: 5px; white-space: nowrap; padding-bottom: 5px; }
+.music-fade input { margin: 0; accent-color: var(--lime); }
 .editor-media-panel small { color: var(--muted); overflow-wrap: anywhere; }
 .bookend-fields { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 8px; }
 .bookend-placement { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); align-items: center; gap: 8px; }

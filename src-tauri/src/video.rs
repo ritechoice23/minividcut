@@ -346,9 +346,21 @@ fn process_error(context: &str, stderr: &[u8]) -> String {
     let details = text
         .lines()
         .rev()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("Unknown error");
-    format!("{context}. {details}")
+        .filter(|line| !line.trim().is_empty())
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" | ");
+    format!(
+        "{context}. {}",
+        if details.is_empty() {
+            "Unknown error"
+        } else {
+            &details
+        }
+    )
 }
 
 pub(crate) fn output(cmd: &mut Command, tool: &str, context: &str) -> Result<Output> {
@@ -2566,6 +2578,135 @@ mod tests {
         assert!(
             (count as i64 - 96).abs() <= 4,
             "expected ~96 frames, got {count}"
+        );
+    }
+
+    #[test]
+    fn ripple_delete_exports_full_intro_and_outro_around_the_kept_ranges() {
+        let folder = tempfile::tempdir().unwrap();
+        let make = |name: &str, source: &str, seconds: u32| {
+            let path = folder.path().join(name);
+            output(
+                ffmpeg()
+                    .args([
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        source,
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        "sine=frequency=440:sample_rate=48000",
+                        "-t",
+                        &seconds.to_string(),
+                        "-c:v",
+                        "libx264",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-preset",
+                        "ultrafast",
+                        "-c:a",
+                        "aac",
+                        "-shortest",
+                    ])
+                    .arg(&path),
+                "ffmpeg",
+                "Could not make a test source",
+            )
+            .unwrap();
+            path
+        };
+        let source = make("source.mp4", "testsrc2=size=320x180:rate=24", 6);
+        let intro = make("intro.mp4", "color=red:s=320x180:r=24", 2);
+        let outro = make("outro.mp4", "color=blue:s=320x180:r=24", 2);
+        let bookends: Bookends = serde_json::from_value(serde_json::json!({
+            "intro": { "path": intro, "transition": "cut" },
+            "outro": { "path": outro, "transition": "cut" }
+        }))
+        .unwrap();
+        // Mirror production: join the kept ranges, then run the normal export
+        // chain with the resolved bookend assembly.
+        let segments = [
+            Clip {
+                start: 0.0,
+                end: 2.0,
+            },
+            Clip {
+                start: 4.0,
+                end: 6.0,
+            },
+        ];
+        let (_joined, main, main_duration) =
+            concat_segments(&source, &segments, folder.path(), &AtomicBool::new(false)).unwrap();
+        let assembly = bookends::resolve(
+            &bookends,
+            &mut AssetCache::default(),
+            false,
+            Format::Landscape,
+        )
+        .unwrap();
+        let exported = folder.path().join("Full.mp4");
+        encode_with(
+            &main,
+            Clip {
+                start: 0.0,
+                end: main_duration,
+            },
+            "scale=1920:1080",
+            Quality::Compatible.args(),
+            &exported,
+            CaptionLayers::default(),
+            None,
+            assembly.as_ref().map(|value| (value, None)),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+        let info = probe(exported.clone()).unwrap();
+        assert!(
+            (info.duration - 8.0).abs() < 0.25,
+            "expected 2s intro + 4s kept + 2s outro, got {}",
+            info.duration
+        );
+        let average_color = |at: f64| -> (u32, u32, u32) {
+            let raw = output(
+                ffmpeg().args([
+                    "-ss",
+                    &at.to_string(),
+                    "-i",
+                    exported.to_str().unwrap(),
+                    "-frames:v",
+                    "1",
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    "rgb24",
+                    "pipe:1",
+                ]),
+                "ffmpeg",
+                "Could not sample a frame",
+            )
+            .unwrap()
+            .stdout;
+            let pixels = raw.chunks_exact(3).count().max(1) as u32;
+            let (r, g, b) = raw.chunks_exact(3).fold((0, 0, 0), |sum, pixel| {
+                (
+                    sum.0 + pixel[0] as u32,
+                    sum.1 + pixel[1] as u32,
+                    sum.2 + pixel[2] as u32,
+                )
+            });
+            (r / pixels, g / pixels, b / pixels)
+        };
+        let (r, g, b) = average_color(0.5);
+        assert!(
+            r > g + 60 && r > b + 60,
+            "intro frame should be red, got {r},{g},{b}"
+        );
+        let (r, g, b) = average_color(7.5);
+        assert!(
+            b > r + 60 && b > g + 60,
+            "outro frame should be blue, got {r},{g},{b}"
         );
     }
 

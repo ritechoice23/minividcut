@@ -116,7 +116,7 @@ export function MusicMenu({ project, clip, disabled, canPreview, playing, open: 
           {target === 'clip' && <option value="inherit">Use project music</option>}
           <option value="off">No music</option>
           {current?.track.kind === 'file' && <option value="file" disabled>{current.track.name}</option>}
-          <option value="browse">Choose an audio fileâ€¦</option>
+          <option value="browse">Choose an audio file…</option>
           {current?.track.kind === 'kaino' && !kainoTracks.some(track => `kaino:${track.id}` === value) &&
             <option value={value} disabled>{current.track.name} (download required)</option>}
           {kainoTracks.map(track => <option key={track.id} value={`kaino:${track.id}`}>{track.title}</option>)}

@@ -78,6 +78,24 @@ fn check_cancel(flag: &AtomicBool) -> Result<()> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Collection {
+    #[default]
+    Music,
+    Sfx,
+}
+
+impl Collection {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Music => "music",
+            Self::Sfx => "sfx",
+        }
+    }
+
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Track {
     id: String,
@@ -132,8 +150,9 @@ async fn track_details(
     client: &reqwest::Client,
     progress: &Channel<MusicProgress>,
     id: &str,
+    collection: Collection,
 ) -> Result<Details> {
-    let url = format!("{BASE}/api/library/music/{id}");
+    let url = format!("{BASE}/api/library/{}/{id}", collection.as_str());
     let details = retry_network(progress, |attempt| {
         let (client, url, progress) = (client, &url, progress);
         async move {
@@ -147,7 +166,7 @@ async fn track_details(
         }
     })
     .await?;
-    if !eligible(&details.published) || details.published.track.id != id {
+    if !eligible(&details.published, collection) || details.published.track.id != id {
         return Err("This track is no longer available from Kaino under CC0.".into());
     }
     Ok(details)
@@ -260,18 +279,23 @@ fn valid_id(id: &str) -> bool {
         })
 }
 
-fn eligible(track: &PublishedTrack) -> bool {
-    track.collection == "music"
+fn eligible(track: &PublishedTrack, collection: Collection) -> bool {
+    track.collection == collection.as_str()
         && track.licence.as_deref() == Some("CC0-1.0")
         && valid_id(&track.track.id)
         && !track.track.title.trim().is_empty()
 }
 
-fn root(app: &AppHandle) -> Result<PathBuf> {
-    app.path()
+fn root_for(app: &AppHandle, collection: Collection) -> Result<PathBuf> {
+    let base = app
+        .path()
         .app_local_data_dir()
         .map(|path| path.join("music").join("kaino"))
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    Ok(match collection {
+        Collection::Music => base,
+        Collection::Sfx => base.join("sfx"),
+    })
 }
 
 fn track_dir(root: &Path, id: &str) -> Result<PathBuf> {
@@ -291,8 +315,8 @@ fn cached_track(directory: &Path, id: &str) -> Option<Track> {
     (track.id == id).then_some(track)
 }
 
-pub fn local_path(app: &AppHandle, id: &str) -> Result<PathBuf> {
-    let directory = track_dir(&root(app)?, id)?;
+pub fn local_path(app: &AppHandle, collection: Collection, id: &str) -> Result<PathBuf> {
+    let directory = track_dir(&root_for(app, collection)?, id)?;
     cached_track(&directory, id)
         .map(|_| directory.join("track.mp3"))
         .ok_or_else(|| "Download this track from the Kaino library before using it.".into())
@@ -369,8 +393,10 @@ fn parse_event_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
 pub async fn search_kaino(
     query: String,
     page: u32,
+    collection: Option<Collection>,
     progress: Channel<MusicProgress>,
 ) -> Result<SearchPage> {
+    let collection = collection.unwrap_or(Collection::Music);
     #[derive(Deserialize)]
     struct Response {
         result: ToolResult,
@@ -382,7 +408,7 @@ pub async fn search_kaino(
     }
     let query: String = query.trim().chars().take(100).collect();
     let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-        "name":"search_library","arguments":{"collection":"music","q":query,"page":page.clamp(1,10000)}
+        "name":"search_library","arguments":{"collection":collection.as_str(),"q":query,"page":page.clamp(1,10000)}
     }});
     let client = client(Duration::from_secs(12))?;
     let body = body.to_string();
@@ -410,7 +436,7 @@ pub async fn search_kaino(
         tracks: search
             .items
             .into_iter()
-            .filter(eligible)
+            .filter(|track| eligible(track, collection))
             .map(|item| item.track)
             .collect(),
         next_page: search.next_page,
@@ -418,9 +444,10 @@ pub async fn search_kaino(
 }
 
 #[tauri::command]
-pub async fn local_kaino_tracks(app: AppHandle) -> Result<Vec<Track>> {
+pub async fn local_kaino_tracks(app: AppHandle, collection: Option<Collection>) -> Result<Vec<Track>> {
+    let collection = collection.unwrap_or(Collection::Music);
     video::background(move || {
-        let entries = match fs::read_dir(root(&app)?) {
+        let entries = match fs::read_dir(root_for(&app, collection)?) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error.to_string()),
@@ -444,10 +471,12 @@ pub async fn local_kaino_tracks(app: AppHandle) -> Result<Vec<Track>> {
 pub async fn download_kaino(
     app: AppHandle,
     id: String,
+    collection: Option<Collection>,
     progress: Channel<MusicProgress>,
     cancels: State<'_, DownloadCancels>,
 ) -> Result<Track> {
-    let root = root(&app)?;
+    let collection = collection.unwrap_or(Collection::Music);
+    let root = root_for(&app, collection)?;
     let directory = track_dir(&root, &id)?;
     if let Some(track) = cached_track(&directory, &id) {
         return Ok(track);
@@ -456,10 +485,10 @@ pub async fn download_kaino(
     let _guard = CancelGuard { cancels: &cancels, id: id.clone() };
     check_cancel(&flag)?;
     let client = client(Duration::from_secs(90))?;
-    let details = track_details(&client, &progress, &id).await?;
+    let details = track_details(&client, &progress, &id, collection).await?;
     check_cancel(&flag)?;
     let listed_size = mp3_download(&details)?.bytes;
-    let download_url = format!("{BASE}/api/library/music/{id}/download?format=mp3");
+    let download_url = format!("{BASE}/api/library/{}/{id}/download?format=mp3", collection.as_str());
     let bytes = retry_network(&progress, |attempt| {
         let (client, download_url, progress) = (&client, &download_url, &progress);
         let flag = Arc::clone(&flag);
@@ -544,8 +573,9 @@ async fn fetch_preview(
     client: &reqwest::Client,
     progress: &Channel<MusicProgress>,
     id: &str,
+    collection: Collection,
 ) -> Result<Vec<u8>> {
-    let url = format!("{BASE}/api/library/music/{id}/download?format=mp3");
+    let url = format!("{BASE}/api/library/{}/{id}/download?format=mp3", collection.as_str());
     retry_network(progress, |attempt| {
         let (client, url, progress) = (client, &url, progress);
         async move {
@@ -599,9 +629,11 @@ async fn fetch_preview(
 pub async fn preview_kaino(
     app: AppHandle,
     id: String,
+    collection: Option<Collection>,
     progress: Channel<MusicProgress>,
 ) -> Result<PathBuf> {
-    let root = root(&app)?;
+    let collection = collection.unwrap_or(Collection::Music);
+    let root = root_for(&app, collection)?;
     let path = preview_path(&root, &id)?;
     if preview_usable(&path) {
         app.asset_protocol_scope()
@@ -610,9 +642,9 @@ pub async fn preview_kaino(
         return Ok(path);
     }
     let client = client(Duration::from_secs(30))?;
-    let details = track_details(&client, &progress, &id).await?;
+    let details = track_details(&client, &progress, &id, collection).await?;
     mp3_download(&details)?;
-    let bytes = fetch_preview(&client, &progress, &id).await?;
+    let bytes = fetch_preview(&client, &progress, &id, collection).await?;
     report(&progress, "saving", 1, None);
     let path = video::background(move || {
         let directory = preview_dir(&root);
@@ -632,9 +664,10 @@ pub async fn preview_kaino(
 }
 
 #[tauri::command]
-pub async fn remove_kaino(app: AppHandle, id: String) -> Result<()> {
+pub async fn remove_kaino(app: AppHandle, id: String, collection: Option<Collection>) -> Result<()> {
+    let collection = collection.unwrap_or(Collection::Music);
     video::background(move || {
-        let root = root(&app)?;
+        let root = root_for(&app, collection)?;
         let directory = track_dir(&root, &id)?;
         if !directory.exists() {
             return Ok(());
@@ -703,9 +736,12 @@ mod tests {
             collection: collection.into(),
             licence: Some(licence.into()),
         };
-        assert!(eligible(&track("afrobeat-01", "CC0-1.0", "music")));
-        assert!(!eligible(&track("afrobeat-01", "CC-BY-4.0", "music")));
-        assert!(!eligible(&track("afrobeat-01", "CC0-1.0", "sfx")));
+        assert!(eligible(&track("afrobeat-01", "CC0-1.0", "music"), Collection::Music));
+        assert!(!eligible(&track("afrobeat-01", "CC-BY-4.0", "music"), Collection::Music));
+        assert!(!eligible(&track("afrobeat-01", "CC0-1.0", "sfx"), Collection::Music));
+        assert!(eligible(&track("amb-beach-01", "CC0-1.0", "sfx"), Collection::Sfx));
+        assert!(!eligible(&track("amb-beach-01", "CC0-1.0", "sfx"), Collection::Music));
+        assert_eq!(Collection::default(), Collection::Music);
         for id in ["../track", "con.mp3", "a--b", "a/b", "a%2fb"] {
             assert!(track_dir(Path::new("music"), id).is_err());
         }
@@ -766,7 +802,7 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let progress = Channel::new(|_| Ok(()));
             let client = client(Duration::from_secs(30)).unwrap();
-            let bytes = fetch_preview(&client, &progress, "acoustic-folk-01")
+            let bytes = fetch_preview(&client, &progress, "acoustic-folk-01", Collection::Music)
                 .await
                 .unwrap();
             assert!(bytes.len() >= PREVIEW_MIN_BYTES);

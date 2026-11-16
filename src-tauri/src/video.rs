@@ -551,7 +551,11 @@ const MUSIC_FORMATS: &str = "mp3,wav,flac,ogg,opus,aac,mov,mp4,m4a,3gp,3g2,mj2";
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum MusicTrack {
     Library { id: String },
-    Kaino { id: String },
+    Kaino {
+        id: String,
+        #[serde(default)]
+        collection: crate::kaino::Collection,
+    },
     File { path: PathBuf },
 }
 
@@ -559,7 +563,7 @@ impl MusicTrack {
     fn path(&self, app: &AppHandle) -> Result<PathBuf> {
         let path = match self {
             Self::Library { id } => crate::music_library::downloaded_path(app, id)?,
-            Self::Kaino { id } => crate::kaino::local_path(app, id)?,
+            Self::Kaino { id, collection } => crate::kaino::local_path(app, *collection, id)?,
             Self::File { path } => {
                 let extension = path
                     .extension()

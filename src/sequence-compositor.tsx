@@ -87,10 +87,11 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
     if (!element) return
     element.hidden = !state.active
     if (!state.active) {
-      if (visible.current[flag]) {
-        if (!image) element.pause()
-        visible.current[flag] = false
-      }
+      // Always stop inactive layers. With autoPlay removed they would otherwise
+      // keep advancing (and playing audio) in the background, leaving the
+      // intro/outro elements stale or ended when their window finally opens.
+      if (!image) element.pause()
+      visible.current[flag] = false
       return
     }
     element.style.opacity = String(state.alpha)
@@ -146,7 +147,7 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
     const value = Math.max(0, Math.min(current.total, time))
     player.current.currentTime = value
     update(current, value)
-    useEditor.getState().setSequenceTime(value, current.total, layerState('main', current, value).local)
+    useEditor.getState().setSequenceTime(value, current.total, mainTime(current, value))
   }, [update])
 
   const play = useCallback(async () => {
@@ -155,7 +156,21 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
     // null forever and playback would silently do nothing.
     const current = planRef.current
     if (!current) return
-    if (player.current.currentTime >= current.total - 0.001) seek(0)
+    const restarting = player.current.currentTime <= 0.001 || player.current.currentTime >= current.total - 0.001
+    if (restarting) {
+      player.current.currentTime = 0
+      // Start every layer from the beginning of the composition. Without this,
+      // a previously ended intro/outro or a stale clock position makes the
+      // first pass skip part of the bookends.
+      visible.current = { intro: false, main: false, outro: false, music: false }
+      for (const element of [mainRef.current, introRef.current, outroRef.current, musicRef.current]) {
+        if (element instanceof HTMLMediaElement) {
+          element.pause()
+          element.currentTime = 0
+        }
+      }
+      update(current, 0)
+    }
     player.current.paused = false
     useEditor.getState().setSequencePlaying(true)
     lastFrame.current = performance.now()
@@ -172,13 +187,13 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
       lastFrame.current = now
 
       let time = wall
-      const clockMedia = musicRef.current?.paused === false && musicRef.current.duration > 0
-        ? musicRef.current
-        : current.intro && layerState(current.intro, current, wall).active && !current.intro.image
-          ? introRef.current
-          : current.outro && outroLayerState(current, wall).active && !current.outro.image
-            ? outroRef.current
-            : mainRef.current
+      // Music loops modulo its own duration and has no meaningful mapping to
+      // the composition timeline, so it must never be used as the clock.
+      const clockMedia = current.intro && layerState(current.intro, current, wall).active && !current.intro.image
+        ? introRef.current
+        : current.outro && outroLayerState(current, wall).active && !current.outro.image
+          ? outroRef.current
+          : mainRef.current
       if (clockMedia && !clockMedia.paused && clockMedia.readyState > 1 &&
           Number.isFinite(clockMedia.duration) && clockMedia.duration > 0) {
         const clockTime = current.intro && clockMedia === introRef.current
@@ -197,7 +212,7 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
       update(current, time)
       if (now - lastClock.current > 100) {
         lastClock.current = now
-        useEditor.getState().setSequenceTime(time, current.total, layerState('main', current, time).local)
+        useEditor.getState().setSequenceTime(time, current.total, mainTime(current, time))
       }
       if (!player.current.paused) raf.current = window.requestAnimationFrame(tick)
     }
@@ -331,6 +346,9 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
       useEditor.getState().setSequenceTime(0, next.total, next.main.sourceStart)
       useEditor.getState().setSequenceActive(true)
       setPlan(next)
+      // Adopt the new key here so a late cache/music revision change cannot
+      // tear down a preview that just started.
+      keyRef.current = sequenceKey
       setShown(sequenceKey || 'composite')
       setPreparing(false)
     } catch (error) {
@@ -372,32 +390,38 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
   }
 
   const stage: ReactNode = plan && shown ? (
-    <div className="composite" aria-label="Full clip preview" onClick={() => player.current.pause()}>
+    <div className="composite" aria-label="Full clip preview" onClick={() => { forceMute.current = false; player.current.pause() }}>
       {plan.intro && <div className="composite-layer">
         {plan.intro.image
           ? <img ref={introRef as Ref<HTMLImageElement>} className="fit" style={{ objectPosition: layerPosition(plan) }}
               src={convertFileSrc(plan.intro.path)} alt="" draggable={false} />
           : <video ref={introRef as Ref<HTMLVideoElement>} className="fit" style={{ objectPosition: layerPosition(plan) }}
-              src={convertFileSrc(plan.intro.path)} autoPlay playsInline preload="auto" />}
+              src={convertFileSrc(plan.intro.path)} playsInline preload="auto" />}
       </div>}
       <div className="composite-layer">
         <video ref={mainRef} className={plan.main.framing} style={{ objectPosition: `${plan.main.position.x}% ${plan.main.position.y}%` }}
-          src={convertFileSrc(plan.main.path)} autoPlay playsInline preload="auto" />
+          src={convertFileSrc(plan.main.path)} playsInline preload="auto" />
       </div>
       {plan.outro && <div className="composite-layer">
         {plan.outro.image
           ? <img ref={outroRef as Ref<HTMLImageElement>} className="fit" style={{ objectPosition: layerPosition(plan, true) }}
               src={convertFileSrc(plan.outro.path)} alt="" draggable={false} />
           : <video ref={outroRef as Ref<HTMLVideoElement>} className="fit" style={{ objectPosition: layerPosition(plan, true) }}
-              src={convertFileSrc(plan.outro.path)} autoPlay playsInline preload="auto" />}
+              src={convertFileSrc(plan.outro.path)} playsInline preload="auto" />}
       </div>}
-      {plan.musicPath && <audio ref={musicRef} src={convertFileSrc(plan.musicPath)} autoPlay preload="auto" loop />}
+      {plan.musicPath && <audio ref={musicRef} src={convertFileSrc(plan.musicPath)} preload="auto" loop />}
       <canvas ref={captionRef} className="caption-artwork" width={plan.main.format === 'portrait' ? 1080 : 1920}
         height={plan.main.format === 'portrait' ? 1920 : 1080} aria-hidden="true" />
     </div>
   ) : null
 
   return { path: shown, stage, preparing, player, play: start, stop }
+}
+
+function mainTime(plan: CompositionPlan, time: number) {
+  const state = layerState('main', plan, time)
+  if (state.active) return state.local
+  return time < plan.main.start ? plan.main.sourceStart : plan.main.sourceStart + plan.main.length
 }
 
 function layerPosition(plan: CompositionPlan, outro = false) {

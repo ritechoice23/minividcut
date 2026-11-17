@@ -810,15 +810,22 @@ export function App() {
 
   const seek = useCallback((position: number) => {
     if (!source) return
-    stopSequence()
     const next = Math.min(duration, Math.max(0, position))
     const player = video.current
     // A timeupdate queued before this seek can arrive afterwards with the old
     // time and pull the playhead back, making it oscillate left and right.
     ignoreTimeUpdateUntil.current = performance.now() + 120
     if (player && player.readyState > 0) player.currentTime = Math.min(next, player.duration)
+    if (sequence.path) {
+      // Keep the composite alive and move it to the clicked source position.
+      // Tearing it down here made the next Play start again from zero.
+      sequence.player.current.pause()
+      sequence.player.current.seekSource(next)
+    } else {
+      stopSequence()
+    }
     setPlaybackTime(next)
-  }, [source, duration, stopSequence, setPlaybackTime])
+  }, [source, duration, sequence.path, stopSequence, setPlaybackTime])
 
   const refreshCaptionModel = useCallback(async () => {
     const info = await invoke<CaptionModel>('caption_model')
@@ -1066,6 +1073,7 @@ export function App() {
     void sequence.play({
       path: source.path, range, segments: previewSegments, captions: currentCaptions, music: activeMusic,
       musicPath, muted, bookends, options: { format, framing, position },
+      startAtSource: activeTime(),
     })
   }
 
@@ -1796,6 +1804,7 @@ export function App() {
     event.stopPropagation()
     event.currentTarget.setPointerCapture(event.pointerId)
     video.current?.pause()
+    if (sequence.path) sequence.player.current.pause()
     timelinePanned.current = true
     const rect = track.current.getBoundingClientRect()
     playheadOffset.current = event.clientX - rect.left - pct(playbackClock.get()) * rect.width / 100

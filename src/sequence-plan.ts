@@ -110,6 +110,24 @@ export function buildCompositionPlan({
   }
 }
 
+/** Inverse of the main-layer mapping: where a source-time position plays. */
+export function sourceToPlanTime(plan: CompositionPlan, sourceTime: number) {
+  const segments = plan.main.segments?.length ? plan.main.segments
+    : [{ start: plan.main.start, sourceStart: plan.main.sourceStart, length: plan.main.length }]
+  const first = segments[0]
+  const last = segments[segments.length - 1]
+  if (sourceTime <= first.sourceStart) return Math.max(0, Math.min(plan.total, sourceTime))
+  for (const segment of segments) {
+    if (sourceTime >= segment.sourceStart && sourceTime <= segment.sourceStart + segment.length) {
+      return segment.start + (sourceTime - segment.sourceStart)
+    }
+  }
+  return Math.min(
+    plan.total,
+    last.start + last.length + Math.max(0, sourceTime - (last.sourceStart + last.length)),
+  )
+}
+
 export type LayerState = { active: boolean; local: number; alpha: number; slide: number }
 
 export function layerState(layer: PlanLayer | 'main', plan: CompositionPlan, time: number): LayerState {

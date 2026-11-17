@@ -10,7 +10,7 @@ import { captionDimensions, captionLayouts, captionSequence, renderCaptionSprite
 import type { FramePosition, Framing } from './framing'
 import type { Music } from './music'
 import { musicGain } from './music'
-import { buildCompositionPlan, layerState, outroLayerState } from './sequence-plan'
+import { buildCompositionPlan, layerState, outroLayerState, sourceToPlanTime } from './sequence-plan'
 import type { BookendMedia, CompositionPlan, Format, LayerState } from './sequence-plan'
 
 export type Sequence = {
@@ -23,6 +23,8 @@ export type Sequence = {
   muted: boolean
   bookends: Bookends
   options: { format: Format; framing: Framing; position: FramePosition }
+  /** Source-timeline position to start from, e.g. where the user clicked. */
+  startAtSource?: number
 }
 
 export type SequenceController = {
@@ -35,6 +37,7 @@ export type SequenceController = {
   play: () => Promise<void>
   pause: () => void
   seek: (time: number) => void
+  seekSource: (time: number) => void
   setMuted: (muted: boolean) => void
 }
 
@@ -79,7 +82,7 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
 
   const player = useRef<SequenceController>({
     currentTime: 0, duration: 0, paused: true, readyState: 4, volume: 1, muted: false,
-    play: async () => {}, pause: () => {}, seek: () => {}, setMuted: () => {},
+    play: async () => {}, pause: () => {}, seek: () => {}, seekSource: () => {}, setMuted: () => {},
   })
 
   const applyLayer = (element: HTMLMediaElement | null, state: LayerState, local: number,
@@ -149,6 +152,12 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
     update(current, value)
     useEditor.getState().setSequenceTime(value, current.total, mainTime(current, value))
   }, [update])
+
+  const seekSource = useCallback((time: number) => {
+    const current = planRef.current
+    if (!current) return
+    seek(sourceToPlanTime(current, time))
+  }, [seek])
 
   const play = useCallback(async () => {
     // Read the plan from the ref, not from the render closure: this callback
@@ -246,6 +255,7 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
   player.current.play = play
   player.current.pause = pause
   player.current.seek = seek
+  player.current.seekSource = seekSource
   player.current.setMuted = setMuted
 
   const stop = useCallback(() => {
@@ -340,10 +350,11 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
       })
       preparePainter(captions, sequence.options.format)
       planRef.current = next
-      player.current.currentTime = 0
+      const startAt = sequence.startAtSource == null ? 0 : sourceToPlanTime(next, sequence.startAtSource)
+      player.current.currentTime = startAt
       player.current.duration = next.total
       player.current.muted = next.muted
-      useEditor.getState().setSequenceTime(0, next.total, next.main.sourceStart)
+      useEditor.getState().setSequenceTime(startAt, next.total, mainTime(next, startAt))
       useEditor.getState().setSequenceActive(true)
       setPlan(next)
       // Adopt the new key here so a late cache/music revision change cannot

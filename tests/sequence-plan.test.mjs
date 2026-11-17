@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildCompositionPlan, layerState, outroLayerState, overlapFrames } from '../src/sequence-plan.ts'
+import { buildCompositionPlan, layerState, outroLayerState, overlapFrames, sourceToPlanTime } from '../src/sequence-plan.ts'
 
 const base = {
   path: 'source.mp4',
@@ -56,6 +56,24 @@ test('a clip with internal cuts previews its segments back to back', () => {
   ])
   assert.equal(layerState('main', plan, 1.5).local, 11.5)
   assert.equal(layerState('main', plan, 2.5).local, 13.5, 'playback jumps over the removed middle')
+})
+
+test('seeking by source time starts at the clicked position, including bookends', () => {
+  const plain = buildCompositionPlan({ ...base, range: { start: 0, end: 12 }, bookends: {} })
+  assert.equal(sourceToPlanTime(plain, 2.2), 2.2)
+
+  const withIntro = buildCompositionPlan({ ...base, range: { start: 0, end: 12 }, bookends: {
+    intro: { path: 'intro.mp4', name: 'intro', transition: 'cut' },
+  } })
+  assert.equal(withIntro.main.start, 2)
+  assert.equal(sourceToPlanTime(withIntro, 2.2), 4.2)
+  assert.equal(sourceToPlanTime(withIntro, 0), 0, 'clicking the very start still plays the intro')
+
+  const cut = buildCompositionPlan({ ...base, range: { start: 0, end: 12 },
+    segments: [{ start: 0, end: 4 }, { start: 8, end: 12 }], bookends: {} })
+  assert.equal(sourceToPlanTime(cut, 2), 2)
+  assert.equal(sourceToPlanTime(cut, 9), 5)
+  assert.equal(sourceToPlanTime(cut, 12), 8)
 })
 
 test('layer states expose crossfade alpha, slide travel and source-local time', () => {

@@ -421,7 +421,7 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
       {plan.outro && <div className="composite-layer">
         {plan.outro.image
           ? <img ref={outroRef as Ref<HTMLImageElement>} className="fit" style={{ objectPosition: layerPosition(plan, true) }}
-              src={convertFileSrc(plan.outro.path)} alt="" draggable={false} />
+              src={plan.outro.preview || convertFileSrc(plan.outro.path)} alt="" draggable={false} />
           : <video ref={outroRef as Ref<HTMLVideoElement>} className="fit" style={{ objectPosition: layerPosition(plan, true) }}
               src={convertFileSrc(plan.outro.path)} playsInline preload="auto" />}
       </div>}

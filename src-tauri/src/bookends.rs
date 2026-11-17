@@ -339,6 +339,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bookend_thumbnail_renders_a_png_data_url() {
+        let folder = tempfile::tempdir().unwrap();
+        let image = folder.path().join("sample.png");
+        video::output(
+            video::command("ffmpeg")
+                .args(["-f", "lavfi", "-i", "color=red:s=32x18", "-frames:v", "1"])
+                .arg(&image),
+            "ffmpeg",
+            "Could not make a test image",
+        )
+        .unwrap();
+        let data = bookend_thumbnail(image).unwrap();
+        assert!(data.starts_with("data:image/png;base64,"));
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(data.split(',').nth(1).unwrap())
+            .unwrap();
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
     fn transition_overlap_matches_browser_preview_math() {
         // Mirrors tests/sequence-plan.test.mjs so the browser compositor and
         // this FFmpeg assembler stay on the same timing contract.

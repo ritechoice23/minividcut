@@ -2351,8 +2351,11 @@ export function App() {
               title="Remove the In–Out selection — from all saved clips, or from the source if none are saved" onClick={trimSection}><ScissorsLineDashed size={15} /> Trim</button>
             <button className="icon-button compact" title="Undo (Ctrl Z)" aria-label="Undo" disabled={!canUndo} onClick={undoEdit}><Undo2 size={15} /></button>
             <button className="icon-button compact" title="Redo (Ctrl Shift Z)" aria-label="Redo" disabled={!canRedo} onClick={redoEdit}><Redo2 size={15} /></button>
-            <button className={`icon-button compact ${snapping ? 'active' : ''}`} title={snapping ? 'Snapping on' : 'Snapping off'}
-              aria-label="Toggle snapping" aria-pressed={snapping} onClick={() => setSnapping(on => !on)}><Magnet size={15} /></button>
+            <button className={`button outline small snap ${snapping ? 'active' : ''}`}
+              title="Snap trim handles and clip edges to nearby edit points (clip boundaries, In/Out marks, playhead, start and end)"
+              aria-label="Toggle snapping" aria-pressed={snapping} onClick={() => setSnapping(on => !on)}>
+              <Magnet size={14} /> Snap
+            </button>
             <div className="timeline-zoom" role="group" aria-label="Timeline zoom">
               <button className="icon-button compact" aria-label="Zoom out timeline" title="Zoom out"
                 disabled={disabled || timelineZoom === 1} onClick={() => zoomTimelineTo(timelineZoom / 2)}><ZoomOut size={16} /></button>

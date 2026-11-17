@@ -137,6 +137,7 @@ svg { flex-shrink: 0; }
 .icon-button { width: 34px; height: 34px; padding: 0; background: transparent; color: var(--muted); }
 .icon-button.compact { width: 28px; height: 28px; }
 .icon-button.active { color: var(--lime); background: #2b371e; border-color: #4a5c34; }
+.button.snap.active { color: var(--lime); background: #2b371e; border-color: #4a5c34; }
 kbd { font: 10px var(--mono); color: #b0b0a9; background: #101010; border: 1px solid #353535; padding: 3px 5px; border-radius: 4px; }
 .workspace { --workspace-top: 14px; --sidebar-width: clamp(256px, 24vw, 316px); flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) var(--sidebar-width); grid-template-rows: minmax(0, 1fr) calc(152px + var(--pan-height, 0px)); gap: 12px; padding: var(--workspace-top) 16px 11px; }
 .workspace.with-moments { grid-template-columns: minmax(0, 1fr) var(--sidebar-width) var(--sidebar-width); }

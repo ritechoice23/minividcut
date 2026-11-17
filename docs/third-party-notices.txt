@@ -27,13 +27,10 @@ contains checksums for the archives, including both parts and the joined ZIP.
 The upstream build and original dependency source cache are recorded at:
 https://github.com/FFmpeg-Builds/FFmpeg-Builds/actions/runs/43422726593
 
-Downloadable background music
------------------------------
-A Brand New Wisdom, Just Saying Tho, Winter Dust, and Swinging Sweet
-by hernandack, from Short Loops Background Music Pack.
-Source: https://opengameart.org/content/short-loops-background-music-pack
-CC0 1.0 Universal: https://creativecommons.org/publicdomain/zero/1.0/
-
-Kaino music is available as optional downloads from the Kaino Free Asset Library
-by Kainotomic under the same CC0 1.0 Universal dedication.
+Optional background music
+-------------------------
+Music and sound effects are available as optional downloads from the Kaino Free
+Asset Library by Kainotomic under CC0 1.0 Universal.
 https://kaino.dev/library/music
+https://kaino.dev/library/sfx
+CC0 1.0 Universal: https://creativecommons.org/publicdomain/zero/1.0/

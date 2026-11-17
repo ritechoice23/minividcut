@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Space now always plays or pauses the active preview — even while a button, tab, slider or other control has keyboard focus. Text fields, settings, the shortcuts dialog and open popover menus keep their normal spacebar behavior.
+
 - Preview the full clip with intros, outros, transitions, captions and music composited live in the app — no render or temporary file until export. Fixed a stale-closure bug that made the composited preview silently refuse to play when an intro or outro was set, and a crash when an image intro or outro was paused. The timeline playhead now follows the composited preview in source time instead of freezing, preview audio is no longer routed through a Web Audio context that could stay suspended and mute every layer, and Unmute reliably clears an autoplay fallback.
 - Keep playback responsive by isolating time updates, batching thumbnail generation, preparing caption artwork concurrently, and warming hardware encoders ahead of the first export.
 - Verify the source video has not changed before exporting and release temporary asset access after a preview closes.

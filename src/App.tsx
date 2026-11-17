@@ -37,6 +37,7 @@ import { BookendsMenu } from './BookendsMenu'
 import { effectiveBookends } from './bookends'
 import { useSequenceCompositor } from './sequence-compositor'
 import { activeTime, playbackClock, selectTimelineTime, useEditor, usePlaybackTime } from './editor-store'
+import { isPlaybackShortcut, isTextEditing } from './playback-shortcut'
 import type { Bookend, Bookends } from './bookends'
 
 type VideoInfo = { path: string; name: string; duration: number; width: number; height: number; bytes: number }
@@ -1685,17 +1686,6 @@ export function App() {
     undoEdit, redoEdit,
   }
   useEffect(() => {
-    const isTextEditing = (el: Element | null): boolean => {
-      if (!el) return false
-      if (el.closest('textarea, [contenteditable="true"], [contenteditable=""]')) return true
-      const input = el.closest('input')
-      if (input) {
-        const nonText = ['range', 'color', 'checkbox', 'radio', 'button', 'submit', 'reset', 'file']
-        return !nonText.includes(input.type.toLowerCase())
-      }
-      return false
-    }
-
     const shortcutsHandler = (event: KeyboardEvent) => {
       const state = shortcutState.current
       if (document.querySelector('.settings-page:not([hidden])')) return
@@ -1759,9 +1749,10 @@ export function App() {
     }
     const playbackShortcut = (event: KeyboardEvent) => {
       const state = shortcutState.current
-      if ((event.key !== ' ' && event.code !== 'Space') || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || !state.source || state.settingsOpen) return
-      const target = event.target instanceof Element ? event.target : null
-      if (isTextEditing(target) || target?.closest('button, select, input[type="range"], a')) return
+      if (!isPlaybackShortcut(event,
+        { hasSource: Boolean(state.source), settingsOpen: state.settingsOpen, shortcutsOpen: state.shortcuts },
+        event.target instanceof Element ? event.target : null,
+        selector => document.querySelector(selector))) return
       event.preventDefault()
       event.stopPropagation()
       if (!event.repeat) state.togglePlay()

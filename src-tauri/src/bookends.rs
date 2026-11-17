@@ -1,4 +1,5 @@
 use crate::video::{self, Format, FramePosition, Framing, Result};
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -299,6 +300,38 @@ fn inspect_image(path: &Path) -> Result<()> {
         "Could not read this image",
     )?;
     Ok(())
+}
+
+/// Decode a bookend image to a browser-safe PNG data URL. WebView2 cannot
+/// display every format FFmpeg accepts (and asset scope can be revoked), so
+/// previews use this instead of pointing <img> at the original file.
+#[tauri::command]
+pub fn bookend_thumbnail(path: PathBuf) -> Result<String> {
+    if !path.is_absolute() || !path.is_file() {
+        return Err("Choose an existing image file.".into());
+    }
+    let png = video::output(
+        video::command("ffmpeg")
+            .args(["-v", "error", "-nostdin", "-y", "-i"])
+            .arg(&path)
+            .args([
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale='min(960,iw)':-2",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "png",
+                "pipe:1",
+            ]),
+        "ffmpeg",
+        "Could not render this image for preview",
+    )?;
+    Ok(format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(&png.stdout)
+    ))
 }
 
 #[cfg(test)]

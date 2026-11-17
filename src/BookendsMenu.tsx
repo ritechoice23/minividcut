@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react'
-import { convertFileSrc, invoke } from '@tauri-apps/api/core'
+import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { Play, X } from 'lucide-react'
 import { CENTER, frameTravel, panPosition } from './framing'
@@ -112,7 +112,7 @@ export const BookendsMenu = memo(function BookendsMenu({ project, clip, disabled
 function ImagePlacement({ image, label, aspect, disabled, onChange }: {
   image: Bookend; label: string; aspect: number; disabled: boolean; onChange: (image: Bookend) => void
 }) {
-  const [ready, setReady] = useState(false)
+  const [thumbnail, setThumbnail] = useState('')
   const [imageAspect, setImageAspect] = useState(0)
   const [error, setError] = useState('')
   const drag = useRef<{ x: number; y: number; position: typeof CENTER } | null>(null)
@@ -123,8 +123,8 @@ function ImagePlacement({ image, label, aspect, disabled, onChange }: {
 
   useEffect(() => {
     let current = true
-    void invoke('inspect_bookend', { path }).then(() => {
-      if (current) setReady(true)
+    void invoke<string>('bookend_thumbnail', { path }).then(dataUrl => {
+      if (current) setThumbnail(dataUrl)
     }).catch(error => {
       if (current) setError(String(error))
     })
@@ -145,7 +145,7 @@ function ImagePlacement({ image, label, aspect, disabled, onChange }: {
         if (!height) return
         onChange({ ...image, position: panPosition(start.position, travel, (event.clientX - start.x) / height, (event.clientY - start.y) / height) })
       }} onLostPointerCapture={() => { drag.current = null }}>
-      {ready && <img src={convertFileSrc(path)} alt={`${label} placement preview`} draggable={false}
+      {thumbnail && <img src={thumbnail} alt={`${label} placement preview`} draggable={false}
         style={{ objectPosition: `${position.x}% ${position.y}%` }} onLoad={event => {
           setImageAspect(event.currentTarget.naturalWidth / event.currentTarget.naturalHeight)
         }} onError={() => setError('Could not display the image preview.')} />}

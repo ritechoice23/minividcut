@@ -11,13 +11,14 @@ export const MAX_TRANSITION_FRAMES = 15
 type Transition = 'cut' | 'fade' | 'slide'
 export type Format = 'landscape' | 'portrait'
 
-export type BookendMedia = { image: boolean; duration: number }
+export type BookendMedia = { image: boolean; duration: number; preview?: string }
 
 export type PlanLayer = {
   path: string
   image: boolean
   transition: Transition
   position?: FramePosition
+  preview?: string
   length: number
   start: number
   overlap: number
@@ -100,11 +101,13 @@ export function buildCompositionPlan({
     },
     intro: introInfo && introMedia ? {
       path: introInfo.path, image: introMedia.image, transition: introInfo.transition,
-      position: introInfo.position, length: introLength, start: 0, overlap: seconds(firstOverlap),
+      position: introInfo.position, preview: introMedia.preview,
+      length: introLength, start: 0, overlap: seconds(firstOverlap),
     } : null,
     outro: outroInfo && outroMedia ? {
       path: outroInfo.path, image: outroMedia.image, transition: outroInfo.transition,
-      position: outroInfo.position, length: outroLength, start: outroStart, overlap: seconds(lastOverlap),
+      position: outroInfo.position, preview: outroMedia.preview,
+      length: outroLength, start: outroStart, overlap: seconds(lastOverlap),
     } : null,
     captions, music, musicPath, muted,
   }

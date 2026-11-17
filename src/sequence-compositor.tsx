@@ -307,7 +307,12 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
   const resolveMedia = async (end: NonNullable<Bookends['intro']>): Promise<BookendMedia> => {
     const cached = mediaCache.current.get(end.path)
     if (cached) return cached
-    if (end.image) return { image: true, duration: end.duration ?? 2 }
+    if (end.image) {
+      const preview = await invoke<string>('bookend_thumbnail', { path: end.path }).catch(() => '')
+      const media = { image: true, duration: end.duration ?? 2, preview }
+      mediaCache.current.set(end.path, media)
+      return media
+    }
     if (Number.isFinite(end.duration) && (end.duration ?? 0) > 0) {
       return { image: false, duration: end.duration! }
     }
@@ -405,7 +410,7 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
       {plan.intro && <div className="composite-layer">
         {plan.intro.image
           ? <img ref={introRef as Ref<HTMLImageElement>} className="fit" style={{ objectPosition: layerPosition(plan) }}
-              src={convertFileSrc(plan.intro.path)} alt="" draggable={false} />
+              src={plan.intro.preview || convertFileSrc(plan.intro.path)} alt="" draggable={false} />
           : <video ref={introRef as Ref<HTMLVideoElement>} className="fit" style={{ objectPosition: layerPosition(plan) }}
               src={convertFileSrc(plan.intro.path)} playsInline preload="auto" />}
       </div>}

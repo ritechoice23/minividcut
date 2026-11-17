@@ -34,6 +34,7 @@ pub fn run() {
             video::release_asset,
             video::open_music,
             bookends::inspect_bookend,
+            bookends::bookend_thumbnail,
             kaino::search_kaino,
             kaino::local_kaino_tracks,
             kaino::preview_kaino,

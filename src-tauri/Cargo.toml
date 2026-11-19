@@ -1,6 +1,6 @@
 [package]
 name = "minividcut"
-version = "1.1.0"
+version = "1.2.0"
 description = "A lightweight local video cutter"
 edition = "2021"
 license = "MIT"

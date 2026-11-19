@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.0 — 2026-11-19
+
+- **Layer as much text as you need.** A clip can now hold up to 50 separate text blocks, each with its own words, size, font, colour and position. Pick a block in the Text panel to edit it, drag just that block on the preview, or remove it without touching the others.
+- **Much longer messages.** One text block now accepts up to 4,000 characters instead of 160, and automatically scales to fit the frame so nothing gets clipped.
+- **Old text carries forward.** Text saved by 1.1.0 is migrated into the new block list when a draft opens.
+
 ## 1.1.0 — 2026-11-19
 
 - **Write on the picture.** Open the new Text panel to add a text overlay to a chosen clip (or the current range). Type your words, change the size, font and colour, then drag the text anywhere on the preview — or fine-tune its position with sliders. The text is drawn with the same artwork engine as captions, so what you see in the player is what gets burned into the exported video, in both landscape and portrait.

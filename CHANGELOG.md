@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Windows signing is ready to configure.** A manual release workflow builds and verifies an Authenticode-signed installer from repository secrets and can replace the installer on an existing release. See `docs/windows-code-signing.md`. A code-signing certificate is still required; releases up to 1.2.0 remain unsigned.
+
 ## 1.2.0 — 2026-11-19
 
 - **Layer as much text as you need.** A clip can now hold up to 50 separate text blocks, each with its own words, size, font, colour and position. Pick a block in the Text panel to edit it, drag just that block on the preview, or remove it without touching the others.

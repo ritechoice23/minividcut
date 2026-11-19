@@ -6,20 +6,22 @@ import { drawText, textActive, textLayout } from './text-overlay'
 import type { TextOverlay } from './text-overlay'
 
 export type TextOverlayPreviewProps = {
-  overlay: TextOverlay | null
+  overlays: TextOverlay[]
   format: 'landscape' | 'portrait'
+  selectedId?: string | null
   draggable?: boolean
-  onPosition?: (x: number, y: number) => void
+  onPosition?: (id: string, x: number, y: number) => void
   className?: string
 }
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value))
 
 export const TextOverlayPreview = memo(function TextOverlayPreview({
-  overlay, format, draggable = false, onPosition, className,
+  overlays, format, selectedId, draggable = false, onPosition, className,
 }: TextOverlayPreviewProps) {
   const canvas = useRef<HTMLCanvasElement>(null)
-  const canDrag = draggable && Boolean(onPosition)
+  const canDrag = draggable && Boolean(onPosition) && Boolean(selectedId)
+  const selected = selectedId ? overlays.find(overlay => overlay.id === selectedId) ?? null : null
 
   useLayoutEffect(() => {
     const surface = canvas.current
@@ -30,19 +32,21 @@ export const TextOverlayPreview = memo(function TextOverlayPreview({
     surface.width = width
     surface.height = height
     context.clearRect(0, 0, width, height)
-    if (!overlay || !textActive(overlay)) return
-    const layout = textLayout(context, overlay, format)
-    if (!layout) return
-    drawText(context, layout, overlay)
-  }, [overlay, format])
+    for (const overlay of overlays) {
+      if (!textActive(overlay)) continue
+      const layout = textLayout(context, overlay, format)
+      if (!layout) continue
+      drawText(context, layout, overlay)
+    }
+  }, [overlays, format])
 
   const report = (event: PointerEvent<HTMLDivElement>) => {
-    if (!onPosition) return
+    if (!onPosition || !selectedId) return
     const rect = event.currentTarget.getBoundingClientRect()
     if (!rect.width || !rect.height) return
     const x = clamp((event.clientX - rect.left) / rect.width, 0, 1)
     const y = clamp((event.clientY - rect.top) / rect.height, 0, 1)
-    onPosition(x, y)
+    onPosition(selectedId, x, y)
   }
 
   const startDrag = (event: PointerEvent<HTMLDivElement>) => {
@@ -76,13 +80,13 @@ export const TextOverlayPreview = memo(function TextOverlayPreview({
       onLostPointerCapture={canDrag ? endDrag : undefined}
     >
       <canvas ref={canvas} className="caption-artwork" aria-hidden="true" />
-      {canDrag && (
+      {canDrag && selected && (
         <span
           className="text-position-handle"
           aria-hidden="true"
           style={{
-            left: `${(overlay?.x ?? 0.5) * 100}%`,
-            top: `${(overlay?.y ?? 0.5) * 100}%`,
+            left: `${selected.x * 100}%`,
+            top: `${selected.y * 100}%`,
             transform: 'translate(-50%, -50%)',
           }}
         ><Move size={14} /></span>

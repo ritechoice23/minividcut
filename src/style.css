@@ -740,3 +740,40 @@ h2 { font-size: 13px; font-weight: 660; letter-spacing: .03px; }
   color: var(--lime);
   pointer-events: none;
 }
+
+/* Multiple independent text blocks --------------------------------------- */
+.text-layer-list { display: grid; gap: 5px; max-height: 130px; overflow: auto; }
+.text-layer-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  width: 100%;
+  min-height: 30px;
+  padding: 4px 7px;
+  border: 1px solid #393939;
+  border-radius: 6px;
+  background: #1b1b1b;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.text-layer-item:hover { border-color: #566b3c; color: #f2f2f0; }
+.text-layer-item.active { border-color: var(--lime); background: #2a3320; color: #dff3bd; }
+.text-layer-index {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: #333;
+  color: #e5e5e0;
+  font-size: 10px;
+}
+.text-layer-item.active .text-layer-index { background: var(--lime); color: #101010; }
+.text-layer-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.text-layer-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.text-layer-count { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.text-layer-hint { color: var(--muted); line-height: 1.45; }

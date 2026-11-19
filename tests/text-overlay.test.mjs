@@ -1,19 +1,24 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
-  DEFAULT_TEXT_OVERLAY, TEXT_MAX_CHARS, TEXT_MAX_SIZE, TEXT_MIN_SIZE, TEXT_STROKE_COLOR, TEXT_STROKE_RATIO,
-  drawText, moveText, normalizeText, textActive, textLayout,
+  createTextOverlay, DEFAULT_TEXT_OVERLAY, TEXT_MAX_CHARS, TEXT_MAX_LAYERS, TEXT_MAX_SIZE, TEXT_MIN_SIZE,
+  TEXT_STROKE_COLOR, TEXT_STROKE_RATIO, drawText, migrateLegacyText, moveText, normalizeText, normalizeTexts, textActive, textLayout,
 } from '../src/text-overlay.ts'
 
 const measure = (perChar = 10) => ({ font: '', measureText(s) { return { width: s.length * perChar } } })
-const overlay = (extra = {}) => ({ ...DEFAULT_TEXT_OVERLAY, text: 'Hi', ...extra })
+const overlay = (extra = {}) => ({ ...DEFAULT_TEXT_OVERLAY, id: 'x', text: 'Hi', ...extra })
 
 test('normalizeText falls back to defaults for garbage input', () => {
   for (const junk of [undefined, null, 42, 'hello', [], true, NaN]) {
-    assert.deepEqual(normalizeText(junk), DEFAULT_TEXT_OVERLAY)
+    const result = normalizeText(junk)
+    assert.deepEqual({ ...result, id: '' }, DEFAULT_TEXT_OVERLAY)
+    assert.ok(typeof result.id === 'string' && result.id.length > 0)
   }
-  assert.deepEqual(normalizeText({}), DEFAULT_TEXT_OVERLAY)
-  assert.deepEqual(normalizeText({ text: undefined, size: undefined, x: null, y: 'bad' }), DEFAULT_TEXT_OVERLAY)
+  assert.deepEqual({ ...normalizeText({}), id: '' }, DEFAULT_TEXT_OVERLAY)
+  assert.deepEqual(
+    { ...normalizeText({ text: undefined, size: undefined, x: null, y: 'bad' }), id: '' },
+    DEFAULT_TEXT_OVERLAY,
+  )
 })
 
 test('normalizeText keeps a fresh object and never shares input references', () => {
@@ -21,13 +26,13 @@ test('normalizeText keeps a fresh object and never shares input references', () 
   const result = normalizeText(source)
   assert.notEqual(result, source)
   assert.deepEqual(result, {
-    text: 'Clip', size: 0.07, x: 0.5, y: 0.5, color: '#ffffff', font: 'Segoe UI',
+    id: 'x', text: 'Clip', size: 0.07, x: 0.5, y: 0.5, color: '#ffffff', font: 'Segoe UI',
   })
   result.x = 0.9
   assert.equal(source.x, 0.5)
 })
 
-test('normalizeText coerces text and truncates at 160 characters', () => {
+test('normalizeText coerces text and truncates at TEXT_MAX_CHARS', () => {
   assert.equal(normalizeText({ text: 123 }).text, '123')
   assert.equal(normalizeText({ text: ['a', 'b'] }).text, 'a,b')
   assert.equal(normalizeText({ text: 'x'.repeat(TEXT_MAX_CHARS + 40) }).text.length, TEXT_MAX_CHARS)
@@ -63,6 +68,96 @@ test('normalizeText accepts only valid colors and known fonts', () => {
   }
 })
 
+test('createTextOverlay returns a fresh non-empty id and blank text', () => {
+  const first = createTextOverlay()
+  const second = createTextOverlay()
+  assert.deepEqual({ ...first, id: '' }, DEFAULT_TEXT_OVERLAY)
+  assert.equal(first.text, '')
+  assert.ok(typeof first.id === 'string' && first.id.length > 0)
+  assert.ok(typeof second.id === 'string' && second.id.length > 0)
+  assert.notEqual(first.id, second.id)
+  assert.notEqual(first, second)
+})
+
+test('normalizeText preserves a valid id and generates one when missing', () => {
+  assert.equal(normalizeText({ id: 'keep-me', text: 'hi' }).id, 'keep-me')
+  const generated = normalizeText({ text: 'hi' })
+  assert.ok(typeof generated.id === 'string' && generated.id.length > 0)
+  assert.notEqual(generated.id, '')
+  for (const bad of ['', 42, null, undefined]) {
+    const result = normalizeText({ id: bad, text: 'hi' })
+    assert.ok(typeof result.id === 'string' && result.id.length > 0)
+  }
+})
+
+test('normalizeTexts returns [] for garbage', () => {
+  for (const junk of [undefined, null, 42, 'hello', true, NaN, {}, []]) {
+    assert.deepEqual(normalizeTexts(junk), [])
+  }
+})
+
+test('normalizeTexts migrates a legacy single overlay into one element', () => {
+  const legacy = overlay({ text: 'legacy', id: 'legacy-id' })
+  const result = normalizeTexts(legacy)
+  assert.equal(result.length, 1)
+  assert.deepEqual(result[0], { ...legacy })
+})
+
+test('normalizeTexts de-duplicates ids, keeping the first', () => {
+  const result = normalizeTexts([
+    overlay({ id: 'a', text: 'first' }),
+    overlay({ id: 'a', text: 'second' }),
+    overlay({ id: 'b', text: 'third' }),
+  ])
+  assert.deepEqual(result.map(item => item.id), ['a', 'b'])
+  assert.deepEqual(result.map(item => item.text), ['first', 'third'])
+})
+
+test('normalizeTexts caps the number of layers at TEXT_MAX_LAYERS', () => {
+  const input = Array.from({ length: TEXT_MAX_LAYERS + 10 }, (_, index) =>
+    overlay({ id: `id-${index}`, text: `text ${index}` }))
+  const result = normalizeTexts(input)
+  assert.equal(result.length, TEXT_MAX_LAYERS)
+  assert.equal(result[0].text, 'text 0')
+  assert.equal(result.at(-1).text, `text ${TEXT_MAX_LAYERS - 1}`)
+})
+
+test('normalizeTexts skips malformed entries and normalizes valid ones', () => {
+  const result = normalizeTexts([
+    null, 42, 'nope', [],
+    { text: 'bad size', size: 999 },
+    { text: '   ' },
+    { id: 'ok', text: 'good', color: '#AABBCC', font: 'Impact' },
+  ])
+  assert.equal(result.length, 3)
+  assert.equal(result[0].size, TEXT_MAX_SIZE)
+  assert.ok(result[0].id.length > 0)
+  assert.equal(result[1].text, '   ') // blank layers stay editable, never exported
+  assert.deepEqual(result[2], { id: 'ok', text: 'good', size: 0.07, x: 0.5, y: 0.5, color: '#AABBCC', font: 'Impact' })
+})
+
+test('normalizeTexts does not mutate its input', () => {
+  const source = [
+    overlay({ id: 'a', text: 'first' }),
+    overlay({ id: 'a', text: 'second' }),
+  ]
+  const snapshot = structuredClone(source)
+  normalizeTexts(source)
+  assert.deepEqual(source, snapshot)
+  assert.equal(source[0].text, 'first')
+})
+
+test('migrateLegacyText gives a v1.1.0 overlay one stable id', () => {
+  const legacy = { id: 1, start: 0, end: 3, text: { text: 'old title', size: 0.1 } }
+  const migrated = migrateLegacyText(legacy)
+  assert.equal(migrated.text, undefined)
+  assert.equal(migrated.texts.length, 1)
+  assert.equal(migrated.texts[0].text, 'old title')
+  assert.ok(migrated.texts[0].id.length > 0)
+  assert.deepEqual(migrateLegacyText(migrated), migrated)
+  assert.equal(legacy.text.text, 'old title')
+})
+
 test('textActive ignores blank overlays', () => {
   assert.equal(textActive(undefined), false)
   assert.equal(textActive(null), false)
@@ -72,10 +167,11 @@ test('textActive ignores blank overlays', () => {
   assert.equal(textActive(overlay({ text: '  x  ' })), true)
 })
 
-test('moveText clamps position and does not mutate the input', () => {
-  const source = overlay({ x: 0.2, y: 0.3 })
+test('moveText clamps position, spreads id, and does not mutate the input', () => {
+  const source = overlay({ id: 'move-id', x: 0.2, y: 0.3 })
   const moved = moveText(source, 5, -2)
   assert.deepEqual(moved, { ...source, x: 1, y: 0 })
+  assert.equal(moved.id, 'move-id')
   assert.equal(source.x, 0.2)
   assert.equal(source.y, 0.3)
   assert.notEqual(moved, source)
@@ -153,6 +249,31 @@ test('textLayout shrinks oversized text so every line stays inside the frame', (
   assert.ok(layout.x >= 0 && layout.x + layout.width <= 1920)
   assert.ok(layout.y >= 0 && layout.y + layout.height <= 1080)
   assert.equal(layout.lines.length, 20)
+})
+
+test('textLayout fits 4000 characters at max size in both formats without losing text', () => {
+  const text = 'a'.repeat(TEXT_MAX_CHARS)
+  for (const [format, width, height] of [['landscape', 1920, 1080], ['portrait', 1080, 1920]]) {
+    const layout = textLayout(measure(1), overlay({ text, size: TEXT_MAX_SIZE }), format)
+    assert.notEqual(layout, null)
+    assert.equal(layout.lines.join('').length, TEXT_MAX_CHARS)
+    assert.ok(layout.width <= width * 0.91, `${format} width ${layout.width} > ${width * 0.91}`)
+    assert.ok(layout.height <= height * 0.91, `${format} height ${layout.height} > ${height * 0.91}`)
+    assert.ok(layout.x >= 0 && layout.x + layout.width <= width)
+    assert.ok(layout.y >= 0 && layout.y + layout.height <= height)
+  }
+})
+
+test('textLayout keeps thousands of newline-separated lines inside the frame', () => {
+  const text = 'A' + '\n'.repeat(TEXT_MAX_CHARS - 1)
+  const layout = textLayout(measure(1), overlay({ text, size: TEXT_MAX_SIZE }), 'portrait')
+  assert.equal(layout.lines.length, TEXT_MAX_CHARS)
+  const center = layout.y + layout.height / 2
+  const half = (layout.lines.length - 1) / 2
+  const first = center - half * layout.step
+  const last = center + half * layout.step
+  assert.ok(first >= 0 && first <= 1920, `first baseline ${first}`)
+  assert.ok(last >= 0 && last <= 1920, `last baseline ${last}`)
 })
 
 test('drawText strokes then fills each line at its centered baseline', () => {

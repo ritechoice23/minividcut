@@ -14,6 +14,9 @@ export type Clip = Range & {
   title?: string
   titleManuallyEdited?: boolean
   captions?: CaptionTrack
+  /** Multiple independent text blocks on this clip. */
+  texts?: TextOverlay[]
+  /** @deprecated v1.1.0 single-overlay format, read only for draft migration. */
   text?: TextOverlay
   music?: Music | null
   bookends?: Bookends

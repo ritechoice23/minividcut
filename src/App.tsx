@@ -27,7 +27,7 @@ import { CaptionPreview } from './CaptionPreview'
 import { prepareCaptionOverlay } from './caption-export'
 import { TextMenu } from './TextMenu'
 import { TextOverlayPreview } from './TextOverlayPreview'
-import { moveText, normalizeText, textActive } from './text-overlay'
+import { createTextOverlay, migrateLegacyText, moveText, normalizeText, normalizeTexts, textActive, TEXT_MAX_LAYERS } from './text-overlay'
 import type { TextOverlay } from './text-overlay'
 import type { CaptionModel, CaptionProgress } from './CaptionEditor'
 import { captionCut, captionSlice, captionsForKept, clipsNeedingCaptions, DEFAULT_CAPTION_STYLE, offsetCaption, restyleCaptionedClip } from './captions'
@@ -54,6 +54,8 @@ type Draft = {
   keptRanges?: Range[]
   format: Format; quality: Quality; framing: Framing; positions: Record<Format, FramePosition>
   captions: Record<string, CaptionTrack | undefined>; captionStyle: CaptionStyle | null
+  texts?: TextOverlay[]
+  /** @deprecated v1.1.0 single-overlay draft format, read only for migration. */
   text?: TextOverlay | null
   music?: Music | null
   bookends?: Bookends
@@ -68,7 +70,10 @@ function readDraft(): Draft | null {
     if ((saved?.version !== 1 && saved?.version !== 2) || typeof saved?.source?.path !== 'string') return null
     const length = saved.source.duration
     const clips = Array.isArray(saved.clips)
-      ? saved.clips.map((clip: Clip) => Number.isFinite(length) ? normalizeClip(clip, length) : clip).filter(Boolean)
+      ? saved.clips.map((clip: Clip) => {
+        const normalized = Number.isFinite(length) ? normalizeClip(clip, length) : clip
+        return normalized ? migrateLegacyText(normalized) : null
+      }).filter(Boolean)
       : []
     const keptRanges = Array.isArray(saved.keptRanges) && saved.keptRanges.length
       && saved.keptRanges.every((part: Range) => validRange(part, length))
@@ -262,7 +267,8 @@ export function App() {
   const [captionProgress, setCaptionProgress] = useState<CaptionProgress | null>(null)
   const [captionStatus, setCaptionStatus] = useState<{ key: string; text: string } | null>(null)
   const [draftCaptions, setDraftCaptions] = useState<Record<string, CaptionTrack | undefined>>({})
-  const [draftText, setDraftText] = useState<TextOverlay | null>(null)
+  const [draftTexts, setDraftTexts] = useState<TextOverlay[]>([])
+  const [selectedTextId, setSelectedTextId] = useState<string | null>(null)
   const sharedCaptionStyle = useRef<CaptionStyle | null>(null)
   const clipsTab = useRef<HTMLButtonElement>(null)
   const captionsTab = useRef<HTMLButtonElement>(null)
@@ -450,16 +456,18 @@ export function App() {
   type EditSnapshot = {
     range: Range; clips: Clip[]; sections: Range[]; keptRanges: Range[]
     draftCaptions: Record<string, CaptionTrack | undefined>
-    draftText: TextOverlay | null
+    draftTexts: TextOverlay[]
+    selectedTextId: string | null
     selectedId: number | null; reviewIndex: number | null
   }
   const past = useRef<EditSnapshot[]>([])
   const future = useRef<EditSnapshot[]>([])
   const captionEditAt = useRef(0)
+  const textEditAt = useRef(0)
   const [, setHistoryRevision] = useState(0)
   // Read through a ref so memoized callbacks always snapshot the latest state.
-  const editorState = useRef({ range, clips, sections, keptRanges, draftCaptions, draftText, selectedId, reviewIndex })
-  editorState.current = { range, clips, sections, keptRanges, draftCaptions, draftText, selectedId, reviewIndex }
+  const editorState = useRef({ range, clips, sections, keptRanges, draftCaptions, draftTexts, selectedTextId, selectedId, reviewIndex })
+  editorState.current = { range, clips, sections, keptRanges, draftCaptions, draftTexts, selectedTextId, selectedId, reviewIndex }
   const takeSnapshot = (): EditSnapshot => ({ ...editorState.current })
   const recordEdit = () => {
     past.current.push(takeSnapshot())
@@ -472,13 +480,21 @@ export function App() {
     if (now - captionEditAt.current > 800) recordEdit()
     captionEditAt.current = now
   }
+  // Text uses its own window so a caption edit immediately before typing text
+  // stays a separate undo step.
+  const recordTextEdit = () => {
+    const now = performance.now()
+    if (now - textEditAt.current > 800) recordEdit()
+    textEditAt.current = now
+  }
   const applySnapshot = (state: EditSnapshot) => {
     setRange(state.range)
     setClips(state.clips)
     setSections(state.sections)
     setKeptRanges(state.keptRanges)
     setDraftCaptions(state.draftCaptions)
-    setDraftText(state.draftText)
+    setDraftTexts(state.draftTexts)
+    setSelectedTextId(state.selectedTextId)
     setSelectedId(state.selectedId)
     setReviewIndex(state.reviewIndex)
   }
@@ -634,12 +650,18 @@ export function App() {
   const captionKey = selectedClip ? `clip-${selectedClip.id}` : reviewed ? `section-${reviewed.start}-${reviewed.end}` : 'range'
   const currentCaptions = selectedClip ? selectedClip.captions : draftCaptions[captionKey]
   const activeCaptions = useMemo(() => captionSlice(currentCaptions, range), [currentCaptions, range])
-  // A selected clip owns its text; `draftText` belongs only to the unsaved
-  // range. Falling back to the draft would make "Remove text" appear to fail.
-  const activeText = useMemo(() => {
-    const value = selectedClip ? selectedClip.text : draftText
-    return value ? normalizeText(value) : null
-  }, [selectedClip, draftText])
+  // A selected clip owns its text blocks; `draftTexts` belong only to the
+  // unsaved range. normalizeTexts also migrates v1.1.0 single-overlay drafts.
+  const activeTexts = useMemo(() => selectedClip
+    ? normalizeTexts(selectedClip.texts ?? selectedClip.text)
+    : normalizeTexts(draftTexts),
+  [selectedClip, draftTexts])
+  const selectedText = activeTexts.find(text => text.id === selectedTextId) ?? null
+  useEffect(() => {
+    if (activeTexts.length && !activeTexts.some(text => text.id === selectedTextId)) {
+      setSelectedTextId(activeTexts[0].id)
+    } else if (!activeTexts.length && selectedTextId) setSelectedTextId(null)
+  }, [activeTexts, selectedTextId])
   const bookends = useMemo(() => effectiveBookends(projectBookends, selectedClip?.bookends), [projectBookends, selectedClip?.bookends])
   const hasKeptEdit = keptRanges.length > 0 && (keptRanges.length > 1
     || keptRanges[0].start > 0.000001 || keptRanges[keptRanges.length - 1].end < duration - 0.000001)
@@ -681,7 +703,7 @@ export function App() {
   const captionsRunning = captionProgress !== null
   const hasDraftCaptions = Object.values(draftCaptions).some(track => track?.cues.length)
 
-  const hasEdits = Boolean(source && (clips.length || sections.length || projectMusic || projectBookends.intro || projectBookends.outro || hasDraftCaptions || textActive(draftText) ||
+  const hasEdits = Boolean(source && (clips.length || sections.length || projectMusic || projectBookends.intro || projectBookends.outro || hasDraftCaptions || draftTexts.some(textActive) ||
     range.start !== 0 || range.end !== source.duration || draftFormat !== 'landscape' ||
     draftQuality !== 'compact' || draftFraming !== 'fill' || Object.values(positions).some(
       position => position.x !== CENTER.x || position.y !== CENTER.y)))
@@ -695,7 +717,7 @@ export function App() {
     draftRef.current = {
       version: 2, source, range, clips, sections, keptRanges, format: draftFormat, quality: draftQuality,
       framing: draftFraming, positions, captions: draftCaptions, captionStyle: sharedCaptionStyle.current,
-      text: draftText,
+      texts: draftTexts,
       music: projectMusic,
       bookends: projectBookends,
     }
@@ -708,7 +730,7 @@ export function App() {
         setNotice('Draft recovery could not save your latest edits.')
       }
     }, 400)
-  }, [source, range, clips, sections, keptRanges, draftFormat, draftQuality, draftFraming, positions, draftCaptions, draftText, projectMusic, projectBookends])
+  }, [source, range, clips, sections, keptRanges, draftFormat, draftQuality, draftFraming, positions, draftCaptions, draftTexts, projectMusic, projectBookends])
   useEffect(() => {
     const flush = () => {
       if (draftTimer.current === null || !draftRef.current) return
@@ -780,8 +802,8 @@ export function App() {
       setTimelineStart(0)
       setPlaying(false)
       setClips(draft?.clips ?? [])
-      const restoredText = normalizeText(draft?.text)
-      setDraftText(textActive(restoredText) ? restoredText : null)
+      setDraftTexts(normalizeTexts(draft?.texts ?? draft?.text))
+      setSelectedTextId(null)
       setProjectMusic(draft?.music ?? null)
       setProjectBookends(draft?.bookends ?? {})
       setClipActions(null)
@@ -1040,16 +1062,37 @@ export function App() {
     if (currentCaptions) saveCaptions({ ...currentCaptions, style })
   }, [currentCaptions, saveCaptions])
 
-  // Text belongs to one video: a saved clip, or the current range when there
-  // are no clips yet. Position/size changes are rapid edits for undo purposes.
-  const saveText = useCallback((overlay: TextOverlay | null) => {
-    if (exportLock.current || importLock.current) return
-    recordRapidEdit()
-    const next = overlay ? normalizeText(overlay) : null
-    if (selectedId === null) setDraftText(next)
-    else setClips(items => items.map(clip => clip.id === selectedId
-      ? { ...clip, text: next ?? undefined } : clip))
+  // Text belongs to one video: a saved clip, or the current range. Every block
+  // keeps its own id, so an edit or drag can never move a different layer.
+  const updateTexts = useCallback((change: (items: TextOverlay[]) => TextOverlay[]) => {
+    if (exportLock.current || importLock.current) return false
+    recordTextEdit()
+    if (selectedId === null) setDraftTexts(current => change(current))
+    else setClips(items => items.map(clip => {
+      if (clip.id !== selectedId) return clip
+      // Migrates a v1.1.0 single-overlay clip on its first text edit.
+      const { text: _legacy, ...rest } = clip
+      void _legacy
+      return { ...rest, texts: change(normalizeTexts(clip.texts ?? clip.text)) }
+    }))
+    return true
   }, [selectedId])
+
+  const saveText = useCallback((overlay: TextOverlay) => {
+    const next = normalizeText(overlay)
+    updateTexts(items => items.map(item => item.id === next.id ? next : item))
+  }, [updateTexts])
+
+  const addText = useCallback(() => {
+    const next = createTextOverlay()
+    if (updateTexts(items => [...normalizeTexts(items), next].slice(0, TEXT_MAX_LAYERS))) setSelectedTextId(next.id)
+  }, [updateTexts])
+
+  const removeText = useCallback((id: string) => {
+    if (updateTexts(items => items.filter(item => item.id !== id))) {
+      setSelectedTextId(current => current === id ? null : current)
+    }
+  }, [updateTexts])
 
   const applyCaptionStyle = useCallback((style: CaptionStyle) => {
     if (exportLock.current || importLock.current || captionJob.current) return false
@@ -1448,11 +1491,12 @@ export function App() {
     }
     recordEdit()
     const clip = { start: range.start, end: range.end, segments: [{ ...range }], id: nextId.current++,
-      captions: activeCaptions, text: activeText ?? undefined }
+      captions: activeCaptions, texts: activeTexts.length ? activeTexts : undefined }
     setClips(items => [...items, clip])
     // The range's text now belongs to the saved clip; do not leak it onto the
     // next clip edited from an unrelated range.
-    setDraftText(null)
+    setDraftTexts([])
+    setSelectedTextId(null)
     setSelectedId(null)
     setReviewIndex(null)
     setNotice('')
@@ -1634,10 +1678,10 @@ export function App() {
       segments: keptRanges.map(part => ({ ...part })),
       title: 'Edited video',
       captions: captionsForKept(draftCaptions.range, keptRanges),
-      text: activeText ?? undefined,
+      texts: activeTexts.length ? activeTexts : undefined,
     }
     const batch: Clip[] = hasKeptEdit ? [editedClip]
-      : only ? [only] : clips.length ? clips : [{ ...range, id: 0, captions: activeCaptions, text: activeText ?? undefined }]
+      : only ? [only] : clips.length ? clips : [{ ...range, id: 0, captions: activeCaptions, texts: activeTexts.length ? activeTexts : undefined }]
     const options = { format: draftFormat, framing: draftFraming, position: positions[draftFormat], quality: draftQuality }
     if (!batch.every(clip => validRange(clip, duration))) return
     exportLock.current = true
@@ -1670,7 +1714,8 @@ export function App() {
         ...current, states: groupExportStates(unitStates, owners, batch.length),
       })
       setExportBatch({ ranges: batch, states: batch.map(() => ({ status: 'queued' })), weights, running: true, options })
-      const hasCaptionArtwork = batch.some(clip => clip.captions?.cues.some(cue => cue.text.trim()) || textActive(clip.text))
+      const hasCaptionArtwork = batch.some(clip => clip.captions?.cues.some(cue => cue.text.trim())
+        || normalizeTexts(clip.texts ?? clip.text).some(textActive))
       if (hasCaptionArtwork) setNotice('Preparing caption artwork…')
       const jobId = crypto.randomUUID()
       const channel = new Channel<ExportProgress | null>()
@@ -1701,9 +1746,9 @@ export function App() {
         const chunk = units.slice(index, index + OVERLAY_CONCURRENCY)
         const rendered = await Promise.all(chunk.map(async unit => {
           const captions = captionSlice(unit.clip.captions, unit.segment, true)
-          const text = unit.clip.text
-          if (!captions && !textActive(text)) return undefined
-          return await prepareCaptionOverlay(captions, text, options.format,
+          const texts = normalizeTexts(unit.clip.texts ?? unit.clip.text)
+          if (!captions && !texts.some(textActive)) return undefined
+          return await prepareCaptionOverlay(captions, texts, options.format,
             unit.segment.end - unit.segment.start, () => cancelRequested.current) || undefined
         }))
         rendered.forEach((captionOverlay, offset) => {
@@ -2104,9 +2149,12 @@ export function App() {
                     <CaptionPreview key={previewPath} track={activeCaptions} format={format} video={video}
                       editable={showCaptionEditor && !editingCaptionJob} onStyle={saveCaptionStyle} />}
                   {sequence.stage}
-                  {activeText && <TextOverlayPreview overlay={activeText} format={format}
-                    draggable={mediaDock === 'text' && !disabled}
-                    onPosition={(x, y) => saveText(moveText(activeText, x, y))} />}
+                  {activeTexts.length > 0 && <TextOverlayPreview overlays={activeTexts} format={format}
+                    selectedId={selectedText?.id ?? null} draggable={mediaDock === 'text' && !disabled}
+                    onPosition={(id, x, y) => {
+                      const layer = activeTexts.find(text => text.id === id)
+                      if (layer) saveText(moveText(layer, x, y))
+                    }} />}
                 </div>
                 {!sequenceActive && (preview === 'preparing' || preview === 'unavailable') && <div className="stage-message">
                   {preview === 'preparing' && <LoaderCircle size={24} className="spin" />}
@@ -2379,7 +2427,8 @@ export function App() {
             canPreview={Boolean(sequenceKey && validRange(range, duration))} onPreview={playSequence} />
           <TextMenu open={mediaDock === 'text'} onClose={() => closeMediaDock('text')}
             label={selectedClip?.title || captionLabel} disabled={disabled || busy}
-            overlay={activeText} format={format} onChange={saveText} />
+            overlays={activeTexts} selectedId={selectedText?.id ?? null} format={format}
+            onSelect={setSelectedTextId} onAdd={addText} onChange={saveText} onRemove={removeText} />
           {styleDockOpen && activeCaptions && <CaptionStylePanel key={captionKey} style={activeCaptions.style}
             format={format} editing={editingCaptionJob} canApplyStyle={!busy && !captionsRunning}
             onStyle={saveCaptionStyle} onApplyStyle={applyCaptionStyle} onClose={closeStyleDock} />}

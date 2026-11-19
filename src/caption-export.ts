@@ -3,7 +3,7 @@ import { captionDimensions, captionLayouts, captionSequence, renderCaptionSprite
 import type { CaptionState } from './captions'
 import type { CaptionCue, CaptionFormat, CaptionTrack } from './captions'
 import { drawText, textActive, textLayout } from './text-overlay'
-import type { TextOverlay } from './text-overlay'
+import type { TextLayout, TextOverlay } from './text-overlay'
 
 // Caption PNGs can be large for word-by-word styling. Two in flight keeps the
 // parallel speed-up while bounding peak memory to roughly two overlay budgets.
@@ -18,13 +18,13 @@ function png(canvas: HTMLCanvasElement) {
 }
 
 /**
- * Render captions and the optional static text overlay into one cropped sprite
- * sequence. The Rust side only sees an x/y/PNG overlay, so text needs no export
- * changes: it shares the caption artwork's preview-exact rendering path.
+ * Render captions and all static text blocks into one cropped sprite sequence.
+ * The Rust side only sees an x/y/PNG overlay, so text needs no export changes:
+ * it shares the caption artwork's preview-exact rendering path.
  */
 export async function prepareCaptionOverlay(
   track: CaptionTrack | undefined,
-  text: TextOverlay | null | undefined,
+  texts: readonly TextOverlay[],
   format: CaptionFormat,
   duration: number,
   canceled: () => boolean,
@@ -33,13 +33,17 @@ export async function prepareCaptionOverlay(
   const context = canvas.getContext('2d')
   if (!context) throw new Error('Could not open the caption renderer.')
 
-  const active = textActive(text) ? text : null
   const states = track ? captionSequence(track.cues, track.style.mode ?? 'phrase', track.style.syncMs) : []
   const layoutFor = track ? captionLayouts(context, track.cues, track.style, format) : null
   // Measured on the unresized context; textLayout only uses font + measureText,
   // so the result stays valid after the canvas is sized below.
-  const textBox = active ? textLayout(context, active, format) : null
-  if (!states.length && !textBox) return undefined
+  const inks: { overlay: TextOverlay; box: TextLayout }[] = []
+  for (const overlay of texts) {
+    if (!textActive(overlay)) continue
+    const box = textLayout(context, overlay, format)
+    if (box) inks.push({ overlay, box })
+  }
+  if (!states.length && !inks.length) return undefined
 
   // Keep every variant inside one shared region. FFmpeg decodes a sprite only
   // when the displayed artwork changes, independent of the source frame rate.
@@ -51,14 +55,14 @@ export async function prepareCaptionOverlay(
     right = Math.max(right, box.x + box.width)
     bottom = Math.max(bottom, box.y + box.height)
   }
-  if (textBox) {
+  for (const { box } of inks) {
     // Leave room for the outer half of the text stroke so the exported PNG
     // matches the full-frame preview instead of clipping the outline.
-    const pad = Math.ceil(textBox.size * 0.08)
-    x = Math.min(x, textBox.x - pad)
-    y = Math.min(y, textBox.y - pad)
-    right = Math.max(right, textBox.x + textBox.width + pad)
-    bottom = Math.max(bottom, textBox.y + textBox.height + pad)
+    const pad = Math.ceil(box.size * 0.08)
+    x = Math.min(x, box.x - pad)
+    y = Math.min(y, box.y - pad)
+    right = Math.max(right, box.x + box.width + pad)
+    bottom = Math.max(bottom, box.y + box.height + pad)
   }
   if (!Number.isFinite(x)) { x = 0; y = 0; right = 0; bottom = 0 }
   const { width: frameWidth, height: frameHeight } = captionDimensions(format)
@@ -78,7 +82,9 @@ export async function prepareCaptionOverlay(
   // Text is static and drawn on top of every variant, including the empty one.
   // Its layout is in frame coordinates, so shift it into the cropped sprite.
   const paintText = (surfaceInk: CanvasRenderingContext2D) => {
-    if (textBox && active) drawText(surfaceInk, { ...textBox, x: textBox.x - x, y: textBox.y - y }, active)
+    for (const { overlay, box } of inks) {
+      drawText(surfaceInk, { ...box, x: box.x - x, y: box.y - y }, overlay)
+    }
   }
 
   // Each cue variant gets one PNG. Rendering them in batches lets the browser
@@ -140,7 +146,7 @@ export async function prepareCaptionOverlay(
   }
   // A caption must stop at its own end, not at the end of the clip: emit a
   // text-only frame at `cursor` first, then hold that frame until the clip ends.
-  if (!frames.length && !textBox) return undefined
+  if (!frames.length && !inks.length) return undefined
   if (!frames.length) frames.push({ at: 0, image: 0 })
   if (cursor > frames.at(-1)!.at) frames.push({ at: cursor, image: 0 })
   frames.push({ at: Math.max(durationMs, frames.at(-1)!.at + 1), image: 0 })

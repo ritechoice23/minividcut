@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.1.0 — 2026-11-19
+
+- **Write on the picture.** Open the new Text panel to add a text overlay to a chosen clip (or the current range). Type your words, change the size, font and colour, then drag the text anywhere on the preview — or fine-tune its position with sliders. The text is drawn with the same artwork engine as captions, so what you see in the player is what gets burned into the exported video, in both landscape and portrait.
+- **Keep and mix your own music.** Import a local audio track into a personal library that survives moving or deleting the original file, then set its volume, start point and clip-edge fades. Mix changes apply to the running preview immediately and stay with the track.
+- **Clearer caption artwork preparation.** Static text and timed captions share one cropped overlay, so adding a title does not add a second encode pass.
+
 ## 1.0.0 — 2026-11-17
 
 - **Delete a range from the whole video.** Mark In and Out, press Trim, and the footage closes up in both the preview and a single exported file — like a ripple delete in a desktop editor. Drag clip edges to trim, snap to nearby edit points, undo and redo, and zoom or pan the timeline. Playback now starts from the position you clicked instead of jumping back to the beginning.

@@ -7,7 +7,7 @@ import { confirm, open } from '@tauri-apps/plugin-dialog'
 import {
   ArrowDownToLine, Check, ChevronDown, ChevronLeft, ChevronRight, Clapperboard, Copy, Ellipsis, FastForward, Film, FolderOpen, Rewind,
   Keyboard, LoaderCircle, Magnet, Minus, Monitor, Move, Music2, Pause, Pencil, Play, Plus, RotateCcw, Scissors, Smartphone, Square,
-  Redo2, ScissorsLineDashed, Settings as SettingsIcon, Sparkles, Split, Subtitles, Trash2, Undo2, Volume2, VolumeX, X, ZoomIn, ZoomOut,
+  Redo2, ScissorsLineDashed, Settings as SettingsIcon, Sparkles, Split, Subtitles, Trash2, Type, Undo2, Volume2, VolumeX, X, ZoomIn, ZoomOut,
 } from 'lucide-react'
 import {
   clipDuration, clipSegments, cutRange, deleteFromRanges, exportUnits, keptDuration, MAX_CLIPS,
@@ -25,13 +25,18 @@ import { Settings } from './Settings'
 import { CaptionEditor, CaptionStylePanel, progressLabel } from './CaptionEditor'
 import { CaptionPreview } from './CaptionPreview'
 import { prepareCaptionOverlay } from './caption-export'
+import { TextMenu } from './TextMenu'
+import { TextOverlayPreview } from './TextOverlayPreview'
+import { moveText, normalizeText, textActive } from './text-overlay'
+import type { TextOverlay } from './text-overlay'
 import type { CaptionModel, CaptionProgress } from './CaptionEditor'
 import { captionCut, captionSlice, captionsForKept, clipsNeedingCaptions, DEFAULT_CAPTION_STYLE, offsetCaption, restyleCaptionedClip } from './captions'
 import type { CaptionCue, CaptionStyle, CaptionTrack } from './captions'
 import { DEFAULT_MOMENT_QUERY, missingTranscriptRanges, MOMENT_BATCH_SECONDS, momentCandidates, momentLimit } from './moments'
 import type { Moment } from './moments'
 import { MusicMenu } from './MusicMenu'
-import { effectiveMusic, kainoKey, musicGain, musicPosition } from './music'
+import type { ImportedTrack } from './MusicMenu'
+import { DEFAULT_MUSIC_VOLUME, effectiveMusic, kainoKey, musicGain, musicPosition, musicTrackKey, mixStorageKey } from './music'
 import type { KainoCollection, Music, MusicTrack } from './music'
 import { BookendsMenu } from './BookendsMenu'
 import { effectiveBookends } from './bookends'
@@ -49,6 +54,7 @@ type Draft = {
   keptRanges?: Range[]
   format: Format; quality: Quality; framing: Framing; positions: Record<Format, FramePosition>
   captions: Record<string, CaptionTrack | undefined>; captionStyle: CaptionStyle | null
+  text?: TextOverlay | null
   music?: Music | null
   bookends?: Bookends
 }
@@ -84,8 +90,6 @@ const FORMATS = {
   portrait: { ratio: '9:16', aspect: 9 / 16, size: '1080 × 1920', label: 'Portrait', icon: Smartphone },
 }
 const message = (error: unknown) => error instanceof Error ? error.message : String(error)
-const trackKey = (track: MusicTrack) => track.kind === 'file' ? `file:${track.path}`
-  : track.kind === 'kaino' ? kainoKey(track.id, track.collection) : `${track.kind}:${track.id}`
 
 function Key({ children }: { children: ReactNode }) {
   return <kbd>{children}</kbd>
@@ -197,6 +201,7 @@ export function App() {
   const [previewVolume, setPreviewVolume] = useState(100)
   const [projectMusic, setProjectMusic] = useState<Music | null>(null)
   const [musicCacheRevision, setMusicCacheRevision] = useState(0)
+  const [importedTracks, setImportedTracks] = useState<ImportedTrack[]>([])
   const [projectBookends, setProjectBookends] = useState<Bookends>({})
   const musicPlayer = useRef<HTMLAudioElement>(null)
   const setMusicPlayer = useCallback((audio: HTMLAudioElement | null) => {
@@ -204,6 +209,7 @@ export function App() {
     musicPlayer.current = audio
   }, [])
   const musicPaths = useRef(new Map<string, string>())
+  const importMusicRef = useRef<(path: string, scope: 'project' | 'clip') => Promise<void>>(async () => {})
   const [previewMusic, setPreviewMusic] = useState<{ key: string; path: string } | null>(null)
   const [draftFormat, setFormat] = useState<Format>('landscape')
   const [draftQuality, setQuality] = useState<Quality>('compact')
@@ -230,7 +236,7 @@ export function App() {
   const [keptRanges, setKeptRanges] = useState<Range[]>([])
   const [momentsOpen, setMomentsOpen] = useState(false)
   const [styleDockKey, setStyleDockKey] = useState<string | null>(null)
-  const [mediaDock, setMediaDock] = useState<'music' | 'bookends' | null>(null)
+  const [mediaDock, setMediaDock] = useState<'music' | 'bookends' | 'text' | null>(null)
   const [wideWorkspace, setWideWorkspace] = useState(() => matchMedia('(min-width: 1120px)').matches)
   const momentsTrigger = useRef<HTMLButtonElement>(null)
   const [moments, setMoments] = useState<Moment[]>([])
@@ -256,6 +262,7 @@ export function App() {
   const [captionProgress, setCaptionProgress] = useState<CaptionProgress | null>(null)
   const [captionStatus, setCaptionStatus] = useState<{ key: string; text: string } | null>(null)
   const [draftCaptions, setDraftCaptions] = useState<Record<string, CaptionTrack | undefined>>({})
+  const [draftText, setDraftText] = useState<TextOverlay | null>(null)
   const sharedCaptionStyle = useRef<CaptionStyle | null>(null)
   const clipsTab = useRef<HTMLButtonElement>(null)
   const captionsTab = useRef<HTMLButtonElement>(null)
@@ -435,12 +442,15 @@ export function App() {
     return () => body.removeEventListener('wheel', scrollTimeline)
   }, [])
   const selectedClip = clips.find(clip => clip.id === selectedId)
+  const selectedClipRef = useRef(selectedClip)
+  selectedClipRef.current = selectedClip
 
   // Editing history is a snapshot of the timeline state, not of playback.
   // record() is called before a mutation so undo restores the previous state.
   type EditSnapshot = {
     range: Range; clips: Clip[]; sections: Range[]; keptRanges: Range[]
     draftCaptions: Record<string, CaptionTrack | undefined>
+    draftText: TextOverlay | null
     selectedId: number | null; reviewIndex: number | null
   }
   const past = useRef<EditSnapshot[]>([])
@@ -448,8 +458,8 @@ export function App() {
   const captionEditAt = useRef(0)
   const [, setHistoryRevision] = useState(0)
   // Read through a ref so memoized callbacks always snapshot the latest state.
-  const editorState = useRef({ range, clips, sections, keptRanges, draftCaptions, selectedId, reviewIndex })
-  editorState.current = { range, clips, sections, keptRanges, draftCaptions, selectedId, reviewIndex }
+  const editorState = useRef({ range, clips, sections, keptRanges, draftCaptions, draftText, selectedId, reviewIndex })
+  editorState.current = { range, clips, sections, keptRanges, draftCaptions, draftText, selectedId, reviewIndex }
   const takeSnapshot = (): EditSnapshot => ({ ...editorState.current })
   const recordEdit = () => {
     past.current.push(takeSnapshot())
@@ -468,6 +478,7 @@ export function App() {
     setSections(state.sections)
     setKeptRanges(state.keptRanges)
     setDraftCaptions(state.draftCaptions)
+    setDraftText(state.draftText)
     setSelectedId(state.selectedId)
     setReviewIndex(state.reviewIndex)
   }
@@ -494,7 +505,7 @@ export function App() {
 
   const activeMusic = effectiveMusic(projectMusic, selectedClip?.music)
   const musicTrack = activeMusic?.track
-  const musicKey = musicTrack ? trackKey(musicTrack) : ''
+  const musicKey = musicTrack ? musicTrackKey(musicTrack) : ''
   const musicPath = previewMusic?.key === musicKey ? previewMusic.path : ''
   const canMixPreview = preview !== 'preparing' && preview !== 'unavailable'
 
@@ -513,6 +524,12 @@ export function App() {
     })
     return () => { active = false }
   }, [musicKey, musicTrack, musicCacheRevision])
+
+  useEffect(() => {
+    void invoke<ImportedTrack[]>('local_imported_tracks')
+      .then(setImportedTracks)
+      .catch(() => {})
+  }, [])
 
   const refreshKainoTrack = (id: string, removed: boolean, collection: KainoCollection = 'music') => {
     const key = kainoKey(id, collection)
@@ -552,14 +569,57 @@ export function App() {
   }, [syncMusic, musicPath])
 
   const musicSourceRevision = sourceRequest.current
-  const changeMusic = (scope: 'project' | 'clip', music: Music | null | undefined, path?: string) => {
+  // `mix` marks slider/toggle tweaks: they update the running preview live and
+  // do not spam undo history or rebuild the composition.
+  const changeMusic = (scope: 'project' | 'clip', music: Music | null | undefined, path?: string, mix = false) => {
     if (musicSourceRevision !== sourceRequest.current || exportLock.current || importLock.current) return
-    recordRapidEdit()
-    if (path && music) musicPaths.current.set(trackKey(music.track), path)
-    if (scope === 'project') setProjectMusic(music ?? null)
-    else if (selectedClip) {
-      setClips(items => items.map(clip => clip.id === selectedClip.id ? { ...clip, music } : clip))
+    if (!mix) recordRapidEdit()
+    if (path && music) musicPaths.current.set(musicTrackKey(music.track), path)
+    let resolved = music
+    if (music && mix) {
+      try {
+        localStorage.setItem(mixStorageKey(music.track), JSON.stringify({ volume: music.volume, fade: music.fade }))
+      } catch { /* storage may be unavailable */ }
+    } else if (music) {
+      try {
+        const saved = localStorage.getItem(mixStorageKey(music.track))
+        if (saved) {
+          const persisted = JSON.parse(saved) as Partial<Music>
+          resolved = {
+            ...music,
+            volume: typeof persisted.volume === 'number' ? persisted.volume : music.volume,
+            fade: typeof persisted.fade === 'boolean' ? persisted.fade : music.fade,
+          }
+        }
+      } catch { /* ignore malformed saved mix */ }
     }
+    if (scope === 'project') setProjectMusic(resolved ?? null)
+    else if (selectedClip) {
+      setClips(items => items.map(clip => clip.id === selectedClip.id ? { ...clip, music: resolved } : clip))
+    }
+  }
+  const changeMusicMix = (scope: 'project' | 'clip', music: Music | null | undefined) => {
+    changeMusic(scope, music, undefined, true)
+  }
+  const importMusic = async (path: string, scope: 'project' | 'clip') => {
+    const imported = await invoke<ImportedTrack>('import_music', { path })
+    setImportedTracks(current => [imported, ...current.filter(track => track.id !== imported.id)])
+    changeMusic(scope, {
+      track: { kind: 'file', path: imported.path, name: imported.name },
+      volume: DEFAULT_MUSIC_VOLUME,
+    }, imported.path)
+  }
+  importMusicRef.current = importMusic
+  const removeImportedMusic = (id: string) => {
+    const imported = importedTracks.find(track => track.id === id)
+    if (!imported) return
+    if (activeMusic?.track.kind === 'file' && activeMusic.track.path === imported.path) {
+      setNotice('Remove this music from the project before deleting the imported file.')
+      return
+    }
+    void invoke('remove_imported_music', { id })
+      .then(() => setImportedTracks(current => current.filter(track => track.id !== id)))
+      .catch(error => setNotice(message(error)))
   }
   const changeBookend = (scope: 'project' | 'clip', end: keyof Bookends, value: Bookend | null | undefined) => {
     if (musicSourceRevision !== sourceRequest.current || exportLock.current || importLock.current) return
@@ -574,6 +634,12 @@ export function App() {
   const captionKey = selectedClip ? `clip-${selectedClip.id}` : reviewed ? `section-${reviewed.start}-${reviewed.end}` : 'range'
   const currentCaptions = selectedClip ? selectedClip.captions : draftCaptions[captionKey]
   const activeCaptions = useMemo(() => captionSlice(currentCaptions, range), [currentCaptions, range])
+  // A selected clip owns its text; `draftText` belongs only to the unsaved
+  // range. Falling back to the draft would make "Remove text" appear to fail.
+  const activeText = useMemo(() => {
+    const value = selectedClip ? selectedClip.text : draftText
+    return value ? normalizeText(value) : null
+  }, [selectedClip, draftText])
   const bookends = useMemo(() => effectiveBookends(projectBookends, selectedClip?.bookends), [projectBookends, selectedClip?.bookends])
   const hasKeptEdit = keptRanges.length > 0 && (keptRanges.length > 1
     || keptRanges[0].start > 0.000001 || keptRanges[keptRanges.length - 1].end < duration - 0.000001)
@@ -590,9 +656,10 @@ export function App() {
   const previewSegments = useMemo(() => hasKeptEdit ? keptRanges
     : selectedClip ? clipSegments(selectedClip) : [{ start: range.start, end: range.end }],
   [hasKeptEdit, keptRanges, selectedClip, range])
+  const musicStructure = activeMusic ? musicTrackKey(activeMusic.track) : ''
   const sequenceKey = useMemo(() => source && (hasKeptEdit || bookends.intro || bookends.outro)
-    ? JSON.stringify([musicSourceRevision, selectedId, previewSegments, format, framing, position, activeCaptions, activeMusic, bookends, musicCacheRevision])
-    : '', [source, hasKeptEdit, musicSourceRevision, selectedId, previewSegments, format, framing, position, activeCaptions, activeMusic, bookends, musicCacheRevision])
+    ? JSON.stringify([musicSourceRevision, selectedId, previewSegments, format, framing, position, activeCaptions, musicStructure, bookends, musicCacheRevision])
+    : '', [source, hasKeptEdit, musicSourceRevision, selectedId, previewSegments, format, framing, position, activeCaptions, musicStructure, bookends, musicCacheRevision])
   const sequence = useSequenceCompositor(sequenceKey, setNotice)
   const stopSequence = sequence.stop
   const sequenceActive = Boolean(sequence.path || sequence.preparing)
@@ -605,10 +672,16 @@ export function App() {
     if (video.current) video.current.volume = previewVolume / 100
     if (sequence.player.current) sequence.player.current.volume = previewVolume / 100
   }, [previewVolume, previewPath, sequence.path, sequence.player])
+  // Volume, fade and start offset apply to the running composite immediately.
+  // They are deliberately absent from sequenceKey so the timeline keeps playing.
+  useEffect(() => {
+    if (!sequence.path) return
+    sequence.player.current.updateMusic(activeMusic)
+  }, [sequence.path, activeMusic?.volume, activeMusic?.start, activeMusic?.fade, musicPath])
   const captionsRunning = captionProgress !== null
   const hasDraftCaptions = Object.values(draftCaptions).some(track => track?.cues.length)
 
-  const hasEdits = Boolean(source && (clips.length || sections.length || projectMusic || projectBookends.intro || projectBookends.outro || hasDraftCaptions ||
+  const hasEdits = Boolean(source && (clips.length || sections.length || projectMusic || projectBookends.intro || projectBookends.outro || hasDraftCaptions || textActive(draftText) ||
     range.start !== 0 || range.end !== source.duration || draftFormat !== 'landscape' ||
     draftQuality !== 'compact' || draftFraming !== 'fill' || Object.values(positions).some(
       position => position.x !== CENTER.x || position.y !== CENTER.y)))
@@ -622,6 +695,7 @@ export function App() {
     draftRef.current = {
       version: 2, source, range, clips, sections, keptRanges, format: draftFormat, quality: draftQuality,
       framing: draftFraming, positions, captions: draftCaptions, captionStyle: sharedCaptionStyle.current,
+      text: draftText,
       music: projectMusic,
       bookends: projectBookends,
     }
@@ -634,7 +708,7 @@ export function App() {
         setNotice('Draft recovery could not save your latest edits.')
       }
     }, 400)
-  }, [source, range, clips, sections, keptRanges, draftFormat, draftQuality, draftFraming, positions, draftCaptions, projectMusic, projectBookends])
+  }, [source, range, clips, sections, keptRanges, draftFormat, draftQuality, draftFraming, positions, draftCaptions, draftText, projectMusic, projectBookends])
   useEffect(() => {
     const flush = () => {
       if (draftTimer.current === null || !draftRef.current) return
@@ -706,6 +780,8 @@ export function App() {
       setTimelineStart(0)
       setPlaying(false)
       setClips(draft?.clips ?? [])
+      const restoredText = normalizeText(draft?.text)
+      setDraftText(textActive(restoredText) ? restoredText : null)
       setProjectMusic(draft?.music ?? null)
       setProjectBookends(draft?.bookends ?? {})
       setClipActions(null)
@@ -779,6 +855,11 @@ export function App() {
       if (disposed || exportLock.current) return
       setDragging(payload.type === 'enter' || payload.type === 'over')
       if (payload.type === 'drop') {
+        if (mediaDock === 'music') {
+          if (payload.paths.length !== 1) setNotice('Drop one audio file at a time.')
+          else void importMusicRef.current(payload.paths[0], selectedClipRef.current ? 'clip' : 'project')
+          return
+        }
         if (payload.paths.length !== 1) setNotice('Drop one video at a time.')
         else void loadVideo(payload.paths[0])
       }
@@ -787,7 +868,7 @@ export function App() {
       disposed = true
       void listener.then(unlisten => unlisten())
     }
-  }, [loadVideo])
+  }, [loadVideo, mediaDock])
 
   const useProxy = async () => {
     if (!source || preview === 'preparing' || preview === 'unavailable') return
@@ -958,6 +1039,17 @@ export function App() {
   const saveCaptionStyle = useCallback((style: CaptionStyle) => {
     if (currentCaptions) saveCaptions({ ...currentCaptions, style })
   }, [currentCaptions, saveCaptions])
+
+  // Text belongs to one video: a saved clip, or the current range when there
+  // are no clips yet. Position/size changes are rapid edits for undo purposes.
+  const saveText = useCallback((overlay: TextOverlay | null) => {
+    if (exportLock.current || importLock.current) return
+    recordRapidEdit()
+    const next = overlay ? normalizeText(overlay) : null
+    if (selectedId === null) setDraftText(next)
+    else setClips(items => items.map(clip => clip.id === selectedId
+      ? { ...clip, text: next ?? undefined } : clip))
+  }, [selectedId])
 
   const applyCaptionStyle = useCallback((style: CaptionStyle) => {
     if (exportLock.current || importLock.current || captionJob.current) return false
@@ -1355,8 +1447,12 @@ export function App() {
       return
     }
     recordEdit()
-    const clip = { start: range.start, end: range.end, segments: [{ ...range }], id: nextId.current++, captions: activeCaptions }
+    const clip = { start: range.start, end: range.end, segments: [{ ...range }], id: nextId.current++,
+      captions: activeCaptions, text: activeText ?? undefined }
     setClips(items => [...items, clip])
+    // The range's text now belongs to the saved clip; do not leak it onto the
+    // next clip edited from an unrelated range.
+    setDraftText(null)
     setSelectedId(null)
     setReviewIndex(null)
     setNotice('')
@@ -1538,9 +1634,10 @@ export function App() {
       segments: keptRanges.map(part => ({ ...part })),
       title: 'Edited video',
       captions: captionsForKept(draftCaptions.range, keptRanges),
+      text: activeText ?? undefined,
     }
     const batch: Clip[] = hasKeptEdit ? [editedClip]
-      : only ? [only] : clips.length ? clips : [{ ...range, id: 0, captions: activeCaptions }]
+      : only ? [only] : clips.length ? clips : [{ ...range, id: 0, captions: activeCaptions, text: activeText ?? undefined }]
     const options = { format: draftFormat, framing: draftFraming, position: positions[draftFormat], quality: draftQuality }
     if (!batch.every(clip => validRange(clip, duration))) return
     exportLock.current = true
@@ -1573,7 +1670,7 @@ export function App() {
         ...current, states: groupExportStates(unitStates, owners, batch.length),
       })
       setExportBatch({ ranges: batch, states: batch.map(() => ({ status: 'queued' })), weights, running: true, options })
-      const hasCaptionArtwork = batch.some(clip => clip.captions?.cues.some(cue => cue.text.trim()))
+      const hasCaptionArtwork = batch.some(clip => clip.captions?.cues.some(cue => cue.text.trim()) || textActive(clip.text))
       if (hasCaptionArtwork) setNotice('Preparing caption artwork…')
       const jobId = crypto.randomUUID()
       const channel = new Channel<ExportProgress | null>()
@@ -1604,9 +1701,10 @@ export function App() {
         const chunk = units.slice(index, index + OVERLAY_CONCURRENCY)
         const rendered = await Promise.all(chunk.map(async unit => {
           const captions = captionSlice(unit.clip.captions, unit.segment, true)
-          const captionOverlay = captions && await prepareCaptionOverlay(captions, options.format,
-            unit.segment.end - unit.segment.start, () => cancelRequested.current)
-          return captionOverlay || undefined
+          const text = unit.clip.text
+          if (!captions && !textActive(text)) return undefined
+          return await prepareCaptionOverlay(captions, text, options.format,
+            unit.segment.end - unit.segment.start, () => cancelRequested.current) || undefined
         }))
         rendered.forEach((captionOverlay, offset) => {
           const unit = chunk[offset]
@@ -1856,12 +1954,12 @@ export function App() {
   const showCaptionEditor = captionsOpen && !trimDisabled && canSaveRange
   const styleDockOpen = showCaptionEditor && styleDockKey === captionKey && Boolean(activeCaptions?.cues.length)
   const dockOpen = styleDockOpen || momentsOpen || Boolean(mediaDock)
-  const openMediaDock = (dock: 'music' | 'bookends') => {
+  const openMediaDock = (dock: 'music' | 'bookends' | 'text') => {
     setMomentsOpen(false)
     setStyleDockKey(null)
     setMediaDock(current => current === dock ? null : dock)
   }
-  const closeMediaDock = (dock: 'music' | 'bookends') => {
+  const closeMediaDock = (dock: 'music' | 'bookends' | 'text') => {
     setMediaDock(null)
     requestAnimationFrame(() => document.getElementById(`${dock}-trigger`)?.focus())
   }
@@ -1900,6 +1998,10 @@ export function App() {
           <button id="bookends-trigger" className="button outline small media-trigger" aria-controls="bookends-menu"
             aria-expanded={mediaDock === 'bookends'} disabled={disabled || busy} onClick={() => openMediaDock('bookends')}>
             <Clapperboard size={14} /> Intro / Outro
+          </button>
+          <button id="text-trigger" className="button outline small media-trigger" aria-controls="text-menu"
+            aria-expanded={mediaDock === 'text'} disabled={disabled || busy} onClick={() => openMediaDock('text')}>
+            <Type size={14} /> Text
           </button>
           {busy && <div className="export-ring" role="progressbar" aria-label="Export progress"
             aria-valuenow={summary?.percent ?? 0} title={`Exporting · ${summary?.percent ?? 0}%`}>
@@ -2002,6 +2104,9 @@ export function App() {
                     <CaptionPreview key={previewPath} track={activeCaptions} format={format} video={video}
                       editable={showCaptionEditor && !editingCaptionJob} onStyle={saveCaptionStyle} />}
                   {sequence.stage}
+                  {activeText && <TextOverlayPreview overlay={activeText} format={format}
+                    draggable={mediaDock === 'text' && !disabled}
+                    onPosition={(x, y) => saveText(moveText(activeText, x, y))} />}
                 </div>
                 {!sequenceActive && (preview === 'preparing' || preview === 'unavailable') && <div className="stage-message">
                   {preview === 'preparing' && <LoaderCircle size={24} className="spin" />}
@@ -2264,12 +2369,17 @@ export function App() {
             clip={selectedClip ? { music: selectedClip.music, title: selectedClip.title || 'Selected clip' } : null}
             open={mediaDock === 'music'} onClose={() => closeMediaDock('music')}
             disabled={disabled || busy} canPreview={canMixPreview && Boolean(musicPath) && validRange(range, duration)}
-            playing={playerPlaying} onPreview={playMusicMix} onChange={changeMusic} onKainoCacheChange={refreshKainoTrack} />
+            playing={playerPlaying} onPreview={playMusicMix} onChange={changeMusic} onMixChange={changeMusicMix}
+            onKainoCacheChange={refreshKainoTrack} imports={importedTracks} musicPath={musicPath}
+            dropActive={dragging} onImport={importMusic} onRemoveImport={removeImportedMusic} />
           <BookendsMenu key={`bookends-${musicSourceRevision}`} project={projectBookends}
             clip={selectedClip ? { bookends: selectedClip.bookends, title: selectedClip.title || 'Selected clip' } : null}
             open={mediaDock === 'bookends'} onClose={() => closeMediaDock('bookends')}
             aspect={activeFormat.aspect} disabled={disabled || busy} videoExtensions={EXTENSIONS} onChange={changeBookend}
             canPreview={Boolean(sequenceKey && validRange(range, duration))} onPreview={playSequence} />
+          <TextMenu open={mediaDock === 'text'} onClose={() => closeMediaDock('text')}
+            label={selectedClip?.title || captionLabel} disabled={disabled || busy}
+            overlay={activeText} format={format} onChange={saveText} />
           {styleDockOpen && activeCaptions && <CaptionStylePanel key={captionKey} style={activeCaptions.style}
             format={format} editing={editingCaptionJob} canApplyStyle={!busy && !captionsRunning}
             onStyle={saveCaptionStyle} onApplyStyle={applyCaptionStyle} onClose={closeStyleDock} />}

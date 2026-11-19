@@ -532,3 +532,211 @@ h2 { font-size: 13px; font-weight: 660; letter-spacing: .03px; }
 .settings-installed { color: var(--lime); font-size: 11px; }
 .settings-content progress { width: 100%; height: 6px; accent-color: var(--lime); }
 .settings-card .source-arrow-link { color: var(--lime); background: #27331f; padding: 3px 7px; border-radius: 4px; text-decoration: none; }
+
+/* ------------------------------------------------------------------------- */
+/* Background-music UI redesign — additive styles.
+   Works in both the 240px `.media-menu` popover and the wider
+   `.editor-media-panel` dock. Sizes stay on the existing 9–12px scale.        */
+/* ------------------------------------------------------------------------- */
+
+/* 1. Main panel tabs ------------------------------------------------------ */
+.music-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  min-width: 0;
+  padding: 3px;
+  border: 1px solid var(--stroke);
+  border-radius: 7px;
+  background: #151515;
+}
+.music-tab {
+  min-width: 0;
+  min-height: 25px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+/* `.media-menu button` blanket-aligns buttons to the end; keep tabs stretched. */
+.music-tabs .music-tab { justify-self: stretch; }
+.music-tab:hover { color: #f2f2f0; }
+.music-tab[aria-selected="true"] { background: #2a3320; color: #dff3bd; }
+
+/* 2. Current-track summary card ------------------------------------------ */
+.music-track-card {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid #3d4b2d;
+  border-radius: 8px;
+  background: #1b2117;
+}
+.music-track-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+.music-track-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 560;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+.music-source-badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 2px 6px;
+  border: 1px solid #3a3a3a;
+  border-radius: 999px;
+  background: #262626;
+  color: var(--muted);
+  font: 9px var(--mono);
+  line-height: 1.4;
+  white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: .03em;
+}
+.music-source-badge[data-source="inherited"] { border-color: #3a3a3a; background: #262626; color: var(--muted); }
+.music-source-badge[data-source="own"] { border-color: #3c4a2d; background: #20281a; color: #cfe6a7; }
+.music-source-badge[data-source="library"] { border-color: #3d4b2d; background: #202719; color: #e4f2cd; }
+.music-source-badge[data-source="featured"] { border-color: #566b3c; background: #2a3320; color: var(--lime); }
+.music-source-badge[data-source="file"] { border-color: #3a3a3a; background: #262626; color: var(--muted); }
+.music-track-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* 3. Import drop zone ----------------------------------------------------- */
+.music-import-zone {
+  display: grid;
+  justify-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 14px 10px;
+  border: 1px dashed #3c4a2d;
+  border-radius: 8px;
+  background: #171a14;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: center;
+  overflow-wrap: anywhere;
+  transition: border-color .14s, background .14s;
+}
+.music-import-zone.dragover { border-color: var(--lime); background: #20281a; color: #e4f2cd; }
+.music-import-primary {
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--lime);
+  color: #1b2411;
+  font-size: 11px;
+  font-weight: 620;
+}
+.music-import-primary:hover:not(:disabled) { background: #e0ff9e; }
+/* Counter the media-menu's blanket button alignment inside the grid zone. */
+.music-import-zone .music-import-primary { justify-self: center; }
+
+/* 4. Sticky-at-top audition strip ---------------------------------------- */
+.music-audition-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  min-width: 0;
+  padding: 8px 0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--stroke);
+  box-shadow: 0 5px 12px #0007;
+}
+.music-audition-sticky .kaino-audition { margin: 0; }
+/* The audition now sits at the top, so drop any bottom-oriented spacing. */
+.music-audition-sticky .kaino-audition-hint { margin-top: 0; }
+/* Main strip: taller for scrubbing; `.compact` is the small card variant. */
+.kaino-waveform { height: 54px; }
+.kaino-waveform.compact { height: 28px; }
+
+/* 5. Featured preset chips ----------------------------------------------- */
+.music-preset-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+.music-preset-chip {
+  min-width: 0;
+  max-width: 100%;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid #3a3a3a;
+  border-radius: 999px;
+  background: #1b1b1b;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+.music-preset-chip:hover { border-color: #566b3c; color: #f2f2f0; }
+.music-preset-chip[aria-pressed="true"] { border-color: #566b3c; background: #2a3320; color: var(--lime); }
+
+/* 6. "Your music" empty state -------------------------------------------- */
+.music-empty {
+  min-width: 0;
+  padding: 12px 10px;
+  border: 1px dashed #333;
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Text overlay — additive styles for the text dock and the draggable preview. */
+/* ------------------------------------------------------------------------- */
+
+.text-slider-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.text-slider-label output { color: var(--lime); font-variant-numeric: tabular-nums; }
+.text-char-count { justify-self: end; margin-top: -8px; font-variant-numeric: tabular-nums; }
+.text-field-label { display: block; color: var(--muted); font-size: 11px; }
+.text-color-field { display: grid; gap: 7px; }
+.text-color-swatches { display: flex; flex-wrap: wrap; gap: 8px; }
+.text-color-swatch { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%; cursor: pointer; }
+.text-color-swatch:disabled { cursor: not-allowed; opacity: .5; }
+.text-color-swatch.active { box-shadow: 0 0 0 1px #101010; }
+.text-remove { justify-self: start; color: #f0a5a5; }
+
+/* The preview canvas follows `.caption-artwork`; the wrapper only becomes
+   interactive while the Text dock is open so normal playback is untouched. */
+.text-overlay-preview { position: absolute; inset: 0; pointer-events: none; }
+.text-overlay-preview.draggable { pointer-events: auto; cursor: move; touch-action: none; }
+.text-position-handle {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--lime);
+  border-radius: 50%;
+  background: #101010c9;
+  color: var(--lime);
+  pointer-events: none;
+}

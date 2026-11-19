@@ -1,4 +1,5 @@
 import type { CaptionTrack } from './captions'
+import type { TextOverlay } from './text-overlay'
 import type { Music } from './music'
 import type { Bookends } from './bookends'
 
@@ -13,6 +14,7 @@ export type Clip = Range & {
   title?: string
   titleManuallyEdited?: boolean
   captions?: CaptionTrack
+  text?: TextOverlay
   music?: Music | null
   bookends?: Bookends
 }

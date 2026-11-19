@@ -39,6 +39,8 @@ export type SequenceController = {
   seek: (time: number) => void
   seekSource: (time: number) => void
   setMuted: (muted: boolean) => void
+  /** Change volume/fade/start on the running plan without rebuilding it. */
+  updateMusic: (music: Music | null) => void
 }
 
 type BookendInfo = { image: boolean; path: string; name: string; duration?: number }
@@ -82,7 +84,7 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
 
   const player = useRef<SequenceController>({
     currentTime: 0, duration: 0, paused: true, readyState: 4, volume: 1, muted: false,
-    play: async () => {}, pause: () => {}, seek: () => {}, seekSource: () => {}, setMuted: () => {},
+    play: async () => {}, pause: () => {}, seek: () => {}, seekSource: () => {}, setMuted: () => {}, updateMusic: () => {},
   })
 
   const applyLayer = (element: HTMLMediaElement | null, state: LayerState, local: number,
@@ -252,11 +254,26 @@ export function useSequenceCompositor(key: string, onError: (message: string) =>
     if (!muted) forceMute.current = false
   }, [])
 
+  // Mix settings are live: mutate the plan in place and redraw at the current
+  // time. Rebuilding the whole composition for a volume tick would stop the
+  // timeline and restart every media element.
+  const updateMusic = useCallback((music: Music | null) => {
+    const current = planRef.current
+    if (!current) return
+    current.music = music
+    if (!music && musicRef.current) {
+      musicRef.current.pause()
+      musicRef.current.currentTime = 0
+    }
+    update(current, player.current.currentTime)
+  }, [update])
+
   player.current.play = play
   player.current.pause = pause
   player.current.seek = seek
   player.current.seekSource = seekSource
   player.current.setMuted = setMuted
+  player.current.updateMusic = updateMusic
 
   const stop = useCallback(() => {
     ++request.current

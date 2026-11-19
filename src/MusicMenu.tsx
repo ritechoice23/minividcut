@@ -1,11 +1,14 @@
 import { memo, useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import { Pause, Play, X } from 'lucide-react'
+import { Music2, Pause, Play, Trash2, Upload, X } from 'lucide-react'
+import { Waveform } from './Waveform'
 import { DEFAULT_MUSIC_VOLUME, effectiveMusic } from './music'
 import type { KainoCollection, Music, MusicTrack } from './music'
 import { KainoLibrary, MusicLoading } from './KainoLibrary'
 import type { KainoTrack } from './KainoLibrary'
+
+export type ImportedTrack = { id: string; name: string; path: string; imported_at: number }
 
 type Props = {
   project: Music | null
@@ -17,19 +20,27 @@ type Props = {
   onClose: () => void
   onPreview: () => void
   onChange: (scope: 'project' | 'clip', music: Music | null | undefined, path?: string) => void
+  onMixChange: (scope: 'project' | 'clip', music: Music | null | undefined) => void
   onKainoCacheChange: (id: string, removed: boolean, collection?: KainoCollection) => void
+  imports: ImportedTrack[]
+  musicPath: string
+  dropActive?: boolean
+  onImport: (path: string, scope: 'project' | 'clip') => Promise<void>
+  onRemoveImport: (id: string) => void
 }
 
 const AUDIO_EXTENSIONS = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus']
 
-export const MusicMenu = memo(function MusicMenu({ project, clip, disabled, canPreview, playing, open: visible, onClose, onPreview, onChange, onKainoCacheChange }: Props) {
+export const MusicMenu = memo(function MusicMenu({ project, clip, disabled, canPreview, playing, open: visible,
+  onClose, onPreview, onChange, onMixChange, onKainoCacheChange, imports, musicPath, dropActive, onImport, onRemoveImport }: Props) {
   const [scope, setScope] = useState<'project' | 'clip'>('clip')
+  const [panelTab, setPanelTab] = useState<'own' | 'library'>('own')
   const [pending, setPending] = useState(false)
+  const [importing, setImporting] = useState(false)
   const [error, setError] = useState('')
-  const [libraryOpen, setLibraryOpen] = useState(false)
+  const [libraryCollection, setLibraryCollection] = useState<KainoCollection>('music')
   const [kainoTracks, setKainoTracks] = useState<KainoTrack[]>([])
   const [sfxTracks, setSfxTracks] = useState<KainoTrack[]>([])
-  const [libraryCollection, setLibraryCollection] = useState<KainoCollection>('music')
   const [checkingSaved, setCheckingSaved] = useState(false)
   const [savedError, setSavedError] = useState('')
   const [savedRetry, setSavedRetry] = useState(0)
@@ -37,11 +48,7 @@ export const MusicMenu = memo(function MusicMenu({ project, clip, disabled, canP
   const target = clip ? scope : 'project'
   const current = target === 'project' ? project : clip?.music
   const active = effectiveMusic(project, clip?.music)
-  const activeKaino = current?.track.kind === 'kaino' ? current.track : null
   const canAudition = active && (target === 'clip' || active === project)
-  const value = current === undefined ? 'inherit' : current === null ? 'off'
-    : current.track.kind === 'kaino' ? `${current.track.collection === 'sfx' ? 'kaino-sfx' : 'kaino'}:${current.track.id}`
-    : current.track.kind === 'library' ? current.track.id : 'file'
 
   useEffect(() => {
     if (!visible) return
@@ -64,52 +71,76 @@ export const MusicMenu = memo(function MusicMenu({ project, clip, disabled, canP
     return () => { current = false }
   }, [visible, savedRetry])
 
-  async function select(value: string | KainoTrack, start?: number, collection: KainoCollection = 'music') {
+  const display = current === undefined ? active : current
+  const track = display?.track
+  const trackName = track ? track.kind === 'library' ? track.id : track.name : ''
+  const isImported = track?.kind === 'file' && imports.some(item => item.path === track.path)
+  const source = !track ? '' : current === undefined ? 'inherited'
+    : track.kind === 'file' ? (isImported ? 'own' : 'file') : 'library'
+  const sourceLabel = source === 'inherited' ? 'From all clips'
+    : source === 'own' ? 'Your music' : source === 'file' ? 'Local file' : 'Music library'
+
+  async function applyTrack(chosen: MusicTrack, start?: number, failed?: KainoTrack | null) {
     setError('')
-    setFailedTrack(null)
-    if (value === 'inherit' || value === 'off') {
-      onChange(target, value === 'inherit' ? undefined : null)
-      return
-    }
+    setFailedTrack(failed ?? null)
     setPending(true)
-    let chosen: KainoTrack | null = null
     try {
-      let track: MusicTrack
-      if (typeof value !== 'string') {
-        chosen = value
-        track = { kind: 'kaino', id: value.id, name: value.title, collection }
-      } else if (value.startsWith('kaino-sfx:')) {
-        const downloaded = sfxTracks.find(track => `kaino-sfx:${track.id}` === value)
-        if (!downloaded) return
-        collection = 'sfx'
-        chosen = downloaded
-        track = { kind: 'kaino', id: downloaded.id, name: downloaded.title, collection }
-      } else if (value.startsWith('kaino:')) {
-        const downloaded = kainoTracks.find(track => `kaino:${track.id}` === value)
-        if (!downloaded) return
-        chosen = downloaded
-        track = { kind: 'kaino', id: downloaded.id, name: downloaded.title, collection }
-      } else if (value === 'browse') {
-        const path = await open({ title: 'Choose background music', filters: [{ name: 'Audio files', extensions: AUDIO_EXTENSIONS }] })
-        if (!path) return
-        track = { kind: 'file', path, name: path.split(/[/\\]/).pop() ?? path }
-      } else {
-        throw new Error('Choose a track from the Kaino library or an audio file.')
-      }
-      const path = await invoke<string>('open_music', { track })
+      const path = await invoke<string>('open_music', { track: chosen })
       onChange(target, {
-        track,
+        track: chosen,
         volume: current?.volume ?? DEFAULT_MUSIC_VOLUME,
         fade: current?.fade,
         start: start && start > 0 ? start : undefined,
       }, path)
-    } catch (error) {
-      setFailedTrack(chosen)
-      setError(error instanceof Error ? error.message : String(error))
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
       setPending(false)
     }
   }
+
+  async function select(value: string | KainoTrack, start?: number, collection: KainoCollection = 'music') {
+    if (value === 'inherit' || value === 'off') {
+      setError('')
+      onChange(target, value === 'inherit' ? undefined : null)
+      return
+    }
+    if (typeof value !== 'string') {
+      await applyTrack({ kind: 'kaino', id: value.id, name: value.title, collection }, start, value)
+      return
+    }
+    if (value.startsWith('kaino-sfx:')) {
+      const downloaded = sfxTracks.find(track => `kaino-sfx:${track.id}` === value)
+      if (downloaded) await applyTrack({ kind: 'kaino', id: downloaded.id, name: downloaded.title, collection: 'sfx' }, start, downloaded)
+      return
+    }
+    if (value.startsWith('kaino:')) {
+      const downloaded = kainoTracks.find(track => `kaino:${track.id}` === value)
+      if (downloaded) await applyTrack({ kind: 'kaino', id: downloaded.id, name: downloaded.title, collection }, start, downloaded)
+      return
+    }
+    setError('Choose a track from your music or the music library.')
+  }
+
+  async function importFile(path?: string) {
+    setError('')
+    let chosen = path
+    if (!chosen) {
+      const picked = await open({ title: 'Import background music', filters: [{ name: 'Audio files', extensions: AUDIO_EXTENSIONS }] })
+      if (typeof picked !== 'string') return
+      chosen = picked
+    }
+    setImporting(true)
+    try {
+      await onImport(chosen, target)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  const busy = pending || importing || disabled
 
   return <section id="music-menu" className="moment-panel editor-media-panel panel" hidden={!visible}
       aria-labelledby="music-title" onKeyDown={event => {
@@ -130,61 +161,121 @@ export const MusicMenu = memo(function MusicMenu({ project, clip, disabled, canP
           <option value="clip">{clip.title}</option>
         </select>
       </label>}
-      <label>Track
-        <select aria-label="Track" value={value} disabled={pending || disabled} onChange={event => void select(event.target.value)}>
-          {target === 'clip' && <option value="inherit">Use project music</option>}
-          <option value="off">No music</option>
-          {current?.track.kind === 'file' && <option value="file" disabled>{current.track.name}</option>}
-          {current?.track.kind === 'library' && <option value={value} disabled>{current.track.id} · no longer bundled</option>}
-          <option value="browse">Choose an audio file…</option>
-          {activeKaino && !(activeKaino.collection === 'sfx' ? sfxTracks : kainoTracks)
-            .some(track => `kaino${activeKaino.collection === 'sfx' ? '-sfx' : ''}:${track.id}` === value) &&
-            <option value={value} disabled>{activeKaino.name} (download required)</option>}
-          {kainoTracks.map(track => <option key={`music-${track.id}`} value={`kaino:${track.id}`}>{track.title}</option>)}
-          {sfxTracks.map(track => <option key={`sfx-${track.id}`} value={`kaino-sfx:${track.id}`}>SFX · {track.title}</option>)}
-        </select>
-      </label>
-      {current && <label>
-        <span className="music-level">Music volume <output>{current.volume}%</output></span>
-        <input aria-label="Music volume" type="range" min={0} max={100} value={current.volume} disabled={pending || disabled}
-          onChange={event => onChange(target, { ...current, volume: event.target.valueAsNumber })} />
-      </label>}
-      {current && <div className="music-tuning">
-        <label>Start at (seconds)
-          <input type="number" aria-label="Music start offset in seconds" min={0} max={3600} step={0.1}
-            value={current.start ?? 0} disabled={pending || disabled}
-            onChange={event => {
-              const value = event.target.valueAsNumber
-              onChange(target, { ...current, start: Number.isFinite(value) && value > 0 ? value : undefined })
-            }} />
-        </label>
-        <label className="music-fade">
-          <input type="checkbox" aria-label="Fade music in and out" checked={current.fade ?? false}
-            disabled={pending || disabled}
-            onChange={event => onChange(target, { ...current, fade: event.target.checked })} />
-          Soft fade
-        </label>
-      </div>}
-      {canAudition && <button type="button" className="button outline small" disabled={!canPreview || pending || disabled}
-        onClick={onPreview}>{playing ? <Pause size={13} /> : <Play size={13} />}{playing ? 'Pause preview' : 'Preview mix'}</button>}
-      <button type="button" className="text-button media-library-trigger" aria-expanded={libraryOpen}
-        aria-controls="music-library" onClick={() => setLibraryOpen(!libraryOpen)}>Music library</button>
-      <div id="music-library" className="music-library" hidden={!libraryOpen}>
-        <KainoLibrary enabled={visible && libraryOpen} collection={libraryCollection}
-          onCollectionChange={setLibraryCollection} canUse={!pending && !disabled}
+      <div className="music-track-card">
+        <div className="music-track-card-head">
+          <span className="music-track-name">{trackName || 'No background music'}</span>
+          {track && <span className="music-source-badge" data-source={source}>{sourceLabel}</span>}
+        </div>
+        {track && musicPath && <Waveform className="kaino-waveform compact" readOnly
+          path={musicPath} duration={0} position={0} inPoint={0} onInPoint={() => {}} />}
+        <div className="music-track-actions">
+          {target === 'clip' && current === undefined && track && <>
+            <button type="button" className="text-button" disabled={busy}
+              onClick={() => setPanelTab('own')}>Override for this clip</button>
+            <button type="button" className="text-button" disabled={busy}
+              onClick={() => void select('off')}>Remove music</button>
+          </>}
+          {target === 'clip' && current !== undefined && <button type="button" className="text-button"
+            disabled={busy} onClick={() => void select('inherit')}>Use project music</button>}
+          {track && current !== undefined && <button type="button" className="text-button" disabled={busy}
+            onClick={() => setPanelTab('own')}>Change track</button>}
+          {track && current !== undefined && <button type="button" className="text-button" disabled={busy}
+            onClick={() => void select('off')}>Remove music</button>}
+          {!track && <button type="button" className="button outline small music-import-primary" disabled={busy}
+            onClick={() => void importFile()}><Upload size={13} /> Import audio file</button>}
+        </div>
+        {current && <label>
+          <span className="music-level">Music volume <output>{current.volume}%</output></span>
+          <input aria-label="Music volume" type="range" min={0} max={100} value={current.volume} disabled={busy}
+            onChange={event => onMixChange(target, { ...current, volume: event.target.valueAsNumber })} />
+        </label>}
+        {current && <div className="music-tuning">
+          <label>Start at (seconds)
+            <input type="number" aria-label="Music start offset in seconds" min={0} max={3600} step={0.1}
+              value={current.start ?? 0} disabled={busy}
+              onChange={event => {
+                const value = event.target.valueAsNumber
+                onMixChange(target, { ...current, start: Number.isFinite(value) && value > 0 ? value : undefined })
+              }} />
+          </label>
+          <label className="music-fade">
+            <input type="checkbox" aria-label="Fade music in and out" checked={current.fade ?? false}
+              disabled={busy}
+              onChange={event => onMixChange(target, { ...current, fade: event.target.checked })} />
+            Soft fade
+          </label>
+        </div>}
+        {canAudition && <button type="button" className="button outline small" disabled={!canPreview || busy}
+          onClick={onPreview}>{playing ? <Pause size={13} /> : <Play size={13} />}{playing ? 'Pause preview' : 'Preview mix'}</button>}
+      </div>
+      <div className="music-tabs" role="tablist" aria-label="Music source">
+        <button type="button" role="tab" aria-selected={panelTab === 'own'} className="music-tab"
+          onClick={() => setPanelTab('own')}>Your music</button>
+        <button type="button" role="tab" aria-selected={panelTab === 'library'} className="music-tab"
+          onClick={() => setPanelTab('library')}>Music library</button>
+      </div>
+      {panelTab === 'own' ? <div className="music-own" role="tabpanel">
+        <div className={`music-import-zone${dropActive ? ' dragover' : ''}`}>
+          <Music2 size={16} />
+          <span>Use your own sound</span>
+          <button type="button" className="button outline small music-import-primary" disabled={busy}
+            onClick={() => void importFile()}><Upload size={13} /> Import audio file</button>
+          <small>MP3, WAV, M4A, AAC, FLAC, OGG or OPUS. You can also drop a file on this panel.</small>
+        </div>
+        {imports.length > 0 && <div className="kaino-results">
+          <div className="kaino-section-label">Imported files</div>
+          <div className="kaino-rows">{imports.map(item => {
+            const selected = track?.kind === 'file' && track.path === item.path
+            return <div className={`kaino-row${selected ? ' previewing' : ''}`} key={item.id}>
+              <div className="kaino-row-main">
+                <span className="kaino-row-title">{item.name}</span>
+                <span className="kaino-row-meta">{selected ? 'In use' : 'Imported · on this device'}</span>
+              </div>
+              <div className="kaino-row-actions">
+                <button type="button" className="button outline small action" disabled={busy}
+                  aria-label={`Use ${item.name}`}
+                  onClick={() => void applyTrack({ kind: 'file', path: item.path, name: item.name })}>Use</button>
+                <button type="button" className="icon-button compact remove" aria-label={`Remove ${item.name}`}
+                  title="Remove from this device" onClick={() => onRemoveImport(item.id)}><Trash2 size={13} /></button>
+              </div>
+            </div>
+          })}</div>
+        </div>}
+        {kainoTracks.length + sfxTracks.length > 0 && <div className="kaino-results">
+          <div className="kaino-section-label">Downloaded tracks</div>
+          <div className="kaino-rows">
+            {kainoTracks.map(item => <div className="kaino-row" key={`music-${item.id}`}>
+              <div className="kaino-row-main"><span className="kaino-row-title">{item.title}</span>
+                <span className="kaino-row-meta">Music library</span></div>
+              <div className="kaino-row-actions"><button type="button" className="button outline small action" disabled={busy}
+                aria-label={`Use ${item.title}`} onClick={() => void select(`kaino:${item.id}`)}>Use</button></div>
+            </div>)}
+            {sfxTracks.map(item => <div className="kaino-row" key={`sfx-${item.id}`}>
+              <div className="kaino-row-main"><span className="kaino-row-title">{item.title}</span>
+                <span className="kaino-row-meta">Sound effect</span></div>
+              <div className="kaino-row-actions"><button type="button" className="button outline small action" disabled={busy}
+                aria-label={`Use ${item.title}`} onClick={() => void select(`kaino-sfx:${item.id}`)}>Use</button></div>
+            </div>)}
+          </div>
+        </div>}
+        {!imports.length && !kainoTracks.length && !sfxTracks.length && !checkingSaved &&
+          <p className="music-empty">No music yet. Import a file or browse the music library.</p>}
+      </div> : <div id="music-library" className="music-library" role="tabpanel">
+        <KainoLibrary enabled={visible && panelTab === 'library'} collection={libraryCollection}
+          onCollectionChange={setLibraryCollection} canUse={!busy}
           saved={libraryCollection === 'sfx' ? sfxTracks : kainoTracks}
           onSaved={libraryCollection === 'sfx' ? setSfxTracks : setKainoTracks}
-          onUse={(track, start) => void select(track, start, libraryCollection)}
+          onUse={(item, start) => void select(item, start, libraryCollection)}
           onCacheChange={onKainoCacheChange} />
-      </div>
+      </div>}
       {checkingSaved && <MusicLoading label="Checking downloaded tracks…" />}
       {savedError && <div className="music-retry">
         <small role="alert">{savedError}</small>
         <button type="button" className="button outline small"
           onClick={() => setSavedRetry(retry => retry + 1)}>Retry saved tracks</button>
       </div>}
-      {pending && <MusicLoading label="Opening track…" />}
-      {failedTrack && <button type="button" className="button outline small" disabled={pending || disabled}
+      {(pending || importing) && <MusicLoading label={importing ? 'Importing audio…' : 'Opening track…'} />}
+      {failedTrack && <button type="button" className="button outline small" disabled={busy}
         onClick={() => void select(failedTrack)}>Retry opening track</button>}
       {error && <small role="alert">{error}</small>}
       </div>

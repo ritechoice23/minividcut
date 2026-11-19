@@ -6,6 +6,17 @@ export type MusicTrack = { kind: 'library'; id: string }
   | { kind: 'file'; path: string; name: string }
 export const kainoKey = (id: string, collection: KainoCollection = 'music') =>
   `kaino:${collection === 'sfx' ? 'sfx:' : ''}${id}`
+
+/** Stable identity for a music track, independent of volume/fade/start. */
+export function musicTrackKey(track: MusicTrack): string {
+  if (track.kind === 'file') return `file:${track.path}`
+  if (track.kind === 'kaino') return kainoKey(track.id, track.collection)
+  return `library:${track.id}`
+}
+
+/** localStorage key under which a track's persisted mix settings are stored. */
+export const mixStorageKey = (track: MusicTrack): string => 'minividcut:music-mix:' + musicTrackKey(track)
+
 // `start` is seconds into the track; `fade` softens the clip's first and last
 // moments. Both are optional so drafts saved before they existed still load.
 export type Music = { track: MusicTrack; volume: number; start?: number; fade?: boolean }
@@ -28,5 +39,7 @@ export function musicGain(time: number, start: number, end: number, fade = false
   const length = end - start
   if (!(length > 0)) return 1
   const seconds = Math.min(DEFAULT_FADE_SECONDS, length / 3)
+  // Linear ramps match ffmpeg's afade curve in the export exactly, so the
+  // preview sounds like the file that will be written.
   return Math.max(0, Math.min(1, (time - start) / seconds, (end - time) / seconds))
 }

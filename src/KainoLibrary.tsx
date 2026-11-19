@@ -23,6 +23,14 @@ type DownloadState = {
 const MAX_CONCURRENT_DOWNLOADS = 2
 const CANCEL_MESSAGE = 'Download canceled.'
 
+const FEATURED_PRESETS = [
+  { label: 'Sermon / Worship', genre: 'Ambient' },
+  { label: 'Soft piano', genre: 'Solo piano' },
+  { label: 'Gentle acoustic', genre: 'Acoustic folk' },
+] as const
+
+type View = 'featured' | 'music' | 'sfx'
+
 export function MusicLoading({ label, fraction }: { label: string; fraction?: number | null }) {
   return <div className="music-loading">
     <small role="status">{label}{fraction == null ? '' : ` ${Math.round(fraction * 100)}%`}</small>
@@ -125,6 +133,9 @@ function TrackRow({ track, installed, download, queued, removing, previewing, pr
 }
 
 export function KainoLibrary({ enabled, collection, onCollectionChange, canUse, saved, onSaved, onUse, onCacheChange }: Props) {
+  const [view, setView] = useState<View>('featured')
+  const [selectedGenre, setSelectedGenre] = useState<string>('Ambient')
+  const genre = view === 'featured' ? selectedGenre : undefined
   const [query, setQuery] = useState('')
   const [requested, setRequested] = useState({ query: '', page: 1 })
   const [page, setPage] = useState<Page | null>(null)
@@ -167,7 +178,13 @@ export function KainoLibrary({ enabled, collection, onCollectionChange, canUse, 
     if (!enabled) stopPreview()
   }, [enabled, stopPreview])
   useEffect(() => { stopPreview() }, [collection, stopPreview])
+  useEffect(() => { stopPreview() }, [view, stopPreview])
   useEffect(() => stopPreview, [stopPreview])
+
+  function selectView(next: View) {
+    setView(next)
+    onCollectionChange(next === 'featured' ? 'music' : next)
+  }
 
   useEffect(() => {
     const element = audio.current
@@ -215,7 +232,7 @@ export function KainoLibrary({ enabled, collection, onCollectionChange, canUse, 
     setSearchProgress(null)
     setSearchError('')
     const progress = new Channel<Progress>(update => { if (current) setSearchProgress(update) })
-    void invoke<Page>('search_kaino', { ...requested, collection, progress }).then(result => {
+    void invoke<Page>('search_kaino', { ...requested, collection, genre, progress }).then(result => {
       if (current) setPage(result)
     }).catch(cause => {
       if (current) setSearchError(String(cause))
@@ -223,7 +240,7 @@ export function KainoLibrary({ enabled, collection, onCollectionChange, canUse, 
       if (current) setLoading(false)
     })
     return () => { current = false }
-  }, [enabled, requested, collection])
+  }, [enabled, requested, collection, genre])
 
   function setDownload(id: string, update: Partial<DownloadState>) {
     setDownloads(current => ({
@@ -332,11 +349,29 @@ export function KainoLibrary({ enabled, collection, onCollectionChange, canUse, 
       <span className="kaino-badge">CC0 · no attribution</span>
     </div>
     <div className="kaino-tabs" role="tablist" aria-label="Kaino collection">
-      <button type="button" role="tab" aria-selected={collection === 'music'}
-        onClick={() => onCollectionChange('music')}>Music</button>
-      <button type="button" role="tab" aria-selected={collection === 'sfx'}
-        onClick={() => onCollectionChange('sfx')}>Sound effects</button>
+      <button type="button" role="tab" aria-selected={view === 'featured'}
+        onClick={() => selectView('featured')}>Featured</button>
+      <button type="button" role="tab" aria-selected={view === 'music'}
+        onClick={() => selectView('music')}>Music</button>
+      <button type="button" role="tab" aria-selected={view === 'sfx'}
+        onClick={() => selectView('sfx')}>Sound effects</button>
     </div>
+    {preview && <div className="music-audition-sticky">
+      <div className="kaino-audition">
+        <small role="status">Playing preview · {preview.track.title}</small>
+        <Waveform path={preview.path} duration={previewDuration} position={previewTime}
+          inPoint={inPoints[preview.track.id] ?? 0}
+          onInPoint={seconds => setInPoints(current => ({ ...current, [preview.track.id]: seconds }))} />
+        <small className="kaino-audition-hint">Drag the strip to choose where this track starts when you use it.</small>
+      </div>
+    </div>}
+    {view === 'featured' && <div className="music-preset-chips" role="group" aria-label="Featured style">
+      {FEATURED_PRESETS.map(preset => <button key={preset.genre} type="button" className="music-preset-chip"
+        aria-pressed={selectedGenre === preset.genre}
+        onClick={() => { setSelectedGenre(preset.genre); setRequested(current => ({ ...current, page: 1 })) }}>
+        {preset.label}
+      </button>)}
+    </div>}
     {(active.length > 0 || queued > 0) && <div className="kaino-session" role="status">
       <LoaderCircle size={13} className="spin" />
       <span>{active.length === 1 ? `Downloading “${active[0].title}”` : `Downloading ${active.length} tracks`}{queued ? ` · ${queued} queued` : ''}</span>
@@ -364,19 +399,12 @@ export function KainoLibrary({ enabled, collection, onCollectionChange, canUse, 
       <div className="kaino-rows">{saved.map(track => row(track, true))}</div>
     </details>}
     {page && !loading && !searchError && <div className="kaino-results">
-      <div className="kaino-section-label">{requested.query ? 'Search results' : collection === 'sfx' ? 'Popular effects' : 'Popular tracks'}</div>
+      <div className="kaino-section-label">{requested.query ? 'Search results' : view === 'featured' ? 'Featured tracks' : collection === 'sfx' ? 'Popular effects' : 'Popular tracks'}</div>
       {page.tracks.length === 0
         ? <p className="kaino-empty">No {collection === 'sfx' ? 'sounds' : 'tracks'} found. Try a different search.</p>
         : <div className="kaino-rows">{page.tracks.map(track => row(track, saved.some(item => item.id === track.id)))}</div>}
     </div>}
     {loadingPreview && <MusicLoading label={progressLabel(previewProgress, 'Loading preview…')} />}
-    {preview && <div className="kaino-audition">
-      <small role="status">Playing preview · {preview.track.title}</small>
-      <Waveform path={preview.path} duration={previewDuration} position={previewTime}
-        inPoint={inPoints[preview.track.id] ?? 0}
-        onInPoint={seconds => setInPoints(current => ({ ...current, [preview.track.id]: seconds }))} />
-      <small className="kaino-audition-hint">Drag the strip to choose where this track starts when you use it.</small>
-    </div>}
     {previewError && <div className="kaino-row-error" role="alert"><small>{previewError}</small></div>}
     {error && <small role="alert">{error}</small>}
     {!loading && !searchError && (requested.page > 1 || Boolean(nextPage)) && <div className="kaino-pagination">

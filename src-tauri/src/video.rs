@@ -14,7 +14,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::{ipc::Channel, AppHandle, Manager};
 use tauri_plugin_opener::OpenerExt;
@@ -641,6 +641,158 @@ pub async fn open_music(app: AppHandle, track: MusicTrack) -> Result<PathBuf> {
             .allow_file(&path)
             .map_err(|error| error.to_string())?;
         Ok(path)
+    })
+    .await
+}
+
+/// A user's personally imported background track, persisted across sessions.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct ImportedTrack {
+    id: String,
+    name: String,
+    path: String,
+    imported_at: u64,
+}
+
+fn imports_dir(app: &AppHandle) -> Result<PathBuf> {
+    app.path()
+        .app_local_data_dir()
+        .map(|path| path.join("music").join("imports"))
+        .map_err(|error| error.to_string())
+}
+
+fn read_import_index(dir: &Path) -> Result<Vec<ImportedTrack>> {
+    let bytes = match std::fs::read(dir.join("index.json")) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+    // A damaged index must not make the personal library unusable.
+    Ok(serde_json::from_slice(&bytes).unwrap_or_default())
+}
+
+/// Persist the index with an atomic staged write, newest imports first.
+fn write_import_index(dir: &Path, tracks: &[ImportedTrack]) -> Result<()> {
+    let mut tracks = tracks.to_vec();
+    tracks.sort_by(|left, right| right.imported_at.cmp(&left.imported_at));
+    let bytes = serde_json::to_vec_pretty(&tracks).map_err(|error| error.to_string())?;
+    let stage = tempfile::tempdir_in(dir).map_err(|error| error.to_string())?;
+    let staged = stage.path().join("index.json");
+    std::fs::write(&staged, bytes).map_err(|error| error.to_string())?;
+    std::fs::rename(&staged, dir.join("index.json")).map_err(|error| error.to_string())
+}
+
+/// Keep only ASCII `[a-z0-9_-]` from the original stem so it can never contain
+/// path separators or `..`, and bound its length for a readable filename.
+fn sanitize_import_stem(stem: &str) -> String {
+    let cleaned: String = stem
+        .chars()
+        .take(40)
+        .map(|ch| match ch {
+            'a'..='z' | '0'..='9' | '_' | '-' => ch,
+            'A'..='Z' => ch.to_ascii_lowercase(),
+            _ => '_',
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches(['_', '-']);
+    if cleaned.is_empty() {
+        "track".into()
+    } else {
+        cleaned.into()
+    }
+}
+
+fn import_id(stem: &str, nanos: u128) -> String {
+    format!("imp-{nanos}-{}", sanitize_import_stem(stem))
+}
+
+/// Copy a personal audio file into the app's local data folder so it remains
+/// available when the original source is moved or deleted.
+#[tauri::command]
+pub async fn import_music(app: AppHandle, path: String) -> Result<ImportedTrack> {
+    background(move || {
+        let source = Path::new(&path);
+        if !source.is_file() {
+            return Err("Choose an existing music file.".into());
+        }
+        let extension = source
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !["mp3", "wav", "m4a", "aac", "flac", "ogg", "opus"]
+            .contains(&extension.as_str())
+        {
+            return Err("Choose an MP3, WAV, M4A, AAC, FLAC, OGG or Opus file.".into());
+        }
+        let name = source
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let stem = source.file_stem().unwrap_or_default().to_string_lossy();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+
+        let id = import_id(&stem, nanos);
+        let imports = imports_dir(&app)?;
+        std::fs::create_dir_all(&imports).map_err(|error| error.to_string())?;
+        let stage = tempfile::tempdir_in(&imports).map_err(|error| error.to_string())?;
+        let filename = format!("{id}.{extension}");
+        let staged = stage.path().join(&filename);
+        std::fs::copy(source, &staged).map_err(|error| error.to_string())?;
+        // Drop the staged copy automatically when the audio cannot be read.
+        if !audio_stream(&staged, Some(MUSIC_FORMATS)).unwrap_or(false) {
+            return Err("This file has no readable audio track.".into());
+        }
+        let stored = imports.join(&filename);
+        std::fs::rename(&staged, &stored).map_err(|error| error.to_string())?;
+        app.asset_protocol_scope()
+            .allow_file(&stored)
+            .map_err(|error| error.to_string())?;
+
+        let track = ImportedTrack {
+            id,
+            name,
+            path: stored.to_string_lossy().into_owned(),
+            imported_at: u64::try_from(nanos).unwrap_or(u64::MAX),
+        };
+        let mut tracks = read_import_index(&imports)?;
+        tracks.push(track.clone());
+        write_import_index(&imports, &tracks)?;
+        Ok(track)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn local_imported_tracks(app: AppHandle) -> Result<Vec<ImportedTrack>> {
+    background(move || {
+        let mut tracks = read_import_index(&imports_dir(&app)?)?;
+        tracks.retain(|track| Path::new(&track.path).is_file());
+        tracks.sort_by(|left, right| right.imported_at.cmp(&left.imported_at));
+        Ok(tracks)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn remove_imported_music(app: AppHandle, id: String) -> Result<()> {
+    background(move || {
+        let imports = imports_dir(&app)?;
+        let mut tracks = read_import_index(&imports)?;
+        let Some(index) = tracks.iter().position(|track| track.id == id) else {
+            return Ok(());
+        };
+        let track = tracks.remove(index);
+        // Only remove files we own, never an arbitrary path from a damaged index.
+        let path = PathBuf::from(&track.path);
+        if path.parent() == Some(imports.as_path()) {
+            let _ = std::fs::remove_file(path);
+        }
+        write_import_index(&imports, &tracks)
     })
     .await
 }
@@ -2087,6 +2239,45 @@ mod tests {
         );
         assert_eq!(export_name(Some("NUL.mp4"), "Video", 3), "_NUL");
         assert_eq!(export_name(Some("..."), "Video", 3), "Video - Clip 04");
+    }
+
+    #[test]
+    fn import_index_round_trips_and_sorts_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_import_index(dir.path()).unwrap().is_empty());
+        let track = |id: &str, at: u64| ImportedTrack {
+            id: id.into(),
+            name: format!("{id}.mp3"),
+            path: dir
+                .path()
+                .join(format!("{id}.mp3"))
+                .to_string_lossy()
+                .into_owned(),
+            imported_at: at,
+        };
+        write_import_index(dir.path(), &[track("old", 1), track("new", 2)]).unwrap();
+        // A second write replaces the existing index instead of failing.
+        write_import_index(
+            dir.path(),
+            &[track("old", 1), track("new", 2), track("mid", 3)],
+        )
+        .unwrap();
+        let tracks = read_import_index(dir.path()).unwrap();
+        assert_eq!(
+            tracks.iter().map(|track| track.id.as_str()).collect::<Vec<_>>(),
+            ["mid", "new", "old"]
+        );
+    }
+
+    #[test]
+    fn import_ids_are_safe_bounded_and_unique_per_timestamp() {
+        assert_eq!(import_id("My Song (Final)", 123), "imp-123-my_song__final");
+        assert_eq!(import_id("", 5), "imp-5-track");
+        let traversal = import_id("../../etc/passwd", 7);
+        assert_eq!(traversal, "imp-7-etc_passwd");
+        assert!(!traversal.contains('/') && !traversal.contains(".."));
+        assert_eq!(import_id(&"b".repeat(100), 1), format!("imp-1-{}", "b".repeat(40)));
+        assert_ne!(import_id("same", 1), import_id("same", 2));
     }
 
     #[test]

@@ -23,6 +23,13 @@ const PREVIEW_BYTES: usize = 512 * 1024;
 const PREVIEW_MIN_BYTES: usize = 4 * 1024;
 const PREVIEW_DIR: &str = ".previews";
 const CANCELLED: &str = "Download canceled.";
+// Curated "Featured" filters. The provider ignores unknown filters, so only
+// these exact, case-sensitive values are forwarded.
+const GENRES: &[&str] = &["Ambient", "Solo piano", "Acoustic folk"];
+
+fn valid_genre(genre: &str) -> bool {
+    GENRES.contains(&genre)
+}
 
 #[derive(Default)]
 pub struct DownloadCancels {
@@ -393,9 +400,15 @@ pub async fn search_kaino(
     query: String,
     page: u32,
     collection: Option<Collection>,
+    genre: Option<String>,
     progress: Channel<MusicProgress>,
 ) -> Result<SearchPage> {
     let collection = collection.unwrap_or(Collection::Music);
+    if let Some(genre) = genre.as_deref() {
+        if !valid_genre(genre) {
+            return Err("Unsupported genre filter.".into());
+        }
+    }
     #[derive(Deserialize)]
     struct Response {
         result: ToolResult,
@@ -406,8 +419,12 @@ pub async fn search_kaino(
         structured_content: SearchResult,
     }
     let query: String = query.trim().chars().take(100).collect();
+    let mut arguments = json!({"collection":collection.as_str(),"q":query,"page":page.clamp(1,10000)});
+    if let Some(genre) = genre.as_deref() {
+        arguments["genre"] = json!(genre);
+    }
     let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-        "name":"search_library","arguments":{"collection":collection.as_str(),"q":query,"page":page.clamp(1,10000)}
+        "name":"search_library","arguments":arguments
     }});
     let client = client(Duration::from_secs(12))?;
     let body = body.to_string();
@@ -715,6 +732,16 @@ mod tests {
             2
         );
         assert!(parse_event_json::<serde_json::Value>(b"data: {}\n").is_none());
+    }
+
+    #[test]
+    fn only_curated_genres_pass_validation() {
+        for genre in GENRES {
+            assert!(valid_genre(genre), "{genre} should be accepted");
+        }
+        for genre in ["ambient", "SOLO PIANO", "Acoustic Folk", "Jazz", "", "Ambient "] {
+            assert!(!valid_genre(genre), "{genre} should be rejected");
+        }
     }
 
     #[test]

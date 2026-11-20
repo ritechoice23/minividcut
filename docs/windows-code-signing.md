@@ -13,6 +13,46 @@ code-signing certificate removes the "unsigned publisher" part of that warning.
 > certificate carries that reputation forward. You can also submit the signed
 > file to [Microsoft's file submission service](https://www.microsoft.com/en-us/wdsi/filesubmission/).
 
+## Free option for open-source projects (SignPath Foundation)
+
+[SignPath Foundation](https://signpath.org/) provides free code signing to
+approved open-source projects. The private key stays on their HSM, so there is
+no certificate file to manage locally. This is the preferred option while the
+project is public and maintained as open source.
+
+1. Apply at <https://signpath.org/apply>. Approval is manual and they verify
+   that the repository is yours and genuinely open source — this step must be
+   done by the repository owner.
+2. After approval, sign in to <https://app.signpath.io>, add the
+   **GitHub.com** Trusted Build System to your organization, create a project
+   for `ritechoice23/minividcut`, and create a signing policy. The workflow
+   below requires GitHub-hosted runners and uploads its artifact before
+   requesting a signature, which satisfies OSS origin verification.
+3. Create an API token for a user with submitter permissions, then add these
+   GitHub repository settings:
+
+   | Kind | Name | Value |
+   | --- | --- | --- |
+   | Secret | `SIGNPATH_API_TOKEN` | API token from SignPath |
+   | Variable | `SIGNPATH_ORGANIZATION_ID` | Organization ID from the policy page |
+   | Variable | `SIGNPATH_PROJECT_SLUG` | Project slug from the policy page |
+   | Variable | `SIGNPATH_SIGNING_POLICY_SLUG` | Signing policy slug |
+
+   The code snippets on the SignPath signing-policy page show these exact IDs.
+   If your project uses a non-default artifact configuration, add its slug to
+   the `submit-signing-request` step in the workflow.
+
+4. Run **Actions → Sign Windows installer (SignPath OSS) → Run workflow**.
+   Enter a release tag such as `v1.2.0` to replace the unsigned installer asset
+   with the signed one, or leave it blank to verify signing without publishing.
+   The workflow checks the Authenticode signature before uploading anything.
+
+## Alternative: bring your own certificate
+
+If SignPath approval is not available, an OV/EV Authenticode certificate from a
+Microsoft-trusted provider works with the
+[`sign-windows`](../.github/workflows/sign-windows.yml) workflow.
+
 ## One-time setup
 
 1. Get a code signing certificate as a `.pfx` file (a `.cer` plus its private
@@ -34,7 +74,7 @@ code-signing certificate removes the "unsigned publisher" part of that warning.
 
 Never commit the `.pfx`, its password, or the decoded base64 to the repository.
 
-## Producing a signed installer
+## Producing a signed installer with your own certificate
 
 The [`sign-windows`](../.github/workflows/sign-windows.yml) workflow is manual:
 

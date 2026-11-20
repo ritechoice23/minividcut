@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **Windows signing is ready to configure.** A manual release workflow builds and verifies an Authenticode-signed installer from repository secrets and can replace the installer on an existing release. See `docs/windows-code-signing.md`. A code-signing certificate is still required; releases up to 1.2.0 remain unsigned.
+- **Windows signing is ready to configure.** Manual workflows can sign and verify an installer with the free SignPath Foundation certificate for open-source projects, or with your own OV/EV certificate from repository secrets, and replace the installer on an existing release. See `docs/windows-code-signing.md`. SignPath approval / a certificate is still required; releases up to 1.2.0 remain unsigned.
 
 ## 1.2.0 — 2026-11-19
 

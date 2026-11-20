@@ -1,0 +1,106 @@
+name: Sign Windows installer (SignPath OSS)
+
+# Uses the free SignPath Foundation certificate for open-source projects.
+# One-time setup is documented in docs/windows-code-signing.md. This workflow
+# is manual so a signing request is only created when you ask for one.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to attach the signed installer to (e.g. v1.2.0). Leave blank to sign without publishing.'
+        required: false
+        type: string
+      replace_release_asset:
+        description: 'Replace the installer asset on that release'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  signpath:
+    # SignPath's OSS origin verification requires GitHub-hosted runners.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Check SignPath configuration
+        shell: pwsh
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          SIGNPATH_SIGNING_POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+        run: |
+          $missing = @()
+          if (-not $env:SIGNPATH_API_TOKEN) { $missing += 'secret SIGNPATH_API_TOKEN' }
+          if (-not $env:SIGNPATH_ORGANIZATION_ID) { $missing += 'variable SIGNPATH_ORGANIZATION_ID' }
+          if (-not $env:SIGNPATH_PROJECT_SLUG) { $missing += 'variable SIGNPATH_PROJECT_SLUG' }
+          if (-not $env:SIGNPATH_SIGNING_POLICY_SLUG) { $missing += 'variable SIGNPATH_SIGNING_POLICY_SLUG' }
+          if ($missing.Count -gt 0) { throw "Missing SignPath configuration: $($missing -join ', ')" }
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build unsigned installer
+        run: npm run tauri build
+
+      - name: Stage unsigned installer
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path 'src-tauri/target/release/bundle/nsis' -Filter '*setup.exe' | Select-Object -First 1
+          if (-not $exe) { throw 'No NSIS installer was produced.' }
+          $staged = Join-Path $env:RUNNER_TEMP 'MiniVidCut-setup-unsigned.exe'
+          Copy-Item -Path $exe.FullName -Destination $staged -Force
+          Write-Host "Staged unsigned installer: $staged"
+
+      - name: Upload unsigned installer for signing
+        id: unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: minividcut-unsigned-installer
+          path: ${{ runner.temp }}/MiniVidCut-setup-unsigned.exe
+          retention-days: 1
+
+      - name: Submit signing request to SignPath
+        id: signpath
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: ${{ runner.temp }}/signed
+
+      - name: Verify Authenticode signature
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path (Join-Path $env:RUNNER_TEMP 'signed') -Filter '*.exe' -Recurse | Select-Object -First 1
+          if (-not $exe) { throw 'No signed installer was returned by SignPath.' }
+          $signature = Get-AuthenticodeSignature -FilePath $exe.FullName
+          if ($signature.Status -ne 'Valid') { throw "Installer signature is not valid: $($signature.Status)" }
+          Write-Host "Signed installer: $($exe.FullName)"
+          Write-Host "Signer: $($signature.SignerCertificate.Subject)"
+          "SIGNED_INSTALLER=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Replace the installer on the release
+        if: ${{ inputs.tag != '' && inputs.replace_release_asset }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload '${{ inputs.tag }}' "$env:SIGNED_INSTALLER#Windows x64 installer" --repo '${{ github.repository }}' --clobber

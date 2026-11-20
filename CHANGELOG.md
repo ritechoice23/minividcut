@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.3.0 — 2026-11-20
 
+- **Update from inside the app.** MiniVidCut checks for a new release on launch and offers an in-app prompt. Press Update & restart to download the signed installer with a progress bar and install it without a second download; the app restarts when the install finishes. Settings → About now has a manual update check. See `docs/in-app-updates.md` for the one-time signing-key setup required to publish updates.
 - **Windows signing is ready to configure.** Manual workflows can sign and verify an installer with the free SignPath Foundation certificate for open-source projects, or with your own OV/EV certificate from repository secrets, and replace the installer on an existing release. See `docs/windows-code-signing.md`. SignPath approval / a certificate is still required; releases up to 1.2.0 remain unsigned.
 
 ## 1.2.0 — 2026-11-19

@@ -10,6 +10,8 @@ The AI runs on your PC after you download the models you need. Your videos stay 
 
 [↗](https://github.com/ritechoice23/minividcut/releases/latest) **Download for Windows x64**
 
+Installed copies check for new releases on launch and can download and install them from an in-app prompt, restarting automatically. [↗](docs/in-app-updates.md) **How in-app updates work**
+
 Installers are currently unsigned, so Windows SmartScreen may warn on download. [↗](docs/windows-code-signing.md) **How code signing is configured**
 
 Built by [↗](https://github.com/ritechoice23) **Daramola Babatunde**. [↗](LICENSE) **MIT license**

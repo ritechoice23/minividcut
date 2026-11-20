@@ -22,6 +22,8 @@ import { fileSize, groupExportStates, summarizeExport } from './export-progress'
 import type { ExportProgress, ExportState } from './export-progress'
 import { ClipActions } from './ClipActions'
 import { Settings } from './Settings'
+import { UpdatePrompt } from './UpdatePrompt'
+import { useAppUpdate } from './useAppUpdate'
 import { CaptionEditor, CaptionStylePanel, progressLabel } from './CaptionEditor'
 import { CaptionPreview } from './CaptionPreview'
 import { prepareCaptionOverlay } from './caption-export'
@@ -173,6 +175,7 @@ function TimeField({ label, value, onChange, onMark, disabled }: {
 }
 
 export function App() {
+  const updates = useAppUpdate()
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [recovery, setRecovery] = useState(readDraft)
   const [cancelingExport, setCancelingExport] = useState(false)
@@ -2091,7 +2094,8 @@ export function App() {
         </div>}
       </header>
 
-      <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} onModelsChanged={(removed) => {
+      <UpdatePrompt update={updates} />
+      <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} update={updates} onModelsChanged={(removed) => {
         if (removed) {
           localStorage.removeItem(TITLE_DOWNLOAD_KEY)
           localStorage.removeItem(AUTO_TITLES_KEY)

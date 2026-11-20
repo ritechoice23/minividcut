@@ -1,6 +1,6 @@
 {
   "productName": "MiniVidCut",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "identifier": "com.minividcut.editor",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -31,6 +31,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": [
       "nsis"
     ],
@@ -46,5 +47,16 @@
     "icon": [
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQyMjVFN0FCQzQzNzc3MEEKUldRS2R6ZkVxK2NsUW1TaTNuOFBqU2srRDg3OC8yY01HY3VGZkI0SUxqU1dVOG9NU2VpeG9zWGIK",
+      "endpoints": [
+        "https://github.com/ritechoice23/minividcut/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

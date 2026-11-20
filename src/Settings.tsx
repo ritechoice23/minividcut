@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react'
 import { Channel, invoke } from '@tauri-apps/api/core'
 import { getVersion } from '@tauri-apps/api/app'
 import { confirm } from '@tauri-apps/plugin-dialog'
-import { ArrowDownToLine, ArrowLeft, AudioLines, Info, Scissors, Sparkles, Trash2 } from 'lucide-react'
+import { ArrowDownToLine, ArrowLeft, AudioLines, Info, RefreshCw, Scissors, Sparkles, Trash2 } from 'lucide-react'
+import type { AppUpdate } from './useAppUpdate'
 
 const MODEL_INFO = {
   speech: { name: 'Parakeet TDT 0.6B', description: 'Transcription and automatic captions', icon: AudioLines },
@@ -10,7 +11,19 @@ const MODEL_INFO = {
 }
 type LocalModel = { id: keyof typeof MODEL_INFO; bytes: number; installed: boolean }
 
-export function Settings({ open, onClose, onModelsChanged }: { open: boolean; onClose: () => void; onModelsChanged: (removed: boolean) => void }) {
+function updateSummary(status: AppUpdate['status']): string {
+  switch (status.phase) {
+    case 'checking': return 'Checking for updates…'
+    case 'current': return 'You’re up to date.'
+    case 'available': return `v${status.info.version} is available.`
+    case 'downloading': return `Downloading… ${status.percent !== null ? `${status.percent}%` : ''}`.trim()
+    case 'installing': return 'Installing update… MiniVidCut will restart.'
+    case 'error': return status.message
+    default: return 'Check for a newer version.'
+  }
+}
+
+export function Settings({ open, onClose, onModelsChanged, update }: { open: boolean; onClose: () => void; onModelsChanged: (removed: boolean) => void; update: AppUpdate }) {
   const [page, setPage] = useState<'about' | 'models'>('about')
   const [models, setModels] = useState<LocalModel[]>([])
   const [version, setVersion] = useState('')
@@ -72,6 +85,17 @@ export function Settings({ open, onClose, onModelsChanged }: { open: boolean; on
         <p>Turn long videos into short clips.</p>
         <div className="settings-card"><div><strong>Daramola Babatunde</strong><small>Creator of MiniVidCut</small></div>
           <a className="source-arrow-link" href="https://github.com/ritechoice23" target="_blank" rel="noopener noreferrer" aria-label="Open Daramola Babatunde’s GitHub profile">↗</a>
+        </div>
+        <div className="settings-card">
+          <RefreshCw size={19} />
+          <div><strong>Updates</strong><small>{updateSummary(update.status)}</small></div>
+          {update.status.phase === 'available' &&
+            <button className="button primary small" onClick={() => void update.install()}><ArrowDownToLine size={14} /> Update</button>}
+          {update.status.phase === 'error' &&
+            <button className="button outline small" onClick={() => void update.retry()}><RefreshCw size={13} /> Retry</button>}
+          {['idle', 'checking', 'current'].includes(update.status.phase) &&
+            <button className="button outline small" disabled={update.status.phase === 'checking'}
+              onClick={() => void update.checkForUpdates(true)}><RefreshCw size={13} /> Check</button>}
         </div>
       </> : <>
         <h1>Models</h1>

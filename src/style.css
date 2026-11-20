@@ -533,6 +533,20 @@ h2 { font-size: 13px; font-weight: 660; letter-spacing: .03px; }
 .settings-content progress { width: 100%; height: 6px; accent-color: var(--lime); }
 .settings-card .source-arrow-link { color: var(--lime); background: #27331f; padding: 3px 7px; border-radius: 4px; text-decoration: none; }
 
+.update-prompt { position: fixed; z-index: 8; top: 48px; left: 50%; transform: translateX(-50%); width: min(460px, calc(100vw - 32px)); padding: 12px; display: grid; gap: 10px; border-color: #4a5c34; box-shadow: 0 12px 40px #000a; }
+.update-prompt.error { border-color: #6a3a32; }
+.update-prompt-head { display: flex; align-items: flex-start; gap: 9px; }
+.update-prompt-icon { width: 27px; height: 27px; display: grid; place-items: center; border-radius: 7px; background: #2b371e; color: var(--lime); }
+.update-prompt.error .update-prompt-icon { background: #3a2420; color: #ff9b8a; }
+.update-prompt-title { flex: 1; min-width: 0; display: grid; gap: 3px; }
+.update-prompt-title strong { font-size: 13px; }
+.update-prompt-title small { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.update-prompt-notes { margin: 0; padding-left: 16px; display: grid; gap: 3px; color: var(--muted); font-size: 11px; }
+.update-prompt-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.update-prompt-progress { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 9px; }
+.update-prompt-progress progress { width: 100%; height: 6px; accent-color: var(--lime); }
+.update-prompt-progress small { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+
 /* ------------------------------------------------------------------------- */
 /* Background-music UI redesign — additive styles.
    Works in both the 240px `.media-menu` popover and the wider

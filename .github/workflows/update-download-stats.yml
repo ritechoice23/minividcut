@@ -1,0 +1,37 @@
+name: Update download statistics
+
+# Refreshes the installer download total shown on the README. Only installer
+# assets are counted, so updater manifest checks and source archives do not
+# inflate the number. Runs daily and can be triggered manually.
+on:
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Refresh statistics
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/update-download-stats.mjs
+
+      - name: Commit updated statistics
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/download-stats.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: refresh download statistics"
+            git push
+          fi

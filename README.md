@@ -8,9 +8,13 @@ Tell **Smart Split** what you’re looking for, like “the funniest moments und
 
 The AI runs on your PC after you download the models you need. Your videos stay on your device.
 
+[![Total installer downloads](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fritechoice23%2Fminividcut%2Fmain%2Fdocs%2Fdownload-stats.json&query=%24.installerDownloads&label=downloads&color=blue)](https://github.com/ritechoice23/minividcut/releases)
+
 [↗](https://github.com/ritechoice23/minividcut/releases/latest) **Download for Windows x64**
 
 Installed copies check for new releases on launch and can download and install them from an in-app prompt, restarting automatically. [↗](docs/in-app-updates.md) **How in-app updates work**
+
+[↗](docs/download-statistics.md) **How downloads are counted**
 
 Installers are currently unsigned, so Windows SmartScreen may warn on download. [↗](docs/windows-code-signing.md) **How code signing is configured**
 

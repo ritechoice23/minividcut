@@ -112,6 +112,27 @@ export function textActive(overlay?: TextOverlay | null): boolean {
   return !!overlay && typeof overlay.text === 'string' && overlay.text.trim().length > 0
 }
 
+/** Identical text and styling, so re-applying to a clip never stacks copies. */
+function sameText(a: TextOverlay, b: TextOverlay) {
+  return a.text === b.text && a.size === b.size && a.x === b.x && a.y === b.y &&
+    a.font === b.font && a.color.toLowerCase() === b.color.toLowerCase()
+}
+
+/** Copy one text block to every target at exactly the same position. Each copy
+ * gets its own id so selecting a block in one clip cannot highlight another. */
+export function spreadTextToTargets(
+  targets: readonly (readonly TextOverlay[])[],
+  source: TextOverlay,
+  maxLayers = TEXT_MAX_LAYERS,
+): TextOverlay[][] {
+  const copy = normalizeText(source)
+  return targets.map(items => {
+    const current = normalizeTexts(items)
+    if (current.some(item => sameText(item, copy)) || current.length >= maxLayers) return current
+    return [...current, { ...copy, id: freshId() }]
+  })
+}
+
 export function moveText(overlay: TextOverlay, x: number, y: number): TextOverlay {
   const clamp = (value: number, fallback: number) => Number.isFinite(value)
     ? Math.min(1, Math.max(0, value)) : fallback

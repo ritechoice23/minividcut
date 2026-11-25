@@ -28,8 +28,9 @@ import { CaptionEditor, CaptionStylePanel, progressLabel } from './CaptionEditor
 import { CaptionPreview } from './CaptionPreview'
 import { prepareCaptionOverlay } from './caption-export'
 import { TextMenu } from './TextMenu'
+import type { TextEntry } from './TextMenu'
 import { TextOverlayPreview } from './TextOverlayPreview'
-import { createTextOverlay, migrateLegacyText, moveText, normalizeText, normalizeTexts, textActive, TEXT_MAX_LAYERS } from './text-overlay'
+import { createTextOverlay, migrateLegacyText, moveText, normalizeText, normalizeTexts, spreadTextToTargets, textActive, TEXT_MAX_LAYERS } from './text-overlay'
 import type { TextOverlay } from './text-overlay'
 import type { CaptionModel, CaptionProgress } from './CaptionEditor'
 import { captionCut, captionSlice, captionsForKept, clipsNeedingCaptions, DEFAULT_CAPTION_STYLE, offsetCaption, restyleCaptionedClip } from './captions'
@@ -660,6 +661,30 @@ export function App() {
     : normalizeTexts(draftTexts),
   [selectedClip, draftTexts])
   const selectedText = activeTexts.find(text => text.id === selectedTextId) ?? null
+  // One entry per saved block, plus the blocks in the unsaved range, so every
+  // text the user added stays reachable from the Text panel.
+  const textEntries = useMemo<TextEntry[]>(() => {
+    const entries: TextEntry[] = []
+    clips.forEach((clip, index) => {
+      for (const item of normalizeTexts(clip.texts ?? clip.text)) entries.push({
+        key: `${clip.id}:${item.id}`,
+        label: clip.title || `Clip ${index + 1}`,
+        time: `${stamp(clip.start, true)} – ${stamp(clip.end, true)}`,
+        text: item.text.trim() || 'Empty text',
+        clipId: clip.id, textId: item.id,
+        active: selectedId === clip.id && selectedTextId === item.id,
+      })
+    })
+    for (const item of normalizeTexts(draftTexts)) entries.push({
+      key: `draft:${item.id}`,
+      label: 'Unsaved range',
+      time: `${stamp(range.start, true)} – ${stamp(range.end, true)}`,
+      text: item.text.trim() || 'Empty text',
+      clipId: null, textId: item.id,
+      active: selectedId === null && selectedTextId === item.id,
+    })
+    return entries
+  }, [clips, draftTexts, selectedId, selectedTextId, range.start, range.end])
   useEffect(() => {
     if (activeTexts.length && !activeTexts.some(text => text.id === selectedTextId)) {
       setSelectedTextId(activeTexts[0].id)
@@ -1096,6 +1121,22 @@ export function App() {
       setSelectedTextId(current => current === id ? null : current)
     }
   }, [updateTexts])
+
+  const applyTextToAll = useCallback(() => {
+    if (exportLock.current || importLock.current || !selectedText || !clips.length) return
+    recordEdit()
+    const updated = spreadTextToTargets(
+      [...clips.map(clip => normalizeTexts(clip.texts ?? clip.text)), normalizeTexts(draftTexts)],
+      selectedText,
+    )
+    setClips(items => items.map((clip, index) => {
+      const { text: _legacy, ...rest } = clip
+      void _legacy
+      return { ...rest, texts: updated[index] }
+    }))
+    setDraftTexts(updated[clips.length])
+    setNotice(`Applied “${selectedText.text.trim() || 'text'}” to all ${clips.length} clip${clips.length === 1 ? '' : 's'}.`)
+  }, [clips, draftTexts, selectedText])
 
   const applyCaptionStyle = useCallback((style: CaptionStyle) => {
     if (exportLock.current || importLock.current || captionJob.current) return false
@@ -1604,6 +1645,19 @@ export function App() {
     setReviewIndex(null)
     revealTimelineTime(clip.start)
     seek(clip.start)
+  }
+
+  const jumpToText = (clipId: number | null, textId: string) => {
+    if (clipId !== null) {
+      const clip = clips.find(item => item.id === clipId)
+      if (!clip) return
+      selectClip(clip)
+    } else {
+      video.current?.pause()
+      setSelectedId(null)
+      setReviewIndex(null)
+    }
+    setSelectedTextId(textId)
   }
 
   const captionClip = (clip: Clip) => {
@@ -2448,8 +2502,9 @@ export function App() {
             canPreview={Boolean(sequenceKey && validRange(range, duration))} onPreview={playSequence} />
           <TextMenu open={mediaDock === 'text'} onClose={() => closeMediaDock('text')}
             label={selectedClip?.title || captionLabel} disabled={disabled || busy}
-            overlays={activeTexts} selectedId={selectedText?.id ?? null} format={format}
-            onSelect={setSelectedTextId} onAdd={addText} onChange={saveText} onRemove={removeText} />
+            overlays={activeTexts} entries={textEntries} selectedId={selectedText?.id ?? null} format={format}
+            onSelect={setSelectedTextId} onJump={jumpToText} onAdd={addText} onChange={saveText} onRemove={removeText}
+            onApplyAll={applyTextToAll} canApplyAll={clips.length > 0} />
           {styleDockOpen && activeCaptions && <CaptionStylePanel key={captionKey} style={activeCaptions.style}
             format={format} editing={editingCaptionJob} canApplyStyle={!busy && !captionsRunning}
             onStyle={saveCaptionStyle} onApplyStyle={applyCaptionStyle} onClose={closeStyleDock} />}

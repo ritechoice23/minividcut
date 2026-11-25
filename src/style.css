@@ -743,16 +743,28 @@ h2 { font-size: 13px; font-weight: 660; letter-spacing: .03px; }
 /* Text overlay — additive styles for the text dock and the draggable preview. */
 /* ------------------------------------------------------------------------- */
 
-.text-slider-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.text-slider-label output { color: var(--lime); font-variant-numeric: tabular-nums; }
-.text-char-count { justify-self: end; margin-top: -8px; font-variant-numeric: tabular-nums; }
+.text-fields { gap: 9px; padding: 11px; }
+.text-section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }
+.text-section-head small { font-size: 10px; font-variant-numeric: tabular-nums; text-transform: none; letter-spacing: 0; }
+.text-char-count { justify-self: end; margin-top: -6px; font-variant-numeric: tabular-nums; }
 .text-field-label { display: block; color: var(--muted); font-size: 11px; }
-.text-color-field { display: grid; gap: 7px; }
+.text-field-label small { font-size: 10px; }
+.text-editor-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.text-number-field { gap: 4px; }
+.text-number { display: flex; align-items: center; gap: 2px; min-width: 0; height: 31px; padding: 0 6px; border: 1px solid #393939; border-radius: 5px; background: #202020; }
+.text-number:focus-within { border-color: var(--lime); }
+.text-number input { min-width: 0; height: 100%; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; font-size: 11px; }
+.text-number input::-webkit-inner-spin-button { opacity: .45; }
+.text-number > span { color: var(--muted); font-size: 10px; }
+.text-color-field { gap: 6px; }
 .text-color-swatches { display: flex; flex-wrap: wrap; gap: 8px; }
 .text-color-swatch { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%; cursor: pointer; }
 .text-color-swatch:disabled { cursor: not-allowed; opacity: .5; }
 .text-color-swatch.active { box-shadow: 0 0 0 1px #101010; }
-.text-remove { justify-self: start; color: #f0a5a5; }
+.text-position-field { gap: 5px; }
+.text-position-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.text-row-actions { display: flex; align-items: center; justify-content: space-between; gap: 7px; }
+.text-remove { color: #f0a5a5; }
 
 /* The preview canvas follows `.caption-artwork`; the wrapper only becomes
    interactive while the Text dock is open so normal playback is untouched. */
@@ -773,6 +785,8 @@ h2 { font-size: 13px; font-weight: 660; letter-spacing: .03px; }
 
 /* Multiple independent text blocks --------------------------------------- */
 .text-layer-list { display: grid; gap: 5px; max-height: 130px; overflow: auto; }
+.text-all-list { max-height: 118px; }
+.text-layer-source { flex: 0 0 auto; max-width: 68px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--lime); font-size: 9px; }
 .text-layer-item {
   display: flex;
   align-items: center;

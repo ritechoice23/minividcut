@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.0 — 2026-11-25
+
+- **Every text in one place.** The Text panel now lists all text blocks across all clips and the unsaved range; click any entry to jump to its clip and edit it.
+- **Apply text to all clips.** A block can be copied to every saved clip at exactly the same position, without stacking duplicates when applied again.
+- **Tighter text editor.** Position and size are now compact number fields with steppers instead of wide sliders — type a percentage or use the native up/down controls, and keep dragging the block on the preview for fine placement.
+
 ## 1.5.0 — 2026-11-25
 
 - **Updates wait for you.** A new version now opens a download dialog, then downloads quietly in the background while you keep editing. Progress can be hidden down to a small chip. Installing only happens after a second dialog asks you to restart, with a **Later** option that leaves a ready-to-restart shortcut and the option in Settings → About.

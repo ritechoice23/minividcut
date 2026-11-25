@@ -34,7 +34,7 @@ Built by [↗](https://github.com/ritechoice23) **Daramola Babatunde**. [↗](LI
 
 ![Vertical video preview with word highlighting, caption style controls, and the timeline](docs/screenshots/portrait-captions.png)
 
-**Put text exactly where you want it.** Open the Text panel for a clip and add up to 50 separate text blocks. Each one has its own words (up to 4,000 characters), size, font, colour and position — select a block to edit it, then drag just that block on the preview or use the position sliders. Only the clips you choose get text, and it is burned into the exported video in either format.
+**Put text exactly where you want it.** Open the Text panel for a clip and add up to 50 separate text blocks. Each one has its own words (up to 4,000 characters), size, font, colour and position — select a block to edit it, then drag just that block on the preview or type exact X/Y percentages. See every text you have added in one list, jump to its clip, and apply a block to all clips at the same position. Only the clips you choose get text, and it is burned into the exported video in either format.
 
 **Keep your own music.** Import a local track into a personal library that still works after you move the original file, then set its volume, start point and fades for the whole project or a single clip.
 

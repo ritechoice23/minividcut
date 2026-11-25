@@ -2,11 +2,40 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   createTextOverlay, DEFAULT_TEXT_OVERLAY, TEXT_MAX_CHARS, TEXT_MAX_LAYERS, TEXT_MAX_SIZE, TEXT_MIN_SIZE,
-  TEXT_STROKE_COLOR, TEXT_STROKE_RATIO, drawText, migrateLegacyText, moveText, normalizeText, normalizeTexts, textActive, textLayout,
+  TEXT_STROKE_COLOR, TEXT_STROKE_RATIO, drawText, migrateLegacyText, moveText, normalizeText, normalizeTexts, spreadTextToTargets, textActive, textLayout,
 } from '../src/text-overlay.ts'
 
 const measure = (perChar = 10) => ({ font: '', measureText(s) { return { width: s.length * perChar } } })
 const overlay = (extra = {}) => ({ ...DEFAULT_TEXT_OVERLAY, id: 'x', text: 'Hi', ...extra })
+
+test('spreadTextToTargets copies a block to every clip at the same position', () => {
+  const source = overlay({ id: 'source', text: 'Brand', x: 0.2, y: 0.75, size: 0.09, color: '#cefa72', font: 'Impact' })
+  const targets = [[overlay({ id: 'a', text: 'Existing' })], []]
+  const result = spreadTextToTargets(targets, source)
+  assert.equal(result.length, 2)
+  assert.equal(result[0].length, 2)
+  assert.equal(result[1].length, 1)
+  for (const items of result) {
+    const copy = items.find(item => item.text === 'Brand')
+    assert.ok(copy)
+    assert.notEqual(copy.id, source.id)
+    assert.equal(copy.x, 0.2)
+    assert.equal(copy.y, 0.75)
+    assert.equal(copy.size, 0.09)
+    assert.equal(copy.color, '#cefa72')
+    assert.equal(copy.font, 'Impact')
+  }
+  assert.equal(targets[0].length, 1)
+  assert.equal(targets[1].length, 0)
+})
+
+test('spreadTextToTargets is idempotent and respects the layer cap', () => {
+  const source = overlay({ id: 'source', text: 'Brand', x: 0.2, y: 0.75 })
+  const withCopy = spreadTextToTargets([[]], source)[0]
+  assert.deepEqual(spreadTextToTargets([withCopy], source)[0], withCopy)
+  const full = Array.from({ length: TEXT_MAX_LAYERS }, (_, index) => overlay({ id: `f${index}` }))
+  assert.equal(spreadTextToTargets([full], source)[0].length, TEXT_MAX_LAYERS)
+})
 
 test('normalizeText falls back to defaults for garbage input', () => {
   for (const junk of [undefined, null, 42, 'hello', [], true, NaN]) {

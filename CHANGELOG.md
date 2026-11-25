@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.0 — 2026-11-25
+
+- **Smart Split suggestions use the length you asked for.** Clips are now filled up to the maximum seconds you set instead of ending at the last spoken word, with only a small shortfall when the next moment or the end of the video gets in the way. Overlapping suggestions are skipped so adding several clips never repeats the same footage.
+- **Clear Smart Split suggestions.** A Clear button at the top of the Smart Split panel removes the generated suggestions and forgets earlier AI choices, so you can start a fresh search without re-listening to the video.
+
 ## 1.3.0 — 2026-11-20
 
 - **Update from inside the app.** MiniVidCut checks for a new release on launch and offers an in-app prompt. Press Update & restart to download the signed installer with a progress bar and install it without a second download; the app restarts when the install finishes. Settings → About now has a manual update check. See `docs/in-app-updates.md` for the one-time signing-key setup required to publish updates.

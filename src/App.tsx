@@ -1294,6 +1294,17 @@ export function App() {
     if (job.transcribing) void invoke('cancel_captions').catch(() => {})
   }
 
+  const clearMoments = () => {
+    if (momentRunning) return
+    setMoments([])
+    setMomentStatus('')
+    setMomentProgress(null)
+    playingMoment.current = null
+    // Forget earlier AI choices so the next Find is a fresh pass. Transcripts
+    // stay cached because listening to the video again is slow and unnecessary.
+    if (momentCache.current.revision === sourceRequest.current) momentCache.current.matches.clear()
+  }
+
   const searchMoments = async (request: string, maximum: number, maxResults: number) => {
     if (!source || momentJob.current || captionJob.current || titleJob.current || importLock.current) return
     const limit = momentLimit(request, maximum)
@@ -1329,6 +1340,7 @@ export function App() {
     addKnown(videoRange, draftCaptions.range)
     for (const section of sections) addKnown(section, draftCaptions[`section-${section.start}-${section.end}`])
     let count = 0
+    const found: Moment[] = []
     try {
       if (!active()) return
       const missing = missingTranscriptRanges(videoRange, [...known, ...cache].map(batch => batch.range))
@@ -1394,8 +1406,13 @@ export function App() {
             matches.set(key, match)
           }
           if (active() && match !== null && group[match]) {
-            count++
-            setMoments(items => [...items, group[match]])
+            // Stretched candidates can span a batch boundary, so keep a later
+            // pick from repeating footage already suggested from an earlier one.
+            if (!found.some(item => rangesOverlap(item, group[match]))) {
+              found.push(group[match])
+              count++
+              setMoments([...found])
+            }
           }
           if (active()) {
             setMomentStatus(status())
@@ -2457,13 +2474,19 @@ export function App() {
                 event.stopPropagation()
               }}>Smart Split</button>
             </div>}
-            {wideWorkspace && <header className="moment-heading">
+            <header className="moment-heading">
               <h2><Sparkles size={15} /> Smart Split</h2>
-              <button className="icon-button compact" type="button" aria-label="Close Smart Split" title="Close Smart Split" onClick={() => {
-                setMomentsOpen(false)
-                momentsTrigger.current?.focus()
-              }}><X size={16} /></button>
-            </header>}
+              <div className="moment-heading-actions">
+                <button className="button outline small" type="button" title="Clear generated suggestions"
+                  aria-label="Clear generated Smart Split suggestions"
+                  disabled={momentRunning || (!moments.length && !momentStatus)}
+                  onClick={clearMoments}><Trash2 size={13} /> Clear</button>
+                {wideWorkspace && <button className="icon-button compact" type="button" aria-label="Close Smart Split" title="Close Smart Split" onClick={() => {
+                  setMomentsOpen(false)
+                  momentsTrigger.current?.focus()
+                }}><X size={16} /></button>}
+              </div>
+            </header>
             <form className="moment-controls" onSubmit={event => {
               event.preventDefault()
               const fields = new FormData(event.currentTarget)

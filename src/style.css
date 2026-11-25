@@ -413,6 +413,9 @@ h2 { font-size: 13px; font-weight: 660; letter-spacing: .03px; }
 .moment-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 9px; border-bottom: 1px solid var(--stroke); }
 .moment-heading h2 { display: flex; align-items: center; gap: 7px; font-size: 13px; }
 .moment-heading h2 svg, .smart-split[aria-expanded="true"] { color: var(--lime); }
+.moment-heading-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.moment-heading-actions .button.small { min-height: 26px; padding-inline: 6px; gap: 5px; }
+.moment-heading-actions .button.small:disabled { opacity: .5; }
 .moment-controls { display: grid; gap: 7px; padding: 9px; }
 .moment-controls-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: end; gap: 7px; }
 .moment-controls-row label { display: grid; gap: 4px; min-width: 0; }

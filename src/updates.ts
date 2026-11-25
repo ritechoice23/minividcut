@@ -40,6 +40,17 @@ export type UpdateAction =
   | { type: 'error'; message: string; detail: string }
   | { type: 'idle' }
 
+/** Short label for the persistent top-bar update indicator. */
+export function updateIndicatorLabel(status: UpdateStatus): string | null {
+  switch (status.phase) {
+    case 'downloading': return status.percent !== null ? `Downloading ${status.percent}%` : 'Downloading…'
+    case 'ready': return 'Restart to update'
+    case 'installing': return 'Installing…'
+    case 'error': return 'Update failed · Retry'
+    default: return null
+  }
+}
+
 /** An ordinary click starts from its prompt; a retry starts from the error state. */
 export function canStartUpdate(phase: UpdateStatus['phase'], failedStage: 'download' | 'install', action: 'download' | 'install') {
   return action === 'download'

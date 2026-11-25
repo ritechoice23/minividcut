@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.7.0 — 2026-11-25
+
+- **Background updates with a top-bar hint.** The download dialog now says **Download in background**, and a compact indicator stays in the top bar with the exact percentage and a thin progress bar. Click it to show or hide the detailed progress toast; editing is never blocked.
+- **Restart stays reachable.** Once the download finishes, a **Restart to update** button remains in the top bar, so choosing **Later** in the dialog never hides the upgrade.
+
 ## 1.6.0 — 2026-11-25
 
 - **Every text in one place.** The Text panel now lists all text blocks across all clips and the unsaved range; click any entry to jump to its clip and edit it.

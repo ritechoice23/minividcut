@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { canStartUpdate, createDownloadTracker, formatBytes, parseReleaseNotes, updateReducer } from '../src/updates.ts'
+import { canStartUpdate, createDownloadTracker, formatBytes, parseReleaseNotes, updateIndicatorLabel, updateReducer } from '../src/updates.ts'
 
 test('download tracker accumulates chunks and reports a bounded percentage', () => {
   const tracker = createDownloadTracker()
@@ -56,6 +56,17 @@ test('late download events cannot overwrite a settled update state', () => {
   assert.equal(updateReducer(readyDownload, { type: 'ready' }), readyDownload)
   const failed = updateReducer(downloading, { type: 'error', message: 'Failed', detail: 'boom' })
   assert.deepEqual(failed, { phase: 'error', message: 'Failed', detail: 'boom', info })
+})
+
+test('the top-bar indicator reports progress and the restart prompt', () => {
+  const info = { version: '2.0.0', notes: [] }
+  assert.equal(updateIndicatorLabel({ phase: 'idle' }), null)
+  assert.equal(updateIndicatorLabel({ phase: 'current' }), null)
+  assert.equal(updateIndicatorLabel({ phase: 'downloading', info, downloaded: 25, total: 100, percent: 25 }), 'Downloading 25%')
+  assert.equal(updateIndicatorLabel({ phase: 'downloading', info, downloaded: 0, total: null, percent: null }), 'Downloading…')
+  assert.equal(updateIndicatorLabel({ phase: 'ready', info }), 'Restart to update')
+  assert.equal(updateIndicatorLabel({ phase: 'installing', info }), 'Installing…')
+  assert.equal(updateIndicatorLabel({ phase: 'error', message: 'Failed', detail: 'boom', info: null }), 'Update failed · Retry')
 })
 
 test('a failed download or install can be retried from the error state', () => {

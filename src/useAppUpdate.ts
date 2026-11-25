@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef } from 'react'
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { isTauri } from '@tauri-apps/api/core'
 import { check as checkTauri, type Update as TauriUpdate } from '@tauri-apps/plugin-updater'
 import { canStartUpdate, createDownloadTracker, formatBytes, parseReleaseNotes, updateReducer,
@@ -10,10 +10,13 @@ export type { UpdateInfo, UpdateStatus }
 export type AppUpdate = {
   status: UpdateStatus
   checkForUpdates: (manual?: boolean) => Promise<void>
-  download: () => Promise<void>
+  download: (background?: boolean) => Promise<void>
   install: () => Promise<void>
   retry: () => Promise<void>
   dismiss: () => void
+  progressHidden: boolean
+  showProgress: () => void
+  hideProgress: () => void
 }
 
 const infoFrom = (update: TauriUpdate): UpdateInfo => ({
@@ -26,6 +29,7 @@ const detailFrom = (error: unknown) => error instanceof Error ? error.message : 
 
 export function useAppUpdate(): AppUpdate {
   const [status, dispatch] = useReducer(updateReducer, { phase: 'idle' } as UpdateStatus)
+  const [progressHidden, setProgressHidden] = useState(false)
   const statusRef = useRef(status)
   statusRef.current = status
   const updateRef = useRef<TauriUpdate | null>(null)
@@ -57,11 +61,12 @@ export function useAppUpdate(): AppUpdate {
     }
   }, [])
 
-  const download = useCallback(async () => {
+  const download = useCallback(async (background = true) => {
     const found = updateRef.current
     if (!found || busy.current || !canStartUpdate(statusRef.current.phase, failedStage.current, 'download')) return
     busy.current = true
     failedStage.current = 'download'
+    setProgressHidden(background)
     const info = infoFrom(found)
     const tracker = createDownloadTracker()
     dispatch({ type: 'download', info, snapshot: tracker.snapshot() })
@@ -116,7 +121,11 @@ export function useAppUpdate(): AppUpdate {
     return () => window.clearTimeout(timer)
   }, [checkForUpdates])
 
-  return { status, checkForUpdates, download, install, retry, dismiss }
+  const showProgress = useCallback(() => setProgressHidden(false), [])
+  const hideProgress = useCallback(() => setProgressHidden(true), [])
+
+  return { status, checkForUpdates, download, install, retry, dismiss,
+    progressHidden, showProgress, hideProgress }
 }
 
 /** Human-readable line for the download progress shown beside the editor. */

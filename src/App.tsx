@@ -22,7 +22,7 @@ import { fileSize, groupExportStates, summarizeExport } from './export-progress'
 import type { ExportProgress, ExportState } from './export-progress'
 import { ClipActions } from './ClipActions'
 import { Settings } from './Settings'
-import { UpdatePrompt } from './UpdatePrompt'
+import { UpdateIndicator, UpdatePrompt } from './UpdatePrompt'
 import { useAppUpdate } from './useAppUpdate'
 import { CaptionEditor, CaptionStylePanel, progressLabel } from './CaptionEditor'
 import { CaptionPreview } from './CaptionPreview'
@@ -2156,6 +2156,7 @@ export function App() {
             <button className="button primary small" type="submit"><ArrowDownToLine size={14} /> Export</button>
           </form>
         </div>
+        <UpdateIndicator update={updates} />
         {isTauri() && <div className="window-controls" role="group" aria-label="Window controls">
           <button aria-label="Minimize" title="Minimize" onClick={() => runWindowAction('minimize')}><Minus size={15} /></button>
           <button aria-label={maximized ? 'Restore' : 'Maximize'} title={maximized ? 'Restore' : 'Maximize'} onClick={() => runWindowAction('toggleMaximize')}>

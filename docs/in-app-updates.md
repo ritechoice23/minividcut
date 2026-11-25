@@ -1,14 +1,16 @@
 # In-app updates
 
 MiniVidCut checks GitHub Releases shortly after launch. When a newer signed
-version is published, an in-app dialog offers **Download update**. The download
-runs in the background with a small, hideable progress toast, so editing
-continues uninterrupted. When it finishes, a second dialog asks you to
-**Restart to update** — **Later** keeps a ready-to-restart toast and the option
-in Settings → About. Restarting installs with a small passive Windows installer
-window and reopens the new version. Nothing is installed without that final
-confirmation. **Not now** snoozes that version until the next release. Settings
-→ About → Updates can check manually at any time.
+version is published, an in-app dialog offers **Download in background**. The
+download keeps running while you edit: a compact indicator in the top bar shows
+the percentage with a thin progress bar, and clicking it reveals or hides a
+more detailed toast. When the download finishes, a second dialog asks you to
+**Restart to update** — **Later** leaves a **Restart to update** button in the
+top bar and the option in Settings → About. Restarting installs with a small
+passive Windows installer window and reopens the new version. Nothing is
+installed without that final confirmation. **Not now** snoozes that version
+until the next release. Settings → About → Updates can check manually at any
+time.
 
 ## Why signing is required
 
@@ -66,10 +68,11 @@ not need the key and never checks for updates.
 
 To verify the full path, publish a release with a version higher than the
 installed app and with `latest.json` attached, then launch the installed app.
-Confirm the download dialog appears, that editing stays usable while the
-progress toast is shown (including after hiding it), and that installing waits
-for the restart prompt. A development browser session intentionally skips the
-update check.
+Confirm the download dialog appears, that editing stays usable while progress
+is shown in the top bar (including after hiding and re-showing the detail
+toast), that a **Restart to update** button stays in the top bar once the
+download finishes, and that installing waits for the restart prompt. A
+development browser session intentionally skips the update check.
 
 The manifest generator can also be run on its own:
 

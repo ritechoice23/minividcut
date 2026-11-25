@@ -25,6 +25,6 @@ export function isPlaybackShortcut(
     !state.hasSource || state.settingsOpen || state.shortcutsOpen) return false
   // Buttons, tabs, sliders and links must not swallow Space. Only text entry
   // and open overlays keep its native behaviour.
-  if (isTextEditing(target) || querySelector('[popover]:popover-open')) return false
+  if (isTextEditing(target) || querySelector('[role="dialog"], [popover]:popover-open')) return false
   return true
 }

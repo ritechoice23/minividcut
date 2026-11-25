@@ -17,6 +17,7 @@ function updateSummary(status: AppUpdate['status']): string {
     case 'current': return 'You’re up to date.'
     case 'available': return `v${status.info.version} is available.`
     case 'downloading': return `Downloading… ${status.percent !== null ? `${status.percent}%` : ''}`.trim()
+    case 'ready': return `v${status.info.version} is downloaded. Restart to install.`
     case 'installing': return 'Installing update… MiniVidCut will restart.'
     case 'error': return status.message
     default: return 'Check for a newer version.'
@@ -90,7 +91,9 @@ export function Settings({ open, onClose, onModelsChanged, update }: { open: boo
           <RefreshCw size={19} />
           <div><strong>Updates</strong><small>{updateSummary(update.status)}</small></div>
           {update.status.phase === 'available' &&
-            <button className="button primary small" onClick={() => void update.install()}><ArrowDownToLine size={14} /> Update</button>}
+            <button className="button primary small" onClick={() => void update.download()}><ArrowDownToLine size={14} /> Download</button>}
+          {update.status.phase === 'ready' &&
+            <button className="button primary small" onClick={() => void update.install()}><RefreshCw size={13} /> Restart to update</button>}
           {update.status.phase === 'error' &&
             <button className="button outline small" onClick={() => void update.retry()}><RefreshCw size={13} /> Retry</button>}
           {['idle', 'checking', 'current'].includes(update.status.phase) &&

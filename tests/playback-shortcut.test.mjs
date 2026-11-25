@@ -9,6 +9,7 @@ const event = (overrides = {}) => ({
 const state = (overrides = {}) => ({ hasSource: true, settingsOpen: false, shortcutsOpen: false, ...overrides })
 const noOverlays = () => null
 const openPopover = query => query.includes('popover') ? {} : null
+const openDialog = query => query.includes('[role="dialog"]') ? {} : null
 
 // Minimal Element.closest stand-ins. A compound selector is split into its
 // exact tokens, so reintroducing a guard such as closest('button, select, a')
@@ -58,6 +59,7 @@ test('playback is gated by a loaded source and by open settings, dialogs and pop
   assert.equal(plays(event(), state({ settingsOpen: true })), false)
   assert.equal(plays(event(), state({ shortcutsOpen: true })), false)
   assert.equal(plays(event(), state(), null, openPopover), false)
+  assert.equal(plays(event(), state(), null, openDialog), false)
   // A focused control inside an open popover keeps its native Space action.
   assert.equal(plays(event(), state(), matched('button'), openPopover), false)
 })

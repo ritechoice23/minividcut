@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.0 — 2026-11-25
+
+- **Updates wait for you.** A new version now opens a download dialog, then downloads quietly in the background while you keep editing. Progress can be hidden down to a small chip. Installing only happens after a second dialog asks you to restart, with a **Later** option that leaves a ready-to-restart shortcut and the option in Settings → About.
+- Space no longer toggles playback while an update dialog is open.
+
 ## 1.4.0 — 2026-11-25
 
 - **Smart Split suggestions use the length you asked for.** Clips are now filled up to the maximum seconds you set instead of ending at the last spoken word, with only a small shortfall when the next moment or the end of the video gets in the way. Overlapping suggestions are skipped so adding several clips never repeats the same footage.

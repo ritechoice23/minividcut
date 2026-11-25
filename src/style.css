@@ -536,19 +536,32 @@ h2 { font-size: 13px; font-weight: 660; letter-spacing: .03px; }
 .settings-content progress { width: 100%; height: 6px; accent-color: var(--lime); }
 .settings-card .source-arrow-link { color: var(--lime); background: #27331f; padding: 3px 7px; border-radius: 4px; text-decoration: none; }
 
-.update-prompt { position: fixed; z-index: 8; top: 48px; left: 50%; transform: translateX(-50%); width: min(460px, calc(100vw - 32px)); padding: 12px; display: grid; gap: 10px; border-color: #4a5c34; box-shadow: 0 12px 40px #000a; }
-.update-prompt.error { border-color: #6a3a32; }
-.update-prompt-head { display: flex; align-items: flex-start; gap: 9px; }
-.update-prompt-icon { width: 27px; height: 27px; display: grid; place-items: center; border-radius: 7px; background: #2b371e; color: var(--lime); }
-.update-prompt.error .update-prompt-icon { background: #3a2420; color: #ff9b8a; }
-.update-prompt-title { flex: 1; min-width: 0; display: grid; gap: 3px; }
-.update-prompt-title strong { font-size: 13px; }
-.update-prompt-title small { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
-.update-prompt-notes { margin: 0; padding-left: 16px; display: grid; gap: 3px; color: var(--muted); font-size: 11px; }
-.update-prompt-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
-.update-prompt-progress { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 9px; }
-.update-prompt-progress progress { width: 100%; height: 6px; accent-color: var(--lime); }
-.update-prompt-progress small { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+/* Update dialogue and background download status */
+.update-dialog-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 18px; background: #0009; backdrop-filter: blur(3px); }
+.update-dialog { width: min(430px, 100%); padding: 18px; display: grid; gap: 14px; border: 1px solid #4a5c34; border-radius: 13px; background: linear-gradient(160deg, #20271a, #171717 55%); box-shadow: 0 26px 80px #000c; }
+.update-dialog-top { display: flex; align-items: flex-start; justify-content: space-between; }
+.update-dialog-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 11px; background: #2d3c20; color: var(--lime); box-shadow: inset 0 0 0 1px #516638; }
+.update-dialog-icon.ready { background: #2b3a20; }
+.update-dialog-icon.error { background: #3a2420; color: #ff9b8a; box-shadow: inset 0 0 0 1px #6a3a32; }
+.update-dialog-body { display: grid; gap: 8px; }
+.update-dialog-eyebrow { color: var(--lime); font-size: 10px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; }
+.update-dialog h2 { font-size: 18px; letter-spacing: -.2px; }
+.update-dialog-body p { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.update-dialog-notes { margin: 2px 0 0; padding: 10px 12px; display: grid; gap: 5px; border: 1px solid var(--stroke); border-radius: 8px; background: #121212; color: #d5d8cf; font-size: 11px; line-height: 1.45; list-style: none; }
+.update-dialog-notes li { position: relative; padding-left: 12px; }
+.update-dialog-notes li::before { content: ''; position: absolute; left: 1px; top: 6px; width: 4px; height: 4px; border-radius: 50%; background: var(--lime); }
+.update-dialog-detail { color: var(--dim); font: 10px var(--mono); overflow-wrap: anywhere; }
+.update-dialog-actions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; padding-top: 2px; }
+.update-dialog-actions .button { min-width: 132px; }
+
+.update-toast { position: fixed; z-index: 9; top: 48px; left: 50%; transform: translateX(-50%); width: min(430px, calc(100vw - 24px)); padding: 9px 10px; display: flex; align-items: center; gap: 9px; border: 1px solid #4a5c34; border-radius: 10px; background: #1b2118ee; box-shadow: 0 12px 36px #000a; backdrop-filter: blur(6px); }
+.update-toast.ready { border-color: #5e733d; background: #202a19ee; }
+.update-toast-icon { width: 29px; height: 29px; flex-shrink: 0; display: grid; place-items: center; border-radius: 8px; background: #2b371e; color: var(--lime); }
+.update-toast-text { flex: 1; min-width: 0; display: grid; gap: 3px; }
+.update-toast-text strong { font-size: 12px; overflow-wrap: anywhere; }
+.update-toast-text small { color: var(--muted); font-size: 10px; }
+.update-toast progress { width: 100%; height: 4px; accent-color: var(--lime); }
+.update-chip { position: fixed; z-index: 9; top: 46px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 6px; padding: 5px 10px; border: 1px solid #4a5c34; border-radius: 999px; background: #1b2118ee; color: var(--lime); font-size: 11px; box-shadow: 0 6px 20px #0009; }
 
 /* ------------------------------------------------------------------------- */
 /* Background-music UI redesign — additive styles.

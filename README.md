@@ -12,7 +12,7 @@ The AI runs on your PC after you download the models you need. Your videos stay 
 
 [↗](https://github.com/ritechoice23/minividcut/releases/latest) **Download for Windows x64**
 
-Installed copies check for new releases on launch and can download and install them from an in-app prompt, restarting automatically. [↗](docs/in-app-updates.md) **How in-app updates work**
+Installed copies check for new releases on launch, download them in the background while you keep editing, then ask before restarting to install. [↗](docs/in-app-updates.md) **How in-app updates work**
 
 [↗](docs/download-statistics.md) **How downloads are counted**
 

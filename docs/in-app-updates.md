@@ -1,12 +1,14 @@
 # In-app updates
 
 MiniVidCut checks GitHub Releases shortly after launch. When a newer signed
-version is published, an in-app prompt offers **Update & restart**. The update
-is downloaded in the background with a progress bar, then installed with a
-small passive Windows installer window. The installer restarts MiniVidCut
-automatically, so users never have to visit the website or download anything
-themselves. **Not now** hides the prompt for that version until the next
-release. Settings → About → Updates can check manually at any time.
+version is published, an in-app dialog offers **Download update**. The download
+runs in the background with a small, hideable progress toast, so editing
+continues uninterrupted. When it finishes, a second dialog asks you to
+**Restart to update** — **Later** keeps a ready-to-restart toast and the option
+in Settings → About. Restarting installs with a small passive Windows installer
+window and reopens the new version. Nothing is installed without that final
+confirmation. **Not now** snoozes that version until the next release. Settings
+→ About → Updates can check manually at any time.
 
 ## Why signing is required
 
@@ -64,7 +66,10 @@ not need the key and never checks for updates.
 
 To verify the full path, publish a release with a version higher than the
 installed app and with `latest.json` attached, then launch the installed app.
-A development browser session intentionally skips the update check.
+Confirm the download dialog appears, that editing stays usable while the
+progress toast is shown (including after hiding it), and that installing waits
+for the restart prompt. A development browser session intentionally skips the
+update check.
 
 The manifest generator can also be run on its own:
 

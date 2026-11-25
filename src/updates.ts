@@ -12,6 +12,56 @@ export type DownloadSnapshot = {
   percent: number | null
 }
 
+export type UpdateInfo = {
+  version: string
+  notes: string[]
+  date?: string
+}
+
+/** Downloading stays in the background; installing only starts on request. */
+export type UpdateStatus =
+  | { phase: 'idle' }
+  | { phase: 'checking' }
+  | { phase: 'current' }
+  | { phase: 'available'; info: UpdateInfo }
+  | ({ phase: 'downloading'; info: UpdateInfo } & DownloadSnapshot)
+  | { phase: 'ready'; info: UpdateInfo }
+  | { phase: 'installing'; info: UpdateInfo }
+  | { phase: 'error'; message: string; detail: string; info: UpdateInfo | null }
+
+export type UpdateAction =
+  | { type: 'checking' }
+  | { type: 'current' }
+  | { type: 'available'; info: UpdateInfo }
+  | { type: 'download'; info: UpdateInfo; snapshot: DownloadSnapshot }
+  | { type: 'progress'; snapshot: DownloadSnapshot }
+  | { type: 'ready' }
+  | { type: 'installing' }
+  | { type: 'error'; message: string; detail: string }
+  | { type: 'idle' }
+
+/** An ordinary click starts from its prompt; a retry starts from the error state. */
+export function canStartUpdate(phase: UpdateStatus['phase'], failedStage: 'download' | 'install', action: 'download' | 'install') {
+  return action === 'download'
+    ? phase === 'available' || (phase === 'error' && failedStage === 'download')
+    : phase === 'ready' || (phase === 'error' && failedStage === 'install')
+}
+
+export function updateReducer(state: UpdateStatus, action: UpdateAction): UpdateStatus {
+  switch (action.type) {
+    case 'checking': return { phase: 'checking' }
+    case 'current': return { phase: 'current' }
+    case 'available': return { phase: 'available', info: action.info }
+    case 'download': return { phase: 'downloading', info: action.info, ...action.snapshot }
+    case 'progress': return state.phase === 'downloading' ? { ...state, ...action.snapshot } : state
+    case 'ready': return state.phase === 'downloading' ? { phase: 'ready', info: state.info } : state
+    case 'installing': return 'info' in state && state.info ? { phase: 'installing', info: state.info } : state
+    case 'error': return { phase: 'error', message: action.message, detail: action.detail,
+      info: 'info' in state ? state.info : null }
+    case 'idle': return { phase: 'idle' }
+  }
+}
+
 /** Accumulates plugin download events into a progress snapshot. */
 export function createDownloadTracker() {
   let downloaded = 0

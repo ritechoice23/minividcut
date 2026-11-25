@@ -1,11 +1,27 @@
 {
-  "installerDownloads": 14,
-  "assetDownloads": 22,
-  "installerAssets": 5,
+  "installerDownloads": 25,
+  "assetDownloads": 59,
+  "installerAssets": 9,
   "releases": [
     {
+      "tag": "v1.7.0",
+      "installerDownloads": 2
+    },
+    {
+      "tag": "v1.6.0",
+      "installerDownloads": 3
+    },
+    {
+      "tag": "v1.5.0",
+      "installerDownloads": 2
+    },
+    {
+      "tag": "v1.4.0",
+      "installerDownloads": 3
+    },
+    {
       "tag": "v1.3.0",
-      "installerDownloads": 4
+      "installerDownloads": 5
     },
     {
       "tag": "v1.2.0",
@@ -28,5 +44,5 @@
       "installerDownloads": 0
     }
   ],
-  "updatedAt": "2026-11-24T17:55:51.036Z"
+  "updatedAt": "2026-11-25T17:24:42.743Z"
 }

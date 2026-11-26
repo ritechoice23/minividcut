@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { isTauri } from '@tauri-apps/api/core'
 import { check as checkTauri, type Update as TauriUpdate } from '@tauri-apps/plugin-updater'
-import { canStartUpdate, createDownloadTracker, formatBytes, parseReleaseNotes, updateReducer,
+import { canStartUpdate, createDownloadTracker, createPendingInstall, formatBytes, parseReleaseNotes, updateReducer,
   type UpdateInfo, type UpdateStatus } from './updates'
 
 const SNOOZE_KEY = 'minividcut.update.snoozed'
@@ -14,6 +14,7 @@ export type AppUpdate = {
   install: () => Promise<void>
   retry: () => Promise<void>
   dismiss: () => void
+  deferInstall: () => void
   progressHidden: boolean
   showProgress: () => void
   hideProgress: () => void
@@ -33,6 +34,7 @@ export function useAppUpdate(): AppUpdate {
   const statusRef = useRef(status)
   statusRef.current = status
   const updateRef = useRef<TauriUpdate | null>(null)
+  const pending = useRef(createPendingInstall(localStorage))
   const busy = useRef(false)
   const failedStage = useRef<'download' | 'install'>('download')
 
@@ -115,8 +117,46 @@ export function useAppUpdate(): AppUpdate {
     dispatch({ type: 'idle' })
   }, [])
 
+  // A downloaded update cannot survive a restart as a Tauri resource, so a
+  // deferred install is remembered by version and completed at next launch.
+  const deferInstall = useCallback(() => {
+    const found = updateRef.current
+    if (found) {
+      pending.current.defer(found.version)
+      void found.close().catch(() => {})
+      updateRef.current = null
+    }
+    dispatch({ type: 'idle' })
+  }, [])
+
   useEffect(() => {
     if (!isTauri()) return
+    const deferred = pending.current.consume()
+    if (deferred) {
+      void (async () => {
+        busy.current = true
+        dispatch({ type: 'download', info: { version: deferred, notes: [] },
+          snapshot: { downloaded: 0, total: null, percent: null } })
+        dispatch({ type: 'installing' })
+        try {
+          const found = await checkTauri({ timeout: 20_000 })
+          if (!found) {
+            dispatch({ type: 'current' })
+            return
+          }
+          updateRef.current = found
+          // Install before the user starts editing so the workflow is not
+          // interrupted. On Windows this exits the app and reopens the update.
+          await found.downloadAndInstall(undefined, { restartAfterInstall: true })
+          dispatch({ type: 'installing' })
+        } catch (error) {
+          dispatch({ type: 'error', message: 'Couldn’t finish the update. Please try again.', detail: detailFrom(error) })
+        } finally {
+          busy.current = false
+        }
+      })()
+      return
+    }
     const timer = window.setTimeout(() => { void checkForUpdates() }, 4000)
     return () => window.clearTimeout(timer)
   }, [checkForUpdates])
@@ -124,7 +164,7 @@ export function useAppUpdate(): AppUpdate {
   const showProgress = useCallback(() => setProgressHidden(false), [])
   const hideProgress = useCallback(() => setProgressHidden(true), [])
 
-  return { status, checkForUpdates, download, install, retry, dismiss,
+  return { status, checkForUpdates, download, install, retry, dismiss, deferInstall,
     progressHidden, showProgress, hideProgress }
 }
 

@@ -23,10 +23,12 @@ export function UpdateIndicator({ update }: { update: AppUpdate }) {
       <span className="update-indicator-bar" style={{ width: `${percent ?? 0}%` }} aria-hidden="true" />
       <ArrowDownToLine size={13} /> {label}
     </button>
-  if (status.phase === 'ready') return <button type="button" className="update-indicator ready"
-    title="Update downloaded — restart to install it" onClick={() => void update.install()}>
-      <Check size={13} /> {label}
-    </button>
+  if (status.phase === 'ready') return <div className="update-indicator ready">
+    <button type="button" className="update-indicator-main" title="Restart now to install the update"
+      onClick={() => void update.install()}><Check size={13} /> {label}</button>
+    <button type="button" className="update-indicator-close" aria-label="Dismiss restart reminder"
+      title="Finish the update on next launch" onClick={update.deferInstall}><X size={11} /></button>
+  </div>
   if (status.phase === 'error') return <button type="button" className="update-indicator error"
     title={status.detail} onClick={() => void update.retry()}><RefreshCw size={12} /> {label}</button>
   return <span className="update-indicator" title={title}>{label}</span>
@@ -89,7 +91,7 @@ export function UpdatePrompt({ update }: { update: AppUpdate }) {
           </h2>
           <p id="update-dialog-text">
             {status.phase === 'ready'
-              ? `Version ${version} is downloaded. Restart now to install it, or carry on editing and restart from the top bar later.`
+              ? `Version ${version} is downloaded. Restart now to install it, or close the reminder and we’ll finish it on your next launch.`
               : status.phase === 'error'
                 ? status.message
                 : 'Download it in the background and keep editing. Progress stays in the top bar, and we’ll ask before restarting.'}
@@ -109,7 +111,7 @@ export function UpdatePrompt({ update }: { update: AppUpdate }) {
             </button>
           </>}
           {status.phase === 'ready' && <>
-            <button className="text-button" onClick={() => setDialogOpen(false)}>Later</button>
+            <button className="text-button" onClick={update.deferInstall}>Finish on next launch</button>
             <button className="button primary" onClick={() => void update.install()}>
               <RefreshCw size={15} /> Restart to update
             </button>

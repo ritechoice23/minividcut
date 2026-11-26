@@ -40,6 +40,24 @@ export type UpdateAction =
   | { type: 'error'; message: string; detail: string }
   | { type: 'idle' }
 
+export const PENDING_INSTALL_KEY = 'minividcut.update.pending-install'
+
+type KeyStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
+
+/** Remembers an update the user chose to finish on the next launch, so a
+ * restart prompt never interrupts the current editing session. */
+export function createPendingInstall(storage: KeyStorage) {
+  return {
+    defer(version: string) { storage.setItem(PENDING_INSTALL_KEY, version) },
+    peek() { return storage.getItem(PENDING_INSTALL_KEY) },
+    consume() {
+      const version = storage.getItem(PENDING_INSTALL_KEY)
+      storage.removeItem(PENDING_INSTALL_KEY)
+      return version
+    },
+  }
+}
+
 /** Short label for the persistent top-bar update indicator. */
 export function updateIndicatorLabel(status: UpdateStatus): string | null {
   switch (status.phase) {

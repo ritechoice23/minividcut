@@ -14,6 +14,8 @@ The AI runs on your PC after you download the models you need. Your videos stay 
 
 Installed copies check for new releases on launch, download them in the background while you keep editing, then ask before restarting to install. [↗](docs/in-app-updates.md) **How in-app updates work**
 
+Set a default export folder once under Settings → Configuration so exports save there without asking every time.
+
 [↗](docs/download-statistics.md) **How downloads are counted**
 
 Installers are currently unsigned, so Windows SmartScreen may warn on download. [↗](docs/windows-code-signing.md) **How code signing is configured**

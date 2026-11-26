@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.8.0 — 2026-11-26
+
+- **Set your export folder once.** Settings → Configuration now keeps a default save folder, so exports go straight there instead of prompting every time. Clear it to go back to choosing a folder per export.
+- **Finish updates on the next launch.** The ready update pill has a small ×, and the dialog offers **Finish on next launch**. Either remembers the ready version and completes the install at startup, so an update never interrupts your editing session.
+
 ## 1.7.0 — 2026-11-25
 
 - **Background updates with a top-bar hint.** The download dialog now says **Download in background**, and a compact indicator stays in the top bar with the exact percentage and a thin progress bar. Click it to show or hide the detailed progress toast; editing is never blocked.

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Channel, invoke } from '@tauri-apps/api/core'
 import { getVersion } from '@tauri-apps/api/app'
 import { confirm } from '@tauri-apps/plugin-dialog'
-import { ArrowDownToLine, ArrowLeft, AudioLines, Info, RefreshCw, Scissors, Sparkles, Trash2 } from 'lucide-react'
+import { ArrowDownToLine, ArrowLeft, AudioLines, FolderOpen, Info, RefreshCw, Scissors, Settings2, Sparkles, Trash2 } from 'lucide-react'
 import type { AppUpdate } from './useAppUpdate'
 
 const MODEL_INFO = {
@@ -24,8 +24,11 @@ function updateSummary(status: AppUpdate['status']): string {
   }
 }
 
-export function Settings({ open, onClose, onModelsChanged, update }: { open: boolean; onClose: () => void; onModelsChanged: (removed: boolean) => void; update: AppUpdate }) {
-  const [page, setPage] = useState<'about' | 'models'>('about')
+export function Settings({ open, onClose, onModelsChanged, update, exportFolder, onChooseExportFolder, onClearExportFolder }: {
+  open: boolean; onClose: () => void; onModelsChanged: (removed: boolean) => void; update: AppUpdate
+  exportFolder: string; onChooseExportFolder: () => void; onClearExportFolder: () => void
+}) {
+  const [page, setPage] = useState<'about' | 'models' | 'configuration'>('about')
   const [models, setModels] = useState<LocalModel[]>([])
   const [version, setVersion] = useState('')
   const [pending, setPending] = useState<LocalModel['id'] | null>(null)
@@ -79,6 +82,7 @@ export function Settings({ open, onClose, onModelsChanged, update }: { open: boo
       <button className="text-button" onClick={onClose}><ArrowLeft size={15} /> Back to editor</button>
       <button className="settings-link" aria-current={page === 'about' ? 'page' : undefined} onClick={() => setPage('about')}><Info size={16} /> About</button>
       <button className="settings-link" aria-current={page === 'models' ? 'page' : undefined} onClick={() => setPage('models')}><AudioLines size={16} /> Models</button>
+      <button className="settings-link" aria-current={page === 'configuration' ? 'page' : undefined} onClick={() => setPage('configuration')}><Settings2 size={16} /> Configuration</button>
     </nav>
     <div className="settings-content">
       {page === 'about' ? <>
@@ -99,6 +103,19 @@ export function Settings({ open, onClose, onModelsChanged, update }: { open: boo
           {['idle', 'checking', 'current'].includes(update.status.phase) &&
             <button className="button outline small" disabled={update.status.phase === 'checking'}
               onClick={() => void update.checkForUpdates(true)}><RefreshCw size={13} /> Check</button>}
+        </div>
+      </> : page === 'configuration' ? <>
+        <h1>Configuration</h1>
+        <p>Set defaults once instead of choosing them for every export.</p>
+        <div className="settings-card">
+          <FolderOpen size={19} />
+          <div>
+            <strong>Export folder</strong>
+            <small title={exportFolder || undefined}>{exportFolder || 'Not set — you will be asked where to save each export.'}</small>
+          </div>
+          <button className="button outline small" onClick={onChooseExportFolder}>{exportFolder ? 'Change' : 'Choose'}</button>
+          {exportFolder && <button className="button outline small" aria-label="Clear export folder" title="Ask every time"
+            onClick={onClearExportFolder}><Trash2 size={14} /></button>}
         </div>
       </> : <>
         <h1>Models</h1>

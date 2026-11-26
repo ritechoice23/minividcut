@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { canStartUpdate, createDownloadTracker, formatBytes, parseReleaseNotes, updateIndicatorLabel, updateReducer } from '../src/updates.ts'
+import { canStartUpdate, createDownloadTracker, createPendingInstall, formatBytes, parseReleaseNotes, updateIndicatorLabel, updateReducer } from '../src/updates.ts'
 
 test('download tracker accumulates chunks and reports a bounded percentage', () => {
   const tracker = createDownloadTracker()
@@ -56,6 +56,22 @@ test('late download events cannot overwrite a settled update state', () => {
   assert.equal(updateReducer(readyDownload, { type: 'ready' }), readyDownload)
   const failed = updateReducer(downloading, { type: 'error', message: 'Failed', detail: 'boom' })
   assert.deepEqual(failed, { phase: 'error', message: 'Failed', detail: 'boom', info })
+})
+
+test('a deferred update is remembered once and consumed on the next launch', () => {
+  const store = new Map()
+  const storage = {
+    getItem: key => store.get(key) ?? null,
+    setItem: (key, value) => void store.set(key, value),
+    removeItem: key => void store.delete(key),
+  }
+  const pending = createPendingInstall(storage)
+  assert.equal(pending.peek(), null)
+  pending.defer('2.0.0')
+  assert.equal(pending.peek(), '2.0.0')
+  assert.equal(pending.consume(), '2.0.0')
+  assert.equal(pending.consume(), null)
+  assert.equal(pending.peek(), null)
 })
 
 test('the top-bar indicator reports progress and the restart prompt', () => {

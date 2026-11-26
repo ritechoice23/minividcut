@@ -66,6 +66,7 @@ type Draft = {
 const DRAFT_KEY = 'minividcut.draft'
 const AUTO_TITLES_KEY = 'minividcut.auto-titles'
 const TITLE_DOWNLOAD_KEY = 'minividcut.title-download-allowed'
+const EXPORT_FOLDER_KEY = 'minividcut.export-folder'
 
 function readDraft(): Draft | null {
   try {
@@ -238,6 +239,7 @@ export function App() {
   const titleJob = useRef(false)
   const titledClips = useRef(new Set<string>())
   const [exportBatch, setExportBatch] = useState<ExportBatch | null>(null)
+  const [exportFolder, setExportFolder] = useState(() => localStorage.getItem(EXPORT_FOLDER_KEY) ?? '')
   const [shortcuts, setShortcuts] = useState(false)
   const [splitOpen, setSplitOpen] = useState(false)
   const [splitMode, setSplitMode] = useState<'mark' | 'add'>('mark')
@@ -880,6 +882,33 @@ export function App() {
       }).catch(() => {})
     return () => { cancelled = true }
   }, [source, clipStarts])
+
+  const chooseExportFolder = useCallback(async () => {
+    if (fileDialog.current || exportLock.current) return
+    if (!isTauri()) {
+      setNotice('Open MiniVidCut as a desktop app to choose a folder.')
+      return
+    }
+    fileDialog.current = true
+    try {
+      const folder = await open({ directory: true, title: 'Choose where to save exports',
+        defaultPath: exportFolder || undefined })
+      if (typeof folder === 'string' && folder) {
+        setExportFolder(folder)
+        localStorage.setItem(EXPORT_FOLDER_KEY, folder)
+        setNotice('')
+      }
+    } catch (error) {
+      setNotice(message(error))
+    } finally {
+      fileDialog.current = false
+    }
+  }, [exportFolder])
+
+  const clearExportFolder = useCallback(() => {
+    setExportFolder('')
+    localStorage.removeItem(EXPORT_FOLDER_KEY)
+  }, [])
 
   const chooseVideo = useCallback(async (draft?: Draft) => {
     if (fileDialog.current || exportLock.current || importLock.current) return
@@ -1767,7 +1796,7 @@ export function App() {
     let started = false
     const overlays: string[] = []
     try {
-      const folder = await open({ directory: true, title: 'Choose where to save your clips' })
+      const folder = exportFolder || await open({ directory: true, title: 'Choose where to save your clips' })
       if (!folder) return
       started = true
       setCaptionsOpen(false)
@@ -2167,14 +2196,16 @@ export function App() {
       </header>
 
       <UpdatePrompt update={updates} />
-      <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} update={updates} onModelsChanged={(removed) => {
-        if (removed) {
-          localStorage.removeItem(TITLE_DOWNLOAD_KEY)
-          localStorage.removeItem(AUTO_TITLES_KEY)
-          setAutoTitles(false)
-        }
-        void refreshCaptionModel().catch(() => {})
-      }} />
+      <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} update={updates}
+        exportFolder={exportFolder} onChooseExportFolder={() => void chooseExportFolder()} onClearExportFolder={clearExportFolder}
+        onModelsChanged={(removed) => {
+          if (removed) {
+            localStorage.removeItem(TITLE_DOWNLOAD_KEY)
+            localStorage.removeItem(AUTO_TITLES_KEY)
+            setAutoTitles(false)
+          }
+          void refreshCaptionModel().catch(() => {})
+        }} />
       <main hidden={settingsOpen} className={`workspace ${sections.length ? 'reviewing' : ''} ${dockOpen && wideWorkspace ? 'with-moments' : ''} ${timelineZoom > 1 ? 'timeline-zoomed' : ''}`}>
         <section className="viewer panel" aria-label="Video preview">
           <div className="panel-heading">

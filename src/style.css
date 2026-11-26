@@ -531,7 +531,7 @@ h2 { font-size: 13px; font-weight: 660; letter-spacing: .03px; }
 .settings-card > div { flex: 1; min-width: 0; }
 .settings-card strong, .settings-card small { display: block; }
 .settings-card strong { font-size: 13px; }
-.settings-card small { margin-top: 3px; }
+.settings-card small { margin-top: 3px; overflow-wrap: anywhere; }
 .settings-installed { color: var(--lime); font-size: 11px; }
 .settings-content progress { width: 100%; height: 6px; accent-color: var(--lime); }
 .settings-card .source-arrow-link { color: var(--lime); background: #27331f; padding: 3px 7px; border-radius: 4px; text-decoration: none; }
@@ -566,7 +566,10 @@ h2 { font-size: 13px; font-weight: 660; letter-spacing: .03px; }
    when the detailed toast is hidden so the editor is never interrupted. */
 .update-indicator { position: relative; align-self: center; display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; min-height: 25px; margin-right: 7px; padding: 0 10px; overflow: hidden; border: 1px solid #4a5c34; border-radius: 999px; background: #1d2718; color: #bdf07a; font-size: 11px; font-weight: 650; white-space: nowrap; }
 .update-indicator:hover { background: #27351d; }
-.update-indicator.ready { border-color: #6b9440; background: #24341b; color: #d5f79c; }
+.update-indicator.ready { padding: 0 3px 0 10px; gap: 2px; border-color: #6b9440; background: #24341b; color: #d5f79c; }
+.update-indicator-main { display: inline-flex; align-items: center; gap: 6px; min-height: 23px; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; }
+.update-indicator-close { display: grid; place-items: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%; background: #ffffff14; color: inherit; }
+.update-indicator-close:hover { background: #ffffff30; }
 .update-indicator.error { border-color: #6a3a32; background: #2a1a18; color: #ff9b8a; }
 .update-indicator-bar { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--lime); opacity: .8; transition: width .18s ease; }
 

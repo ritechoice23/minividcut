@@ -5,12 +5,12 @@ version is published, an in-app dialog offers **Download in background**. The
 download keeps running while you edit: a compact indicator in the top bar shows
 the percentage with a thin progress bar, and clicking it reveals or hides a
 more detailed toast. When the download finishes, a second dialog asks you to
-**Restart to update** — **Later** leaves a **Restart to update** button in the
-top bar and the option in Settings → About. Restarting installs with a small
-passive Windows installer window and reopens the new version. Nothing is
-installed without that final confirmation. **Not now** snoozes that version
-until the next release. Settings → About → Updates can check manually at any
-time.
+**Restart to update** — **Finish on next launch** (or the small × on the top-bar
+button) remembers the update and completes it the next time the app starts,
+before you begin editing. Restarting immediately installs with a small passive
+Windows installer window and reopens the new version. Nothing is installed
+without that final confirmation. **Not now** snoozes that version until the next
+release. Settings → About → Updates can check manually at any time.
 
 ## Why signing is required
 

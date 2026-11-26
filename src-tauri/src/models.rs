@@ -45,6 +45,19 @@ pub async fn manage_local_model(
     }
 }
 
+/// Stops a model download started from Settings. Removing a model is quick
+/// and is never canceled.
+#[tauri::command]
+pub fn cancel_model_download(app: AppHandle, id: ModelId) -> Result<(), String> {
+    match id {
+        ModelId::Speech => crate::captions::cancel_captions(app),
+        ModelId::Language => {
+            crate::titles::cancel_download();
+            Ok(())
+        }
+    }
+}
+
 pub(crate) fn remove_file(path: &Path) -> Result<(), String> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),

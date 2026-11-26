@@ -3,7 +3,7 @@ import { ArrowDownToLine, Check, RefreshCw, X } from 'lucide-react'
 import { formatBytes, updateIndicatorLabel } from './updates'
 import { progressLabel, type AppUpdate } from './useAppUpdate'
 
-const DIALOG_PHASES = ['available', 'ready', 'error'] as const
+const CARD_PHASES = ['available', 'ready', 'error'] as const
 
 /** Persistent top-bar hint: download progress, and the restart prompt once the
  * update is ready. Clicking the download pill reveals or hides the detail toast. */
@@ -24,38 +24,31 @@ export function UpdateIndicator({ update }: { update: AppUpdate }) {
       <ArrowDownToLine size={13} /> {label}
     </button>
   if (status.phase === 'ready') return <div className="update-indicator ready">
-    <button type="button" className="update-indicator-main" title="Restart now to install the update"
+    <button type="button" className="update-indicator-main" title="Installs when you close MiniVidCut · click to restart now"
       onClick={() => void update.install()}><Check size={13} /> {label}</button>
-    <button type="button" className="update-indicator-close" aria-label="Dismiss restart reminder"
-      title="Finish the update on next launch" onClick={update.deferInstall}><X size={11} /></button>
+    <button type="button" className="update-indicator-close" aria-label="Hide update reminder"
+      title="Installs when you close MiniVidCut" onClick={update.deferInstall}><X size={11} /></button>
   </div>
   if (status.phase === 'error') return <button type="button" className="update-indicator error"
     title={status.detail} onClick={() => void update.retry()}><RefreshCw size={12} /> {label}</button>
   return <span className="update-indicator" title={title}>{label}</span>
 }
 
-/** One-time dialog, then background progress so the editor stays usable. */
+/** Small corner card (never a blocking dialog) so the editor always stays usable. */
 export function UpdatePrompt({ update }: { update: AppUpdate }) {
   const { status } = update
   const info = 'info' in status ? status.info : null
-  const [dialogOpen, setDialogOpen] = useState(true)
+  const [cardOpen, setCardOpen] = useState(true)
   const notice = status.phase === 'error' ? `error:${status.message}` : `${status.phase}:${info?.version ?? ''}`
 
   useEffect(() => {
-    setDialogOpen(true)
+    setCardOpen(true)
   }, [notice])
 
-  useEffect(() => {
-    if (!dialogOpen || !DIALOG_PHASES.includes(status.phase as typeof DIALOG_PHASES[number])) return
-    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') setDialogOpen(false) }
-    window.addEventListener('keydown', onKey, true)
-    return () => window.removeEventListener('keydown', onKey, true)
-  }, [dialogOpen, status.phase])
-
   if (status.phase === 'idle' || status.phase === 'checking' || status.phase === 'current') return null
-
-  const showDialog = dialogOpen && (DIALOG_PHASES as readonly string[]).includes(status.phase)
   const version = info?.version ?? ''
+  const showCard = cardOpen && (CARD_PHASES as readonly string[]).includes(status.phase)
+    && !(status.phase === 'ready' && update.progressHidden)
 
   return <>
     {status.phase === 'downloading' && !update.progressHidden && <div className="update-toast" role="status">
@@ -63,65 +56,32 @@ export function UpdatePrompt({ update }: { update: AppUpdate }) {
       <div className="update-toast-text">
         <strong>{progressLabel(status)}</strong>
         <progress max={100} value={status.percent ?? undefined} aria-label="Update download progress" />
-        <small>Keep working — the top bar shows progress and will ask you to restart.</small>
+        <small>Keep working. It installs when you close MiniVidCut.</small>
       </div>
-      <button className="icon-button compact" aria-label="Hide download progress" title="Hide details — download continues"
+      <button className="icon-button compact" aria-label="Hide download progress" title="Hide details. The download continues."
         onClick={update.hideProgress}><X size={14} /></button>
     </div>}
 
-    {showDialog && <div className="update-dialog-backdrop">
-      <section className="update-dialog" role="dialog" aria-modal="true" aria-labelledby="update-dialog-title"
-        aria-describedby="update-dialog-text">
-        <div className="update-dialog-top">
-          <span className={`update-dialog-icon ${status.phase}`}>
-            {status.phase === 'ready' ? <Check size={20} /> : status.phase === 'error' ? <RefreshCw size={20} /> : <ArrowDownToLine size={20} />}
-          </span>
-          <button className="icon-button compact" aria-label="Close update dialog" title="Close"
-            onClick={() => setDialogOpen(false)}><X size={16} /></button>
-        </div>
-
-        <div className="update-dialog-body">
-          <span className="update-dialog-eyebrow">
-            {status.phase === 'ready' ? 'Ready when you are' : status.phase === 'error' ? 'Something went wrong' : 'New version available'}
-          </span>
-          <h2 id="update-dialog-title">
-            {status.phase === 'ready' ? 'Update ready to install'
-              : status.phase === 'error' ? 'Update failed'
-                : `MiniVidCut v${version} is available`}
-          </h2>
-          <p id="update-dialog-text">
-            {status.phase === 'ready'
-              ? `Version ${version} is downloaded. Restart now to install it, or close the reminder and we’ll finish it on your next launch.`
-              : status.phase === 'error'
-                ? status.message
-                : 'Download it in the background and keep editing. Progress stays in the top bar, and we’ll ask before restarting.'}
-          </p>
-
-          {status.phase === 'available' && info && info.notes.length > 0 && <ul className="update-dialog-notes">
-            {info.notes.map((line, index) => <li key={index}>{line}</li>)}
-          </ul>}
-          {status.phase === 'error' && <small className="update-dialog-detail" title={status.detail}>{status.detail}</small>}
-        </div>
-
-        <div className="update-dialog-actions">
+    {showCard && <div className="update-toast update-card" role="status" aria-live="polite">
+      <span className={`update-toast-icon ${status.phase}`}>
+        {status.phase === 'ready' ? <Check size={15} /> : status.phase === 'error' ? <RefreshCw size={15} /> : <ArrowDownToLine size={15} />}
+      </span>
+      <div className="update-toast-text">
+        <strong>{status.phase === 'ready' ? `Version ${version} is ready`
+          : status.phase === 'error' ? 'Update failed' : `Version ${version} is available`}</strong>
+        <small>{status.phase === 'ready' ? 'It installs automatically when you close MiniVidCut.'
+          : status.phase === 'error' ? status.message : 'Download it in the background while you keep editing.'}</small>
+        <div className="update-card-actions">
           {status.phase === 'available' && <>
+            <button className="button primary small" onClick={() => void update.download(true)}><ArrowDownToLine size={13} /> Download</button>
             <button className="text-button" onClick={update.dismiss}>Not now</button>
-            <button className="button primary" onClick={() => { setDialogOpen(false); void update.download(true) }}>
-              <ArrowDownToLine size={15} /> Download in background
-            </button>
           </>}
-          {status.phase === 'ready' && <>
-            <button className="text-button" onClick={update.deferInstall}>Finish on next launch</button>
-            <button className="button primary" onClick={() => void update.install()}>
-              <RefreshCw size={15} /> Restart to update
-            </button>
-          </>}
-          {status.phase === 'error' && <>
-            <button className="text-button" onClick={update.dismiss}>Not now</button>
-            <button className="button outline" onClick={() => void update.retry()}><RefreshCw size={14} /> Try again</button>
-          </>}
+          {status.phase === 'ready' && <button className="button outline small" onClick={() => void update.install()}><RefreshCw size={13} /> Restart now</button>}
+          {status.phase === 'error' && <button className="button outline small" onClick={() => void update.retry()}><RefreshCw size={13} /> Try again</button>}
         </div>
-      </section>
+      </div>
+      <button className="icon-button compact" aria-label="Hide update notice" title="Hide"
+        onClick={() => { if (status.phase === 'ready') update.deferInstall(); else setCardOpen(false) }}><X size={14} /></button>
     </div>}
   </>
 }

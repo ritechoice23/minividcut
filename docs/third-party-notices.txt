@@ -34,3 +34,9 @@ Asset Library by Kainotomic under CC0 1.0 Universal.
 https://kaino.dev/library/music
 https://kaino.dev/library/sfx
 CC0 1.0 Universal: https://creativecommons.org/publicdomain/zero/1.0/
+
+Open Sans
+The interface font is Open Sans, bundled from the @fontsource/open-sans
+package. Copyright 2020 The Open Sans Project Authors
+(https://github.com/googlefonts/opensans). Licensed under the SIL Open Font
+License, Version 1.1: https://openfontlicense.org

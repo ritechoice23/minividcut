@@ -80,7 +80,7 @@ test('the top-bar indicator reports progress and the restart prompt', () => {
   assert.equal(updateIndicatorLabel({ phase: 'current' }), null)
   assert.equal(updateIndicatorLabel({ phase: 'downloading', info, downloaded: 25, total: 100, percent: 25 }), 'Downloading 25%')
   assert.equal(updateIndicatorLabel({ phase: 'downloading', info, downloaded: 0, total: null, percent: null }), 'Downloading…')
-  assert.equal(updateIndicatorLabel({ phase: 'ready', info }), 'Restart to update')
+  assert.equal(updateIndicatorLabel({ phase: 'ready', info }), 'Update ready')
   assert.equal(updateIndicatorLabel({ phase: 'installing', info }), 'Installing…')
   assert.equal(updateIndicatorLabel({ phase: 'error', message: 'Failed', detail: 'boom', info: null }), 'Update failed · Retry')
 })

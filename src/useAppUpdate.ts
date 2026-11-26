@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { isTauri } from '@tauri-apps/api/core'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { check as checkTauri, type Update as TauriUpdate } from '@tauri-apps/plugin-updater'
 import { canStartUpdate, createDownloadTracker, createPendingInstall, formatBytes, parseReleaseNotes, updateReducer,
   type UpdateInfo, type UpdateStatus } from './updates'
@@ -18,6 +19,8 @@ export type AppUpdate = {
   progressHidden: boolean
   showProgress: () => void
   hideProgress: () => void
+  /** The downloaded update installs when the app is closed. */
+  installsOnClose: boolean
 }
 
 const infoFrom = (update: TauriUpdate): UpdateInfo => ({
@@ -117,46 +120,38 @@ export function useAppUpdate(): AppUpdate {
     dispatch({ type: 'idle' })
   }, [])
 
-  // A downloaded update cannot survive a restart as a Tauri resource, so a
-  // deferred install is remembered by version and completed at next launch.
-  const deferInstall = useCallback(() => {
-    const found = updateRef.current
-    if (found) {
-      pending.current.defer(found.version)
-      void found.close().catch(() => {})
-      updateRef.current = null
-    }
-    dispatch({ type: 'idle' })
-  }, [])
+  // Never interrupt work: a downloaded update waits and installs quietly when
+  // the user closes MiniVidCut. "Restart now" is only there for those who want it.
+  const [closeArmed, setCloseArmed] = useState(false)
+  const deferInstall = useCallback(() => setCloseArmed(true), [])
+  const installsOnClose = status.phase === 'ready'
+  useEffect(() => {
+    if (!isTauri() || status.phase !== 'ready') return
+    let stop: (() => void) | undefined
+    let disposed = false
+    void getCurrentWindow().onCloseRequested(async event => {
+      const found = updateRef.current
+      if (!found || busy.current) return
+      event.preventDefault()
+      busy.current = true
+      // Let the editor save its recovery draft before the installer takes over.
+      window.dispatchEvent(new Event('pagehide'))
+      try {
+        // Windows: launches the passive installer and exits the app.
+        await found.install({ restartAfterInstall: false })
+      } catch {
+        busy.current = false
+        await getCurrentWindow().destroy()
+      }
+    }).then(unlisten => { if (disposed) unlisten(); else stop = unlisten })
+    return () => { disposed = true; stop?.() }
+  }, [status.phase])
 
   useEffect(() => {
     if (!isTauri()) return
-    const deferred = pending.current.consume()
-    if (deferred) {
-      void (async () => {
-        busy.current = true
-        dispatch({ type: 'download', info: { version: deferred, notes: [] },
-          snapshot: { downloaded: 0, total: null, percent: null } })
-        dispatch({ type: 'installing' })
-        try {
-          const found = await checkTauri({ timeout: 20_000 })
-          if (!found) {
-            dispatch({ type: 'current' })
-            return
-          }
-          updateRef.current = found
-          // Install before the user starts editing so the workflow is not
-          // interrupted. On Windows this exits the app and reopens the update.
-          await found.downloadAndInstall(undefined, { restartAfterInstall: true })
-          dispatch({ type: 'installing' })
-        } catch (error) {
-          dispatch({ type: 'error', message: 'Couldn’t finish the update. Please try again.', detail: detailFrom(error) })
-        } finally {
-          busy.current = false
-        }
-      })()
-      return
-    }
+    // Older versions installed a deferred update at launch, which blocked the
+    // editor. Forget that flag; the normal background check picks the update up.
+    pending.current.consume()
     const timer = window.setTimeout(() => { void checkForUpdates() }, 4000)
     return () => window.clearTimeout(timer)
   }, [checkForUpdates])
@@ -165,7 +160,7 @@ export function useAppUpdate(): AppUpdate {
   const hideProgress = useCallback(() => setProgressHidden(true), [])
 
   return { status, checkForUpdates, download, install, retry, dismiss, deferInstall,
-    progressHidden, showProgress, hideProgress }
+    progressHidden: progressHidden || (status.phase === 'ready' && closeArmed), showProgress, hideProgress, installsOnClose }
 }
 
 /** Human-readable line for the download progress shown beside the editor. */

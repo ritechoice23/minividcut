@@ -150,19 +150,21 @@ export const CaptionEditor = memo(function CaptionEditor({
   </section>
 })
 
-export function CaptionStylePanel({ style, format, editing, canApplyStyle, onStyle, onApplyStyle, onClose }: {
+export function CaptionStylePanel({ style, format, editing, canApplyStyle, onStyle, onApplyStyle, onClose, embedded = false }: {
   style: CaptionStyle; format: CaptionFormat; editing: boolean; canApplyStyle: boolean
   onStyle: (style: CaptionStyle) => void; onApplyStyle: (style: CaptionStyle) => boolean; onClose: () => void
+  /** Rendered inside the Captions panel under "More options", without its own frame. */
+  embedded?: boolean
 }) {
   const restyle = (changes: Partial<CaptionStyle>) => onStyle({ ...style, ...changes })
   const applyStyle = () => { if (onApplyStyle(style)) onClose() }
-  return <section id="caption-style-panel" className="moment-panel caption-style-panel panel" aria-labelledby="caption-style-title"
+  return <section id="caption-style-panel" className={embedded ? 'caption-style-panel embedded' : 'moment-panel caption-style-panel panel'} aria-labelledby="caption-style-title"
     onKeyDown={event => {
       if (event.key !== 'Escape') return
       event.stopPropagation()
       onClose()
     }}>
-        <header className="caption-style-heading">
+        <header className="caption-style-heading" hidden={embedded}>
           <h2 id="caption-style-title" tabIndex={-1}>Caption style</h2>
           <button className="icon-button compact" aria-label="Close caption style" onClick={() => onClose()}><X size={17} /></button>
         </header>
@@ -200,7 +202,7 @@ export function CaptionStylePanel({ style, format, editing, canApplyStyle, onSty
         <label>Stroke color<input type="color" aria-label="Stroke color" value={style.strokeColor ?? CAPTION_STROKE}
           onChange={event => restyle({ strokeColor: event.target.value })} /></label>
         </fieldset>
-        <footer className="caption-style-footer">
+        <footer className="caption-style-footer" hidden={embedded}>
           <button className="button outline small" disabled={!canApplyStyle} onClick={applyStyle}><Copy size={14} /> Apply to all clips</button>
           <button className="button primary small" onClick={() => onClose()}>Done</button>
         </footer>

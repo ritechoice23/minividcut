@@ -1,6 +1,6 @@
 {
   "name": "minividcut",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "description": "Lightweight local video cutter",
   "scripts": {
     "test": "node --test",
@@ -10,6 +10,7 @@
   },
   "type": "module",
   "dependencies": {
+    "@fontsource/open-sans": "5.2.6",
     "@tauri-apps/api": "2.11.1",
     "@tauri-apps/plugin-dialog": "2.7.3",
     "@tauri-apps/plugin-updater": "2.12.0",

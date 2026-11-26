@@ -148,7 +148,7 @@ export const MusicMenu = memo(function MusicMenu({ project, clip, disabled, canP
         if (event.key === 'Escape') onClose()
       }}>
       <header className="caption-style-heading">
-        <h2 id="music-title">Background music</h2>
+        <h2 id="music-title">Music</h2>
         <button type="button" className="icon-button compact" aria-label="Close background music" onClick={onClose}><X size={16} /></button>
       </header>
       <div className="editor-media-fields">

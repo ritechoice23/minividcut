@@ -1,16 +1,13 @@
 # In-app updates
 
 MiniVidCut checks GitHub Releases shortly after launch. When a newer signed
-version is published, an in-app dialog offers **Download in background**. The
-download keeps running while you edit: a compact indicator in the top bar shows
-the percentage with a thin progress bar, and clicking it reveals or hides a
-more detailed toast. When the download finishes, a second dialog asks you to
-**Restart to update** — **Finish on next launch** (or the small × on the top-bar
-button) remembers the update and completes it the next time the app starts,
-before you begin editing. Restarting immediately installs with a small passive
-Windows installer window and reopens the new version. Nothing is installed
-without that final confirmation. **Not now** snoozes that version until the next
-release. Settings → About → Updates can check manually at any time.
+version is published it downloads in the background (Settings → Updates can
+turn that off, in which case a small corner card offers **Download**). Nothing
+ever blocks the editor: progress shows in the top bar, and when the download
+finishes a corner card says the update installs automatically when you close
+MiniVidCut. **Restart now** installs immediately with a small passive Windows
+installer window. **Not now** snoozes that version until the next release.
+Settings → Updates can check manually at any time.
 
 ## Why signing is required
 

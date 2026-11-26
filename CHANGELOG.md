@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.9.0 — 2026-11-26
+
+- **New editor layout.** Tools on the left, your clips always on the right, the preview in the middle. Compact spacing, slim scrollbars and right-click menus everywhere.
+- **Smarter Find clips.** One-click searches (Motivational, Funny, Tips, Stories and more), more accurate picks, and better clip titles.
+- **Timeline.** One Video lane with the clip's own sound, a Captions lane, and music marked under each clip.
+- **Faster exports.** About twice as fast; each export uses all of your CPU when it can.
+- **Nothing blocks.** Captions, titles, Find clips and exports run side by side. Updates download in the background and install when you close the app.
+- **Also new:** Ctrl K for every action, an Export window, caption looks, a full Settings page, and file names built from video name, clip number and title.
+
 ## 1.8.0 — 2026-11-26
 
 - **Set your export folder once.** Settings → Configuration now keeps a default save folder, so exports go straight there instead of prompting every time. Clear it to go back to choosing a folder per export.

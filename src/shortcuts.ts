@@ -1,0 +1,22 @@
+// Keyboard shortcuts, listed in the shortcuts dialog and on the Settings page.
+export const SHORTCUTS: readonly (readonly [string, string])[] = [
+  ['All actions', 'Ctrl K'],
+  ['Find clips with AI', '/'],
+  ['Open video', 'Ctrl O'],
+  ['Export', 'Ctrl E'],
+  ['Play / pause', 'Space'],
+  ['Seek 1 second', '← / →'],
+  ['Seek 5 seconds', 'Shift ← / →'],
+  ['Mark In', 'I'],
+  ['Mark Out', 'O'],
+  ['Add clip', 'Enter'],
+  ['Rename clip', 'F2'],
+  ['Move clip up / down', 'Alt ↑ / ↓'],
+  ['Undo', 'Ctrl Z'],
+  ['Redo', 'Ctrl Shift Z'],
+  ['Zoom in', 'Ctrl + / Ctrl + scroll'],
+  ['Zoom out', 'Ctrl - / Ctrl + scroll'],
+  ['Fit timeline', 'Ctrl 0'],
+  ['Pan timeline', 'Shift + scroll'],
+  ['Close panel', 'Esc'],
+]

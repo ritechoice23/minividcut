@@ -1,13 +1,15 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react'
+import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import { Channel, convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { confirm, open } from '@tauri-apps/plugin-dialog'
 import {
-  ArrowDownToLine, Check, ChevronDown, ChevronLeft, ChevronRight, Clapperboard, Copy, Ellipsis, FastForward, Film, FolderOpen, Rewind,
-  Keyboard, LoaderCircle, Magnet, Minus, Monitor, Move, Music2, Pause, Pencil, Play, Plus, RotateCcw, Scissors, Smartphone, Square,
-  Redo2, ScissorsLineDashed, Settings as SettingsIcon, Sparkles, Split, Subtitles, Trash2, Type, Undo2, Volume2, VolumeX, X, ZoomIn, ZoomOut,
+  ArrowDownToLine, AudioLines, Check, ChevronDown, ChevronLeft, ChevronRight, Clapperboard, Copy, Crop, Ellipsis, FastForward, Film, FolderOpen,
+  GripVertical, Keyboard, LoaderCircle, Magnet, Minus, Monitor, Move, Music2, Pause, Pencil, Play, Plus, Redo2, Rewind, RotateCcw,
+  Scissors, ScissorsLineDashed, Search, Settings as SettingsIcon, SlidersHorizontal, Smartphone, Sparkles, Split, Square, Subtitles, Trash2, Type,
+  Undo2, Volume2, VolumeX, X, ZoomIn, ZoomOut,
+  BookOpen, Flame, Heart, Laugh, Lightbulb, ListChecks, Quote, Rocket, Sun, Zap,
 } from 'lucide-react'
 import {
   clipDuration, clipSegments, cutRange, deleteFromRanges, exportUnits, keptDuration, MAX_CLIPS,
@@ -21,9 +23,14 @@ import type { FramePosition, Framing } from './framing'
 import { fileSize, groupExportStates, summarizeExport } from './export-progress'
 import type { ExportProgress, ExportState } from './export-progress'
 import { ClipActions } from './ClipActions'
+import { ContextMenu } from './ContextMenu'
+import type { MenuItem, MenuState } from './ContextMenu'
+type MomentPick = { index: number | null; confident: boolean }
 import { Settings } from './Settings'
 import { UpdateIndicator, UpdatePrompt } from './UpdatePrompt'
 import { useAppUpdate } from './useAppUpdate'
+import { exportFileName, readPreferences, writePreferences } from './preferences'
+import type { Format, Preferences, Quality } from './preferences'
 import { CaptionEditor, CaptionStylePanel, progressLabel } from './CaptionEditor'
 import { CaptionPreview } from './CaptionPreview'
 import { prepareCaptionOverlay } from './caption-export'
@@ -35,9 +42,17 @@ import type { TextOverlay } from './text-overlay'
 import type { CaptionModel, CaptionProgress } from './CaptionEditor'
 import { captionCut, captionSlice, captionsForKept, clipsNeedingCaptions, DEFAULT_CAPTION_STYLE, offsetCaption, restyleCaptionedClip } from './captions'
 import type { CaptionCue, CaptionStyle, CaptionTrack } from './captions'
-import { DEFAULT_MOMENT_QUERY, missingTranscriptRanges, MOMENT_BATCH_SECONDS, momentCandidates, momentLimit } from './moments'
+import { DEFAULT_MOMENT_QUERY, missingTranscriptRanges, MOMENT_BATCH_SECONDS, MOMENT_PRESETS, momentCandidates, momentLimit, momentRequest, momentWorthy } from './moments'
 import type { Moment } from './moments'
 import { MusicMenu } from './MusicMenu'
+import { Waveform } from './Waveform'
+import { SoundLane } from './SoundLane'
+import { CommandPalette } from './CommandPalette'
+import type { PaletteCommand } from './CommandPalette'
+import { ExportDialog } from './ExportDialog'
+import type { ExportItem } from './ExportDialog'
+import { activeLook, applyLook, CAPTION_LOOKS } from './caption-looks'
+import { SHORTCUTS } from './shortcuts'
 import type { ImportedTrack } from './MusicMenu'
 import { DEFAULT_MUSIC_VOLUME, effectiveMusic, kainoKey, musicGain, musicPosition, musicTrackKey, mixStorageKey } from './music'
 import type { KainoCollection, Music, MusicTrack } from './music'
@@ -49,8 +64,7 @@ import { isPlaybackShortcut, isTextEditing } from './playback-shortcut'
 import type { Bookend, Bookends } from './bookends'
 
 type VideoInfo = { path: string; name: string; duration: number; width: number; height: number; bytes: number }
-type Format = 'landscape' | 'portrait'
-type Quality = 'compact' | 'compatible' | 'lossless'
+type Panel = 'captions' | 'text' | 'music' | 'bookends' | 'frame' | null
 type ExportSettings = { format: Format; framing: Framing; position: FramePosition; quality: Quality }
 type Draft = {
   version: 2; source: VideoInfo; range: Range; clips: Clip[]; sections: Range[]
@@ -97,6 +111,12 @@ const EXTENSIONS = ['mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v', 'mts', 'm2ts', 'w
 const FORMATS = {
   landscape: { ratio: '16:9', aspect: 16 / 9, size: '1920 × 1080', label: 'Landscape', icon: Monitor },
   portrait: { ratio: '9:16', aspect: 9 / 16, size: '1080 × 1920', label: 'Portrait', icon: Smartphone },
+}
+const musicTrackName = (track: MusicTrack) => track.kind === 'library' ? track.id : track.name
+const PRESET_ICONS: Record<string, ReactNode> = {
+  takeaways: <Lightbulb size={14} />, trending: <Flame size={14} />, motivational: <Rocket size={14} />,
+  inspiring: <Sun size={14} />, funny: <Laugh size={14} />, story: <BookOpen size={14} />, tips: <ListChecks size={14} />,
+  facts: <Zap size={14} />, emotional: <Heart size={14} />, quotes: <Quote size={14} />,
 }
 const message = (error: unknown) => error instanceof Error ? error.message : String(error)
 
@@ -196,7 +216,6 @@ export function App() {
   const [range, setRange] = useState<Range>({ start: 0, end: 0 })
   const [clips, setClips] = useState<Clip[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
-  const [snapping, setSnapping] = useState(true)
   const [timelineZoom, setTimelineZoom] = useState(1)
   const [timelineStart, setTimelineStart] = useState(0)
   const timelinePanned = useRef(false)
@@ -221,14 +240,21 @@ export function App() {
   const musicPaths = useRef(new Map<string, string>())
   const importMusicRef = useRef<(path: string, scope: 'project' | 'clip') => Promise<void>>(async () => {})
   const [previewMusic, setPreviewMusic] = useState<{ key: string; path: string } | null>(null)
-  const [draftFormat, setFormat] = useState<Format>('landscape')
-  const [draftQuality, setQuality] = useState<Quality>('compact')
+  const [preferences, setPreferencesState] = useState(() => readPreferences(localStorage))
+  const setPreferences = useCallback((next: Preferences) => {
+    setPreferencesState(next)
+    writePreferences(localStorage, next)
+  }, [])
+  const [draftFormat, setFormat] = useState<Format>(preferences.defaultFormat)
+  const [snapping, setSnapping] = useState(preferences.snapDefault)
+  const [draftQuality, setQuality] = useState<Quality>(preferences.defaultQuality)
   const [draftFraming, setFraming] = useState<Framing>('fill')
   const [positions, setPositions] = useState({ landscape: CENTER, portrait: CENTER })
   const [previewAspect, setPreviewAspect] = useState(0)
   const [panning, setPanning] = useState(false)
-  const exportMenu = useRef<HTMLFormElement>(null)
-  const [selectedExportOnly, setSelectedExportOnly] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
+  const [exportChecked, setExportChecked] = useState<Set<number> | null>(null)
+  const [paletteOpen, setPaletteOpen] = useState(false)
   const [notice, setNotice] = useState('')
   const [editStatus, setEditStatus] = useState('')
   const [autoTitles, setAutoTitles] = useState(() => localStorage.getItem(AUTO_TITLES_KEY) === 'on')
@@ -247,9 +273,20 @@ export function App() {
   const [keptRanges, setKeptRanges] = useState<Range[]>([])
   const [momentsOpen, setMomentsOpen] = useState(false)
   const [styleDockKey, setStyleDockKey] = useState<string | null>(null)
-  const [mediaDock, setMediaDock] = useState<'music' | 'bookends' | 'text' | null>(null)
-  const [wideWorkspace, setWideWorkspace] = useState(() => matchMedia('(min-width: 1120px)').matches)
-  const momentsTrigger = useRef<HTMLButtonElement>(null)
+  // The tools column always shows one panel, chosen from the left rail.
+  // The clips list lives in its own column on the right.
+  const [panel, setPanelState] = useState<Exclude<Panel, null>>('captions')
+  const setPanel = useCallback((next: Panel | ((current: Panel) => Panel)) =>
+    setPanelState(current => (typeof next === 'function' ? next(current) : next) ?? 'captions'), [])
+  const [momentPicks, setMomentPicks] = useState<Set<string>>(new Set())
+  const [momentLength, setMomentLength] = useState(30)
+  const [momentCount, setMomentCount] = useState(5)
+  const [momentQuery, setMomentQuery] = useState('')
+  const [contextMenu, setContextMenu] = useState<MenuState>(null)
+  const closeContextMenu = useCallback(() => setContextMenu(null), [])
+  const [transcriptRevision, setTranscriptRevision] = useState(0)
+  const [listening, setListening] = useState<number | null>(null)
+  const askInput = useRef<HTMLInputElement>(null)
   const [moments, setMoments] = useState<Moment[]>([])
   const [momentStatus, setMomentStatus] = useState('')
   const [momentRunning, setMomentRunning] = useState(false)
@@ -259,7 +296,7 @@ export function App() {
   const momentCache = useRef<{
     revision: number
     batches: { range: Range; cues: CaptionCue[] }[]
-    matches: Map<string, number | null>
+    matches: Map<string, MomentPick>
   }>({ revision: 0, batches: [], matches: new Map() })
   const playingMoment = useRef<Moment | null>(null)
   const [reviewIndex, setReviewIndex] = useState<number | null>(null)
@@ -268,7 +305,8 @@ export function App() {
   const closeClipActions = useCallback(() => setClipActions(null), [])
   const renameClick = useRef<number | null>(null)
   const [clipFrames, setClipFrames] = useState<Record<number, string>>({})
-  const [captionsOpen, setCaptionsOpen] = useState(false)
+  const captionsOpen = panel === 'captions'
+  const setCaptionsOpen = (open: boolean) => setPanel(current => open ? 'captions' : current === 'captions' ? null : current)
   const [captionModel, setCaptionModel] = useState<CaptionModel | null>(null)
   const [captionProgress, setCaptionProgress] = useState<CaptionProgress | null>(null)
   const [captionStatus, setCaptionStatus] = useState<{ key: string; text: string } | null>(null)
@@ -276,9 +314,24 @@ export function App() {
   const [draftTexts, setDraftTexts] = useState<TextOverlay[]>([])
   const [selectedTextId, setSelectedTextId] = useState<string | null>(null)
   const sharedCaptionStyle = useRef<CaptionStyle | null>(null)
-  const clipsTab = useRef<HTMLButtonElement>(null)
-  const captionsTab = useRef<HTMLButtonElement>(null)
   const captionJob = useRef<{ keys: Set<string>; cancelled: boolean } | null>(null)
+  const listenJob = useRef<{ canceled: boolean } | null>(null)
+  // The speech engine transcribes one range at a time. Captions, titles,
+  // Find clips and the timeline transcript share it through this queue, one
+  // short request each, so they take turns instead of refusing to start.
+  const speechQueue = useRef<Promise<unknown>>(Promise.resolve())
+  const speechOwner = useRef<string | null>(null)
+  const withSpeech = useCallback(<T,>(owner: string, run: () => Promise<T>): Promise<T> => {
+    const turn = speechQueue.current.then(async () => {
+      speechOwner.current = owner
+      try { return await run() } finally { speechOwner.current = null }
+    })
+    speechQueue.current = turn.catch(() => {})
+    return turn
+  }, [])
+  const cancelSpeech = (owner: string) => {
+    if (speechOwner.current === owner) void invoke('cancel_captions').catch(() => {})
+  }
   const frameCache = useRef(new Map<number, string>())
   const video = useRef<HTMLVideoElement>(null)
   const track = useRef<HTMLDivElement>(null)
@@ -313,6 +366,18 @@ export function App() {
   wheelView.current = { duration, zoom: timelineZoom, start: visibleTime.start, span: visibleTime.span }
   const pct = (value: number) => visibleTime.span
     ? Math.max(0, Math.min(100, 100 * (value - visibleTime.start) / visibleTime.span)) : 0
+  const [soundPeaks, setSoundPeaks] = useState<number[]>([])
+  const sourcePath = source?.path
+  useEffect(() => {
+    setSoundPeaks([])
+    if (!sourcePath || !duration) return
+    let active = true
+    const count = Math.min(4000, Math.max(1600, Math.ceil(duration * 4)))
+    void invoke<number[]>('audio_peaks', { path: sourcePath, duration, count })
+      .then(peaks => { if (active) setSoundPeaks(peaks) })
+      .catch(() => {})
+    return () => { active = false }
+  }, [sourcePath, duration])
   const filmTiles = timelineFrames(duration, timelineZoom, visibleTime.start)
   const overviewTiles = timelineFrames(duration, 1, 0)
   const tileTimes = filmTiles.map(tile => tile.time).join(',')
@@ -387,13 +452,6 @@ export function App() {
     if (!isTauri()) return
     const timer = window.setTimeout(() => { void invoke('warm_encoders').catch(() => {}) }, 1500)
     return () => window.clearTimeout(timer)
-  }, [])
-
-  useEffect(() => {
-    const layout = matchMedia('(min-width: 1120px)')
-    const update = () => setWideWorkspace(layout.matches)
-    layout.addEventListener('change', update)
-    return () => layout.removeEventListener('change', update)
   }, [])
 
   useEffect(() => {
@@ -734,8 +792,8 @@ export function App() {
   const hasDraftCaptions = Object.values(draftCaptions).some(track => track?.cues.length)
 
   const hasEdits = Boolean(source && (clips.length || sections.length || projectMusic || projectBookends.intro || projectBookends.outro || hasDraftCaptions || draftTexts.some(textActive) ||
-    range.start !== 0 || range.end !== source.duration || draftFormat !== 'landscape' ||
-    draftQuality !== 'compact' || draftFraming !== 'fill' || Object.values(positions).some(
+    range.start !== 0 || range.end !== source.duration || draftFormat !== preferences.defaultFormat ||
+    draftQuality !== preferences.defaultQuality || draftFraming !== 'fill' || Object.values(positions).some(
       position => position.x !== CENTER.x || position.y !== CENTER.y)))
 
   // Drafts can contain hundreds of thousands of caption characters. Serialize
@@ -803,14 +861,16 @@ export function App() {
       setMoments([])
       setMomentStatus('')
       setMomentsOpen(false)
+      setMomentPicks(new Set())
       setStyleDockKey(null)
-      setMediaDock(current => draft ? null : current)
+      setPanel(current => draft ? null : current)
+      setExportOpen(false)
+      setExportChecked(null)
       playingMoment.current = null
       setRecovery(null)
-      if (captionJob.current && !captionJob.current.cancelled) {
-        captionJob.current.cancelled = true
-        void invoke('cancel_captions').catch(() => {})
-      }
+      if (captionJob.current && !captionJob.current.cancelled) captionJob.current.cancelled = true
+      if (listenJob.current) listenJob.current.canceled = true
+      if (speechOwner.current) void invoke('cancel_captions').catch(() => {})
       if (video.current) {
         video.current.pause()
         if (video.current.readyState > 0) video.current.currentTime = 0
@@ -824,6 +884,9 @@ export function App() {
         setFormat(draft.format)
         setQuality(draft.quality)
         setFraming(draft.framing)
+      } else {
+        setFormat(preferences.defaultFormat)
+        setQuality(preferences.defaultQuality)
       }
       setRange(draft?.range ?? { start: 0, end: info.duration })
       setPlaybackTime(0)
@@ -863,9 +926,10 @@ export function App() {
       importLock.current = false
       setLoading(false)
     }
-  }, [recovery, hasEdits, setPlaybackTime])
+  }, [recovery, hasEdits, setPlaybackTime, preferences.defaultFormat, preferences.defaultQuality])
 
-  const clipStarts = [...new Set(clips.flatMap(clip => clipSegments(clip).map(segment => segment.start)))].join(',')
+  const clipStarts = [...new Set([...clips.flatMap(clip => clipSegments(clip).map(segment => segment.start)),
+    ...moments.map(moment => moment.start)])].join(',')
   useEffect(() => {
     if (!source || !clipStarts) return
     let cancelled = false
@@ -934,7 +998,7 @@ export function App() {
       if (disposed || exportLock.current) return
       setDragging(payload.type === 'enter' || payload.type === 'over')
       if (payload.type === 'drop') {
-        if (mediaDock === 'music') {
+        if (panel === 'music') {
           if (payload.paths.length !== 1) setNotice('Drop one audio file at a time.')
           else void importMusicRef.current(payload.paths[0], selectedClipRef.current ? 'clip' : 'project')
           return
@@ -947,7 +1011,7 @@ export function App() {
       disposed = true
       void listener.then(unlisten => unlisten())
     }
-  }, [loadVideo, mediaDock])
+  }, [loadVideo, panel])
 
   const useProxy = async () => {
     if (!source || preview === 'preparing' || preview === 'unavailable') return
@@ -1038,12 +1102,12 @@ export function App() {
   }
 
   useEffect(() => {
-    if (settingsOpen || !source || (!autoTitles && !requestedTitle) || !isTauri() || loading || busy || captionsRunning ||
-      titleJob.current || captionJob.current || momentJob.current || importLock.current || exportLock.current || titleError) return
+    if (settingsOpen || !source || (!autoTitles && !requestedTitle) || !isTauri() || loading ||
+      titleJob.current || importLock.current || titleError) return
     const revision = sourceRequest.current
     const clip = requestedTitle
       ? clips.find(clip => requestedTitle.sourceRevision === revision && clip.id === requestedTitle.id)
-      : clips.find(clip => !clip.title && !clip.titleManuallyEdited && clip.id !== renaming &&
+      : clips.find(clip => !clip.title && !clip.titleManuallyEdited && clip.id !== renaming && !clipLocked(clip.id) &&
         !titledClips.current.has(`${revision}:${clip.id}:${clip.start}:${clip.end}`))
     if (requestedTitle) setRequestedTitle(null)
     if (!clip) return
@@ -1062,10 +1126,10 @@ export function App() {
             setTitleProgress(`Downloading speech model… ${Math.round(update.fraction * 100)}%`)
           }
         }
-        const cues = await invoke<CaptionCue[]>('generate_captions', {
+        const cues = await withSpeech('title', () => invoke<CaptionCue[]>('generate_captions', {
           request: { path: source.path, range: { start: clip.start, end: clip.end }, duration: source.duration, allowDownload: true },
           progress,
-        })
+        }))
         transcript = cues.map(cue => cue.text).join(' ').trim()
       }
       if (stale()) return
@@ -1105,7 +1169,7 @@ export function App() {
 
   const closeCaptions = useCallback(() => {
     setCaptionsOpen(false)
-    clipsTab.current?.focus()
+    requestAnimationFrame(() => document.getElementById('rail-captions')?.focus())
   }, [])
 
   const saveCaptions = useCallback((track: CaptionTrack) => {
@@ -1168,7 +1232,7 @@ export function App() {
   }, [clips, draftTexts, selectedText])
 
   const applyCaptionStyle = useCallback((style: CaptionStyle) => {
-    if (exportLock.current || importLock.current || captionJob.current) return false
+    if (exportLock.current || importLock.current) return false
     recordEdit()
     sharedCaptionStyle.current = style
     setClips(items => items.map(clip => restyleCaptionedClip(clip, style)))
@@ -1178,8 +1242,14 @@ export function App() {
   }, [])
 
   const runCaptionJob = async (targets: { key: string; range: Range; clip?: Clip; track?: CaptionTrack }[], action: 'editor' | 'clip' | 'stack') => {
-    if (!source || !targets.length || titleJob.current || captionJob.current || momentJob.current?.transcribing || exportLock.current || importLock.current || fileDialog.current) return
+    if (!source || !targets.length || importLock.current) return
     if (!targets.every(target => validRange(target.range, duration))) return
+    // A second caption request waits for the first instead of being ignored.
+    const waitRevision = sourceRequest.current
+    while (captionJob.current) {
+      await new Promise(resolve => setTimeout(resolve, 200))
+      if (waitRevision !== sourceRequest.current) return
+    }
     const job = { keys: new Set(targets.map(target => target.key)), cancelled: false }
     captionJob.current = job
     const request = sourceRequest.current
@@ -1213,10 +1283,11 @@ export function App() {
         }
         try {
           const { start, end } = target.range
-          const cues = await invoke<CaptionCue[]>('generate_captions', {
-            request: { path: source.path, range: { start, end }, duration: source.duration, allowDownload: !model.installed },
-            progress,
-          })
+          const cues = await withSpeech('captions', () => stale() ? Promise.resolve([] as CaptionCue[])
+            : invoke<CaptionCue[]>('generate_captions', {
+              request: { path: source.path, range: { start, end }, duration: source.duration, allowDownload: !model.installed },
+              progress,
+            }))
           if (stale()) break
           if (!cues.length) { empty++; continue }
           const track: CaptionTrack = {
@@ -1264,7 +1335,7 @@ export function App() {
     if (!job) return
     job.cancelled = true
     setCaptionProgress(current => current && { stage: 'canceling', index: current.index, total: current.total })
-    void invoke('cancel_captions').catch(() => {})
+    if (speechOwner.current === 'captions') void invoke('cancel_captions').catch(() => {})
   }, [])
 
   const captionSeek = useCallback((position: number) => {
@@ -1361,12 +1432,13 @@ export function App() {
     job.canceled = true
     setMomentStopping(true)
     setMomentStatus('Stopping Smart Split…')
-    if (job.transcribing) void invoke('cancel_captions').catch(() => {})
+    if (job.transcribing) cancelSpeech('moments')
   }
 
   const clearMoments = () => {
     if (momentRunning) return
     setMoments([])
+    setMomentPicks(new Set())
     setMomentStatus('')
     setMomentProgress(null)
     playingMoment.current = null
@@ -1376,8 +1448,10 @@ export function App() {
   }
 
   const searchMoments = async (request: string, maximum: number, maxResults: number) => {
-    if (!source || momentJob.current || captionJob.current || titleJob.current || importLock.current) return
+    if (!source || momentJob.current || importLock.current) return
     const limit = momentLimit(request, maximum)
+    const topic = momentRequest(request)
+    setMomentQuery(request)
     if (!Number.isFinite(limit) || limit < 0.05 || limit > 120 ||
       !Number.isInteger(maxResults) || maxResults < 1 || maxResults > MAX_CLIPS) {
       setMomentStatus('Choose a valid clip length and number of suggestions.')
@@ -1409,17 +1483,49 @@ export function App() {
     for (const clip of clips) addKnown(clip, clip.captions)
     addKnown(videoRange, draftCaptions.range)
     for (const section of sections) addKnown(section, draftCaptions[`section-${section.start}-${section.end}`])
-    let count = 0
+    // Confident picks (the model chose the same excerpt both ways) come
+    // first; likely picks fill the list so a search never comes back empty-handed
+    // just because the small model hesitated.
     const found: Moment[] = []
+    const likely: Moment[] = []
+    let scanned = 0
+    const enough = () => found.length >= maxResults || (found.length + likely.length >= maxResults && scanned >= 4)
+    const leftovers: Moment[] = []
+    const askGroup = async (group: Moment[]) => {
+      const excerpts = group.map(item => item.text)
+      const key = JSON.stringify([topic, excerpts])
+      let match = matches.get(key)
+      if (match === undefined) {
+        const progress = new Channel<string>()
+        progress.onmessage = () => { if (active()) setMomentStatus('Preparing Smart Split for first use…') }
+        match = await invoke<MomentPick>('select_moment', { request: topic, excerpts, progress })
+        if (matches.size >= 500) matches.clear()
+        matches.set(key, match)
+      }
+      const picked = match.index === null ? undefined : group[match.index]
+      leftovers.push(...group.filter(item => item !== picked))
+      // Stretched candidates can span a batch boundary, so keep a later
+      // pick from repeating footage already suggested from an earlier one.
+      if (active() && picked && ![...found, ...likely].some(item => rangesOverlap(item, picked))) {
+        ;(match.confident ? found : likely).push(picked)
+        publish()
+      }
+    }
+    const publish = () => {
+      const shown = [...found, ...likely].slice(0, maxResults)
+      setMoments(shown)
+      setMomentPicks(new Set(shown.map(item => `${item.start}:${item.end}`)))
+    }
     try {
       if (!active()) return
       const missing = missingTranscriptRanges(videoRange, [...known, ...cache].map(batch => batch.range))
       if (!await confirmTitleDownload(false, !missing.length, true)) return
       if (!active()) return
       setMoments([])
-      for (let start = 0; start < source.duration && active() && count < maxResults; start += MOMENT_BATCH_SECONDS) {
+      setMomentPicks(new Set())
+      for (let start = 0; start < source.duration && active() && !enough(); start += MOMENT_BATCH_SECONDS) {
         const batch = { start, end: Math.min(start + MOMENT_BATCH_SECONDS, source.duration) }
-        const status = () => `Searching ${stamp(batch.start)}–${stamp(batch.end)} · ${count} of ${maxResults} found`
+        const status = () => `Searching ${stamp(batch.start)}–${stamp(batch.end)} · ${Math.min(maxResults, found.length + likely.length)} of ${maxResults} found`
         setMomentStatus(status())
         setMomentProgress(start / source.duration)
         const cues = known.filter(item => item.range.start >= batch.start && item.range.start < batch.end).flatMap(item => item.cues)
@@ -1434,7 +1540,6 @@ export function App() {
           start: Math.max(gap.start, batch.start), end: Math.min(gap.end, batch.end),
         })).filter(gap => gap.end - gap.start >= 0.05)
         for (const gap of gaps) {
-          while (active() && captionJob.current) await new Promise(resolve => setTimeout(resolve, 100))
           if (!active()) break
           job.transcribing = true
           setMomentStatus('Listening for moments in this part of the video…')
@@ -1449,11 +1554,15 @@ export function App() {
                 setMomentProgress(previous => Math.max(previous ?? 0, (batch.start + scanned * 0.8) / source.duration))
               }
             }
-            const result = await invoke<CaptionCue[]>('generate_captions', {
-              request: { path: source.path, range: gap, duration: source.duration, allowDownload: true }, progress,
-            })
+            const result = await withSpeech('moments', () => active()
+              ? invoke<CaptionCue[]>('generate_captions', {
+                request: { path: source.path, range: gap, duration: source.duration, allowDownload: true }, progress,
+              })
+              : Promise.resolve([] as CaptionCue[]))
+            if (!active()) break
             const generated = result.map(cue => offsetCaption(cue, gap.start))
             cache.push({ range: gap, cues: generated })
+            setTranscriptRevision(revision => revision + 1)
             includeGenerated(generated)
           } finally {
             job.transcribing = false
@@ -1463,34 +1572,31 @@ export function App() {
         setMomentStatus(status())
         const unique = [...new Map(cues.map(cue => [`${cue.start}:${cue.end}`, cue])).values()].sort((a, b) => a.start - b.start)
         const candidates = momentCandidates(unique, { ...batch, end: Math.min(source.duration, batch.end + limit) }, limit)
-        for (let index = 0; index < candidates.length && active() && count < maxResults; index += 4) {
+          .filter(candidate => momentWorthy(candidate.text))
+        for (let index = 0; index < candidates.length && active() && found.length < maxResults; index += 4) {
           const group = candidates.slice(index, index + 4)
-          const excerpts = group.map(item => item.text)
-          const key = JSON.stringify([request, excerpts])
-          let match = matches.get(key)
-          if (match === undefined) {
-            const progress = new Channel<string>()
-            progress.onmessage = () => { if (active()) setMomentStatus('Preparing Smart Split for first use…') }
-            match = await invoke<number | null>('select_moment', { request, excerpts, progress })
-            if (matches.size >= 500) matches.clear()
-            matches.set(key, match)
-          }
-          if (active() && match !== null && group[match]) {
-            // Stretched candidates can span a batch boundary, so keep a later
-            // pick from repeating footage already suggested from an earlier one.
-            if (!found.some(item => rangesOverlap(item, group[match]))) {
-              found.push(group[match])
-              count++
-              setMoments([...found])
-            }
-          }
+          await askGroup(group)
           if (active()) {
             setMomentStatus(status())
             setMomentProgress((batch.start + (batch.end - batch.start) * (0.8 + 0.2 * Math.min(1, (index + 4) / candidates.length))) / source.duration)
           }
         }
+        scanned++
       }
-      if (active()) setMomentStatus(count ? `Review ${count} suggested ${count === 1 ? 'moment' : 'moments'}.` : 'No matching moments found.')
+      // The model picks one excerpt per group of four, so a short video can
+      // run out of groups before reaching the requested count. Ask again about
+      // the candidates it passed over until the count is met or none are left.
+      for (let pass = 0; pass < 3 && active() && found.length + likely.length < maxResults; pass++) {
+        const remaining = leftovers.filter(item => ![...found, ...likely].some(chosen => rangesOverlap(chosen, item)))
+        leftovers.length = 0
+        if (remaining.length < 2) break
+        setMomentStatus(`Looking for more · ${found.length + likely.length} of ${maxResults} found`)
+        for (let index = 0; index < remaining.length && active() && found.length + likely.length < maxResults; index += 4) {
+          await askGroup(remaining.slice(index, index + 4))
+        }
+      }
+      const total = Math.min(maxResults, found.length + likely.length)
+      if (active()) setMomentStatus(total ? `Review ${total} suggested ${total === 1 ? 'moment' : 'moments'}.` : 'No matching moments found. Try another quick search or a shorter description.')
     } catch (error) {
       if (active()) setMomentStatus(message(error) === 'This video has no audio track to caption.'
         ? 'This video has no audio to search.' : 'Smart Split couldn’t finish. You can retry or review the suggestions already found.')
@@ -1502,6 +1608,12 @@ export function App() {
       setMomentProgress(null)
       if (current()) void refreshCaptionModel().catch(() => {})
     }
+  }
+
+  // Find clips no longer waits for captions or titles: the speech engine
+  // queue lets them all run side by side.
+  const requestSearch = (request: string) => {
+    void searchMoments(request, momentLength, momentCount)
   }
 
   const previewMoment = (moment: Moment) => {
@@ -1692,7 +1804,6 @@ export function App() {
   const captionClip = (clip: Clip) => {
     selectClip(clip)
     openCaptions(`clip-${clip.id}`)
-    captionsTab.current?.focus()
     if (clipsNeedingCaptions([clip]).length) {
       void runCaptionJob([{ key: `clip-${clip.id}`, range: clip, clip, track: clip.captions }], 'clip')
     }
@@ -1703,7 +1814,6 @@ export function App() {
     if (!missing.length) return
     selectClip(missing[0])
     openCaptions(`clip-${missing[0].id}`)
-    captionsTab.current?.focus()
     void runCaptionJob(missing.map(clip => ({ key: `clip-${clip.id}`, range: clip, clip, track: clip.captions })), 'stack')
   }
 
@@ -1769,8 +1879,8 @@ export function App() {
     seek(value)
   }
 
-  const exportVideos = async (only?: Clip) => {
-    if (!source || exportLock.current || importLock.current || fileDialog.current || captionJob.current || titleJob.current) return
+  const exportVideos = async (only?: Clip[]) => {
+    if (!source || exportLock.current || importLock.current || fileDialog.current) return
     if (!clips.length && sections.length) return
     // A ripple-deleted video is one edited timeline, not a set of separate
     // clips. Export it as a single file containing every kept range.
@@ -1784,7 +1894,7 @@ export function App() {
       texts: activeTexts.length ? activeTexts : undefined,
     }
     const batch: Clip[] = hasKeptEdit ? [editedClip]
-      : only ? [only] : clips.length ? clips : [{ ...range, id: 0, captions: activeCaptions, texts: activeTexts.length ? activeTexts : undefined }]
+      : only?.length ? only : clips.length ? clips : [{ ...range, id: 0, captions: activeCaptions, texts: activeTexts.length ? activeTexts : undefined }]
     const options = { format: draftFormat, framing: draftFraming, position: positions[draftFormat], quality: draftQuality }
     if (!batch.every(clip => validRange(clip, duration))) return
     exportLock.current = true
@@ -1799,7 +1909,6 @@ export function App() {
       const folder = exportFolder || await open({ directory: true, title: 'Choose where to save your clips' })
       if (!folder) return
       started = true
-      setCaptionsOpen(false)
       // Each source segment becomes one FFmpeg file, but the UI keeps one
       // status and one lock per clip (see groupExportStates).
       const units: ExportUnit[] = hasKeptEdit
@@ -1863,7 +1972,10 @@ export function App() {
           const music = effectiveMusic(projectMusic, unit.clip.music)
           prepared.push({
             start: unit.segment.start, end: unit.segment.end,
-            title: unit.first ? unit.clip.title : undefined,
+            title: unit.first ? exportFileName(preferences.fileNameParts, {
+              title: unit.clip.title, video: baseName,
+              number: Math.max(0, clips.findIndex(item => item.id === unit.clip.id)) + 1,
+            }) : undefined,
             captionOverlay,
             music: music ? { ...music, start: musicOffset + (music.start ?? 0) } : null,
             bookends: {
@@ -1886,6 +1998,9 @@ export function App() {
       setExportBatch({ ranges: batch, states, weights, running: false, options })
       const failure = states.find(state => state.status === 'failed')
       if (failure) setNotice(failure.error)
+      if (preferences.openFolderAfterExport && states.some(state => state.status === 'saved')) {
+        void invoke('open_export_folder').catch(() => {})
+      }
     } catch (error) {
       const details = message(error)
       setNotice(details)
@@ -1924,24 +2039,42 @@ export function App() {
   const shortcutState = useRef({
     captionsOpen, settingsOpen, shortcuts, source, loading, timelineZoom,
     closeCaptions, chooseVideo, zoomTimelineTo, editBoundary, seekPlayback, addClip, togglePlay,
-    undoEdit, redoEdit,
+    undoEdit, redoEdit, paletteOpen, exportOpen,
   })
   shortcutState.current = {
     captionsOpen, settingsOpen, shortcuts, source, loading, timelineZoom,
     closeCaptions, chooseVideo, zoomTimelineTo, editBoundary, seekPlayback, addClip, togglePlay,
-    undoEdit, redoEdit,
+    undoEdit, redoEdit, paletteOpen, exportOpen,
   }
   useEffect(() => {
     const shortcutsHandler = (event: KeyboardEvent) => {
       const state = shortcutState.current
-      if (document.querySelector('.settings-page:not([hidden])')) return
       const key = event.key.toLowerCase()
       const target = event.target instanceof Element ? event.target : null
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && key === 'k') {
+        event.preventDefault()
+        setPaletteOpen(open => !open)
+        return
+      }
+      if (document.querySelector('.settings-page:not([hidden])') || state.paletteOpen || state.exportOpen) return
 
       if (event.key === 'Escape') {
         if (state.captionsOpen && target?.closest('#caption-editor') && !target.closest('input, select, textarea')) state.closeCaptions()
         setShortcuts(false)
         setSplitOpen(false)
+        setMomentsOpen(false)
+        if (!target?.closest('input, select, textarea')) setPanel(null)
+        return
+      }
+      if (key === '/' && !isTextEditing(target) && state.source) {
+        event.preventDefault()
+        setMomentsOpen(true)
+        askInput.current?.focus()
+        return
+      }
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && key === 'e') {
+        event.preventDefault()
+        if (state.source) setExportOpen(true)
         return
       }
       if ((event.ctrlKey || event.metaKey) && key === 'o') {
@@ -1996,7 +2129,7 @@ export function App() {
     const playbackShortcut = (event: KeyboardEvent) => {
       const state = shortcutState.current
       if (!isPlaybackShortcut(event,
-        { hasSource: Boolean(state.source), settingsOpen: state.settingsOpen, shortcutsOpen: state.shortcuts },
+        { hasSource: Boolean(state.source), settingsOpen: state.settingsOpen, shortcutsOpen: state.shortcuts || state.paletteOpen || state.exportOpen },
         event.target instanceof Element ? event.target : null,
         selector => document.querySelector(selector))) return
       event.preventDefault()
@@ -2097,19 +2230,21 @@ export function App() {
   const summary = exportBatch && summarizeExport(exportBatch.weights, exportBatch.states)
   const singleExport = busy ? exportBatch?.ranges.find(clip => clip.id === 0) : undefined
   const displayedClips = singleExport ? [singleExport, ...clips] : clips
-  const captionLabel = selectedClip ? selectedClip.title || `Clip ${clips.indexOf(selectedClip) + 1}`
+  const captionLabel = selectedClip ? selectedClip.title || `Clip ${String(clips.indexOf(selectedClip) + 1).padStart(2, '0')}`
     : reviewed ? `Section ${(reviewIndex ?? 0) + 1}` : 'Current range'
   const showCaptionEditor = captionsOpen && !trimDisabled && canSaveRange
   const styleDockOpen = showCaptionEditor && styleDockKey === captionKey && Boolean(activeCaptions?.cues.length)
-  const dockOpen = styleDockOpen || momentsOpen || Boolean(mediaDock)
-  const openMediaDock = (dock: 'music' | 'bookends' | 'text') => {
+  const togglePanel = (next: Exclude<Panel, null>) => {
     setMomentsOpen(false)
-    setStyleDockKey(null)
-    setMediaDock(current => current === dock ? null : dock)
+    if (next === 'captions' && panel !== 'captions') {
+      openCaptions()
+      return
+    }
+    setPanel(next)
   }
-  const closeMediaDock = (dock: 'music' | 'bookends' | 'text') => {
-    setMediaDock(null)
-    requestAnimationFrame(() => document.getElementById(`${dock}-trigger`)?.focus())
+  // Panels stay put; closing one just returns focus to its rail button.
+  const closePanel = (closed: Exclude<Panel, null>) => {
+    requestAnimationFrame(() => document.getElementById(`rail-${closed}`)?.focus())
   }
   const closeStyleDock = () => {
     setStyleDockKey(null)
@@ -2131,61 +2266,395 @@ export function App() {
     void getCurrentWindow()[action]().catch(error => setNotice(message(error)))
   }
 
+  // Settings → AI: caption each new clip in the background once the speech
+  // model is on this device. Each clip is attempted once per source.
+  const autoCaptioned = useRef(new Set<string>())
+  useEffect(() => {
+    if (!preferences.autoCaption || !source || settingsOpen || loading || captionsRunning || !captionModel?.installed ||
+      captionJob.current || importLock.current) return
+    const revision = sourceRequest.current
+    const clip = clipsNeedingCaptions(clips).find(item => !clipLocked(item.id) && !autoCaptioned.current.has(`${revision}:${item.id}:${item.start}:${item.end}`))
+    if (!clip) return
+    autoCaptioned.current.add(`${revision}:${clip.id}:${clip.start}:${clip.end}`)
+    void runCaptionJob([{ key: `clip-${clip.id}`, range: clip, clip, track: clip.captions }], 'clip')
+  })
+
+  // Settings → Updates: start downloading a new version in the background.
+  // Installing still waits for the restart prompt.
+  const autoDownloaded = useRef('')
+  useEffect(() => {
+    if (!preferences.backgroundUpdates || updates.status.phase !== 'available') return
+    const version = updates.status.info.version
+    if (autoDownloaded.current === version) return
+    autoDownloaded.current = version
+    void updates.download(true)
+  }, [preferences.backgroundUpdates, updates])
+
+  // Every transcribed word we know about, for the timeline's Words lane.
+  const transcript = useMemo(() => {
+    void transcriptRevision
+    const cues = new Map<string, CaptionCue>()
+    const add = (items?: CaptionCue[]) => items?.forEach(cue => {
+      if (cue.text.trim()) cues.set(`${cue.start}:${cue.end}`, cue)
+    })
+    if (momentCache.current.revision === sourceRequest.current) momentCache.current.batches.forEach(batch => add(batch.cues))
+    Object.values(draftCaptions).forEach(track => add(track?.cues))
+    clips.forEach(clip => add(clip.captions?.cues))
+    return [...cues.values()].sort((a, b) => a.start - b.start)
+  }, [clips, draftCaptions, transcriptRevision, source])
+
+  // Listen to the parts of the video without a transcript so the Words lane
+  // can show what is said everywhere. Reuses the Smart Split transcript cache.
+  const listenToVideo = async () => {
+    if (!source || listenJob.current || importLock.current) return
+    const revision = sourceRequest.current
+    if (momentCache.current.revision !== revision) momentCache.current = { revision, batches: [], matches: new Map() }
+    const known = transcript.map(cue => ({ start: cue.start, end: cue.end }))
+    const missing = missingTranscriptRanges({ start: 0, end: source.duration },
+      [...known, ...momentCache.current.batches.map(batch => batch.range)])
+    if (!missing.length) return
+    const model = await refreshCaptionModel()
+    if (!model.installed && !await confirm(
+      `Download the ${Math.round(model.bytes / 1_000_000)} MB speech model to show the words on the timeline?`,
+      { title: 'Show words on the timeline?', okLabel: 'Download & listen' })) return
+    const job = { canceled: false }
+    listenJob.current = job
+    const total = missing.reduce((sum, gap) => sum + gap.end - gap.start, 0)
+    let done = 0
+    setListening(0)
+    try {
+      for (const gap of missing) {
+        if (job.canceled || sourceRequest.current !== revision) break
+        const progress = new Channel<CaptionProgress>()
+        progress.onmessage = update => {
+          if (update.stage === 'transcribing') setListening((done + (gap.end - gap.start) * update.fraction) / total)
+        }
+        const result = await withSpeech('listen', () => job.canceled || sourceRequest.current !== revision
+          ? Promise.resolve([] as CaptionCue[])
+          : invoke<CaptionCue[]>('generate_captions', {
+            request: { path: source.path, range: gap, duration: source.duration, allowDownload: true }, progress,
+          }))
+        if (job.canceled || sourceRequest.current !== revision) break
+        momentCache.current.batches.push({ range: gap, cues: result.map(cue => offsetCaption(cue, gap.start)) })
+        setTranscriptRevision(value => value + 1)
+        done += gap.end - gap.start
+      }
+    } catch (error) {
+      if (sourceRequest.current === revision && !job.canceled) setNotice(message(error))
+    } finally {
+      if (listenJob.current === job) listenJob.current = null
+      setListening(null)
+      void refreshCaptionModel().catch(() => {})
+    }
+  }
+
+  const momentKey = (moment: Range) => `${moment.start}:${moment.end}`
+  const addPickedMoments = () => {
+    const picked = moments.filter(moment => momentPicks.has(momentKey(moment))
+      && !clips.some(clip => clip.start === moment.start && clip.end === moment.end))
+    for (const moment of picked) addMoment(moment)
+    setMomentPicks(new Set())
+    if (picked.length) {
+      setEditStatus(`Added ${picked.length} ${picked.length === 1 ? 'clip' : 'clips'}.`)
+      setMomentsOpen(false)
+    }
+  }
+
+  // Previous and next saved clips around the selection (or the playhead), shown
+  // faded beside the preview so the stack of shorts stays in view.
+  const ordered = useMemo(() => [...clips].sort((a, b) => a.start - b.start || a.id - b.id), [clips])
+  const neighborAt = selectedClip ? ordered.indexOf(selectedClip) : ordered.findIndex(clip => clip.start > range.start)
+  const previousClip = selectedClip ? ordered[neighborAt - 1] : neighborAt < 0 ? ordered[ordered.length - 1] : ordered[neighborAt - 1]
+  const nextClip = selectedClip ? ordered[neighborAt + 1] : neighborAt < 0 ? undefined : ordered[neighborAt]
+  const clipNumber = (clip: Clip) => clips.indexOf(clip) + 1
+  const clipName = (clip: Clip) => clip.title || `Clip ${String(clipNumber(clip)).padStart(2, '0')}`
+
+  // Export window contents: one card per clip, or one for the edited video.
+  const exportItems: ExportItem[] = (() => {
+    const states = new Map(exportBatch?.ranges.map((clip, index) => [clip.id, exportBatch.states[index]]))
+    if (hasKeptEdit || !clips.length) {
+      const length = hasKeptEdit ? keptDuration(keptRanges) : Math.max(0, range.end - range.start)
+      return hasSource ? [{ id: 0, title: hasKeptEdit ? 'Edited video' : selectedClip ? clipName(selectedClip) : 'Current range', number: 1,
+        duration: length, thumbnail: clipFrames[hasKeptEdit ? keptRanges[0]?.start ?? 0 : range.start],
+        needsCaptions: !activeCaptions?.cues.length, state: states.get(0) }] : []
+    }
+    return clips.map((clip, index) => ({
+      id: clip.id, title: clipName(clip), number: index + 1,
+      duration: clipSegments(clip).reduce((sum, part) => sum + part.end - part.start, 0),
+      thumbnail: clipFrames[clip.start], needsCaptions: clipsNeedingCaptions([clip]).length > 0,
+      state: states.get(clip.id),
+    }))
+  })()
+  const checkedExports = exportChecked ?? new Set(exportItems.map(item => item.id))
+  const openExport = () => {
+    if (!busy) setExportChecked(null)
+    setPanel(null)
+    setMomentsOpen(false)
+    setExportOpen(true)
+  }
+  const startExport = () => {
+    const chosen = exportItems.filter(item => checkedExports.has(item.id))
+    if (!chosen.length) return
+    const only = hasKeptEdit || !clips.length ? undefined : clips.filter(clip => checkedExports.has(clip.id))
+    void exportVideos(only)
+  }
+
+  const toggleAutoCaptionPreference = () => setPreferences({ ...preferences, autoCaption: !preferences.autoCaption })
+
+  const baseName = source ? source.name.replace(/\.[^.]+$/, '') : ''
+  const totalClipSeconds = clips.reduce((sum, clip) => sum + clipSegments(clip).reduce((part, segment) => part + segment.end - segment.start, 0), 0)
+  const captionStyle = activeCaptions?.style
+  const currentLook = captionStyle ? activeLook(captionStyle) : undefined
+  const captionScale = Math.round((captionStyle?.scale ?? (captionStyle?.size === 'small' ? 0.81 : captionStyle?.size === 'large' ? 1.25 : 1)) * 100)
+  const zoomLevel = Math.max(0, ZOOM_STEPS.findIndex(step => step >= timelineZoom - 0.0001))
+  // Music lane: one mark under every clip that has music, in the clip's
+  // colour, so it is clear which clip each track belongs to.
+  const musicMarks = clips.flatMap(clip => {
+    const music = effectiveMusic(projectMusic, clip.music)
+    if (!music) return []
+    return clipSegments(clip).map((segment, index) => ({
+      key: `${clip.id}-${index}`, clip, start: segment.start, end: segment.end, first: index === 0,
+      own: clip.music !== undefined, name: musicTrackName(music.track),
+    }))
+  })
+  const visibleWords = transcript.filter(cue => cue.end > visibleTime.start && cue.start < visibleTime.end)
+  const hint = hasSource ? 'Drag edges to trim · I / O mark in and out · Space plays · Ctrl K for every action' : 'Open a video to start'
+  const canOpenPanels = hasSource && !loading
+  const pickedCount = [...momentPicks].filter(key => !clips.some(clip => momentKey(clip) === key)).length
+
+  const reorderClip = (from: number, to: number) => {
+    if (from === to || from < 0 || to < 0 || from >= clips.length || to >= clips.length || busy) return
+    recordEdit()
+    setClips(items => {
+      const next = items.slice()
+      const [moved] = next.splice(from, 1)
+      next.splice(to, 0, moved)
+      return next
+    })
+  }
+  const dragFrom = useRef<number | null>(null)
+  const previewClip = (clip: Clip) => {
+    selectClip(clip)
+    requestAnimationFrame(() => togglePlay())
+  }
+  const exportOnly = (clip: Clip) => {
+    setExportChecked(new Set([clip.id]))
+    setPanel(null)
+    setExportOpen(true)
+  }
+  const duplicateClip = (clip: Clip) => {
+    if (busy || clips.length >= MAX_CLIPS) return
+    recordEdit()
+    const copy = { ...clip, id: nextId.current++, title: clip.title ? `${clip.title.slice(0, 73)} (copy)` : undefined }
+    setClips(items => items.flatMap(item => item.id === clip.id ? [item, copy] : [item]))
+    setClipActions(null)
+    selectClip(copy)
+  }
+  const removeClip = (clip: Clip) => {
+    if (captionJob.current?.keys.has(`clip-${clip.id}`)) return
+    recordEdit()
+    setClipActions(null)
+    setClips(items => items.filter(item => item.id !== clip.id))
+    if (selectedId === clip.id) setSelectedId(null)
+  }
+  const addCaptionsFor = (id: number) => {
+    const clip = clips.find(item => item.id === id)
+    if (!clip) return
+    setExportOpen(false)
+    captionClip(clip)
+  }
+
+  const clipMenuItems = (clip: Clip): MenuItem[] => {
+    const locked = clipLocked(clip.id)
+    return [
+      { label: 'Play this clip', icon: <Play size={14} />, run: () => previewClip(clip) },
+      { label: 'Rename', icon: <Pencil size={14} />, shortcut: 'F2', disabled: locked, run: () => { selectClip(clip); setRenaming(clip.id) } },
+      { label: clip.title ? 'Retitle with AI' : 'Title with AI', icon: <Sparkles size={14} />, disabled: locked, run: () => void titleClip(clip) },
+      { label: clipsNeedingCaptions([clip]).length ? 'Generate captions' : 'Edit captions', icon: <Subtitles size={14} />, disabled: locked, run: () => captionClip(clip) },
+      { label: 'Music for this clip', icon: <Music2 size={14} />, disabled: locked, run: () => { selectClip(clip); togglePanel('music') } },
+      'separator',
+      { label: 'Update from timeline range', icon: <Check size={14} />, disabled: locked || busy || !validRange(range, duration), run: () => updateClip(clip) },
+      { label: 'Duplicate', icon: <Copy size={14} />, disabled: busy || clips.length >= MAX_CLIPS, run: () => duplicateClip(clip) },
+      { label: 'Export only this clip', icon: <ArrowDownToLine size={14} />, disabled: busy, run: () => exportOnly(clip) },
+      'separator',
+      { label: 'Remove clip', icon: <Trash2 size={14} />, danger: true, disabled: locked || Boolean(captionJob.current?.keys.has(`clip-${clip.id}`)), run: () => removeClip(clip) },
+    ]
+  }
+
+  // Right-click shows actions for whatever is under the pointer. Text fields
+  // keep the system menu so copy and paste still work there.
+  const openContextMenu = (event: ReactMouseEvent) => {
+    const target = event.target as HTMLElement
+    if (target.closest('input:not([type="range"]):not([type="checkbox"]), textarea, select, [contenteditable="true"]')) return
+    event.preventDefault()
+    const at = { x: event.clientX, y: event.clientY }
+    const clipElement = target.closest<HTMLElement>('[data-clip-id]')
+    const clip = clipElement ? clips.find(item => item.id === Number(clipElement.dataset.clipId)) : undefined
+    if (clip) {
+      setContextMenu({ ...at, title: clipName(clip), items: clipMenuItems(clip) })
+      return
+    }
+    const lane = target.closest<HTMLElement>('.track, .ruler, .sound-lane, .words-lane, .music-lane')
+    if (lane && hasSource) {
+      const bounds = (timelineBody.current ?? lane).getBoundingClientRect()
+      const fraction = Math.max(0, Math.min(1, (event.clientX - bounds.left) / Math.max(1, bounds.width)))
+      const time = Math.max(0, Math.min(duration, visibleTime.start + fraction * visibleTime.span))
+      const under = lane.classList.contains('track')
+        ? clips.find(item => clipSegments(item).some(segment => time >= segment.start && time <= segment.end))
+        : undefined
+      if (under) {
+        setContextMenu({ ...at, title: clipName(under), items: [
+          { label: 'Move playhead here', icon: <Play size={14} />, run: () => seek(time) }, 'separator', ...clipMenuItems(under),
+        ] })
+        return
+      }
+      setContextMenu({ ...at, title: `Timeline · ${stamp(time)}`, items: [
+        { label: 'Move playhead here', icon: <Play size={14} />, run: () => seek(time) },
+        { label: 'Set In here', icon: <ChevronRight size={14} />, disabled: trimDisabled, run: () => { editBoundary('start', time) } },
+        { label: 'Set Out here', icon: <ChevronLeft size={14} />, disabled: trimDisabled, run: () => { editBoundary('end', time) } },
+        'separator',
+        { label: 'Add clip from In–Out', icon: <Plus size={14} />, shortcut: 'Enter', disabled: trimDisabled || !canSaveRange || editingCaptionJob, run: addClip },
+        { label: 'Split at playhead', icon: <Split size={14} />, disabled: trimDisabled || !canSaveRange || editingCaptionJob, run: splitAtPlayhead },
+        { label: 'Delete In–Out range', icon: <ScissorsLineDashed size={14} />, danger: true, disabled: !canTrim, run: trimSection },
+        'separator',
+        { label: 'Zoom in', icon: <ZoomIn size={14} />, shortcut: 'Ctrl +', disabled: timelineZoom === MAX_TIMELINE_ZOOM, run: () => zoomTimelineTo(timelineZoom * 2) },
+        { label: 'Zoom out', icon: <ZoomOut size={14} />, shortcut: 'Ctrl -', disabled: timelineZoom === 1, run: () => zoomTimelineTo(timelineZoom / 2) },
+        { label: 'Fit whole video', icon: <Film size={14} />, shortcut: 'Ctrl 0', disabled: timelineZoom === 1, run: () => zoomTimelineTo(1) },
+      ] })
+      return
+    }
+    if (target.closest('.stage') && hasSource) {
+      setContextMenu({ ...at, title: 'Preview', items: [
+        { label: playerPlaying ? 'Pause' : 'Play', icon: playerPlaying ? <Pause size={14} /> : <Play size={14} />, shortcut: 'Space', run: togglePlay },
+        { label: 'Add clip from In–Out', icon: <Plus size={14} />, shortcut: 'Enter', disabled: trimDisabled || !canSaveRange || editingCaptionJob, run: addClip },
+        'separator',
+        { label: 'Center picture', icon: <Move size={14} />, disabled: !canPosition, run: () => setFramePosition(CENTER) },
+        { label: 'Frame settings', icon: <Crop size={14} />, run: () => togglePanel('frame') },
+        { label: 'Captions', icon: <Subtitles size={14} />, run: () => togglePanel('captions') },
+        'separator',
+        { label: 'Export…', icon: <ArrowDownToLine size={14} />, disabled: !hasSource || loading, run: openExport },
+      ] })
+      return
+    }
+    setContextMenu({ ...at, items: [
+      { label: 'Open video…', icon: <FolderOpen size={14} />, shortcut: 'Ctrl O', disabled: busy || loading, run: () => void chooseVideo() },
+      { label: 'Find clips with AI…', icon: <Sparkles size={14} />, shortcut: '/', disabled: !hasSource, run: () => { setMomentsOpen(true); askInput.current?.focus() } },
+      { label: 'All actions…', icon: <Search size={14} />, shortcut: 'Ctrl K', run: () => setPaletteOpen(true) },
+      'separator',
+      { label: 'Export…', icon: <ArrowDownToLine size={14} />, disabled: !hasSource || loading, run: openExport },
+      { label: 'Settings', icon: <SettingsIcon size={14} />, run: () => setSettingsOpen(true) },
+    ] })
+  }
+
+  const RAIL: { id: Exclude<Panel, null>; label: string; icon: ReactNode; badge?: number; busy?: boolean }[] = [
+    { id: 'captions', label: 'Captions', icon: <Subtitles size={19} />, busy: captionsRunning },
+    { id: 'text', label: 'Text', icon: <Type size={19} /> },
+    { id: 'music', label: 'Music', icon: <Music2 size={19} /> },
+    { id: 'bookends', label: 'Intro/Outro', icon: <Clapperboard size={19} /> },
+    { id: 'frame', label: 'Frame', icon: <Crop size={19} /> },
+  ]
+
+  const noVideo = !hasSource || loading
+  const commands: PaletteCommand[] = [
+    { id: 'open', group: 'Video', label: 'Open video…', icon: <FolderOpen size={16} />, shortcut: 'Ctrl O', keywords: 'import file', run: () => void chooseVideo() },
+    { id: 'play', group: 'Video', label: playerPlaying ? 'Pause' : 'Play', icon: <Play size={16} />, shortcut: 'Space', disabled: noVideo, run: togglePlay },
+    { id: 'mute', group: 'Video', label: muted ? 'Unmute preview' : 'Mute preview', icon: <Volume2 size={16} />, disabled: noVideo, run: () => setMuted(value => !value) },
+    { id: 'find', group: 'Find', label: 'Find clips with AI…', icon: <Sparkles size={16} />, shortcut: '/', keywords: 'smart split moments search', disabled: noVideo, run: () => { setMomentsOpen(true); askInput.current?.focus() } },
+    { id: 'clear-find', group: 'Find', label: 'Clear clip suggestions', icon: <Trash2 size={16} />, disabled: !moments.length || momentRunning, run: clearMoments },
+    { id: 'listen', group: 'Find', label: 'Show what is said on the timeline', icon: <AudioLines size={16} />, keywords: 'transcript words listen', disabled: noVideo || listening !== null, run: () => void listenToVideo() },
+    { id: 'add', group: 'Edit', label: selectedLocked ? 'New clip' : 'Add current range as clip', icon: <Plus size={16} />, shortcut: 'Enter', disabled: trimDisabled || !canSaveRange, run: addClip },
+    { id: 'mark-in', group: 'Edit', label: 'Mark In at playhead', icon: <ChevronLeft size={16} />, shortcut: 'I', disabled: trimDisabled, run: () => editBoundary('start', activeTime()) },
+    { id: 'mark-out', group: 'Edit', label: 'Mark Out at playhead', icon: <ChevronRight size={16} />, shortcut: 'O', disabled: trimDisabled, run: () => editBoundary('end', activeTime()) },
+    { id: 'reset-range', group: 'Edit', label: 'Reset trim range', icon: <RotateCcw size={16} />, disabled: trimDisabled, run: resetRange },
+    { id: 'split-playhead', group: 'Edit', label: 'Split range at playhead', icon: <Split size={16} />, disabled: trimDisabled || !canSaveRange, run: splitAtPlayhead },
+    ...[15, 30, 60, 120, 300].map(seconds => ({ id: `split-${seconds}`, group: 'Edit', label: `Split range every ${seconds < 60 ? `${seconds} seconds` : `${seconds / 60} min`}`,
+      icon: <Split size={16} />, keywords: splitMode === 'add' ? 'split and add clips' : 'mark sections', disabled: trimDisabled || !canSaveRange, run: () => splitParts(splitRange(range, seconds)) })),
+    { id: 'split-mode', group: 'Edit', label: splitMode === 'mark' ? 'Splits add clips instead of marking' : 'Splits only mark sections', icon: <Split size={16} />, run: () => setSplitMode(mode => mode === 'mark' ? 'add' : 'mark') },
+    { id: 'delete-range', group: 'Edit', label: 'Delete range from the video (ripple)', icon: <ScissorsLineDashed size={16} />, keywords: 'trim remove cut', disabled: !canTrim, run: trimSection },
+    { id: 'undo', group: 'Edit', label: 'Undo', icon: <Undo2 size={16} />, shortcut: 'Ctrl Z', disabled: !canUndo, run: undoEdit },
+    { id: 'redo', group: 'Edit', label: 'Redo', icon: <Redo2 size={16} />, shortcut: 'Ctrl Shift Z', disabled: !canRedo, run: redoEdit },
+    { id: 'snap', group: 'Timeline', label: snapping ? 'Turn snapping off' : 'Turn snapping on', icon: <Magnet size={16} />, run: () => setSnapping(on => !on) },
+    { id: 'zoom-in', group: 'Timeline', label: 'Zoom in', icon: <ZoomIn size={16} />, shortcut: 'Ctrl +', disabled: noVideo, run: () => zoomTimelineTo(timelineZoom * 2) },
+    { id: 'zoom-out', group: 'Timeline', label: 'Zoom out', icon: <ZoomOut size={16} />, shortcut: 'Ctrl -', disabled: noVideo, run: () => zoomTimelineTo(timelineZoom / 2) },
+    { id: 'zoom-fit', group: 'Timeline', label: 'Fit entire timeline', icon: <Minus size={16} />, shortcut: 'Ctrl 0', disabled: noVideo, run: () => zoomTimelineTo(1) },
+    ...(sections.length ? [
+      { id: 'next-section', group: 'Timeline', label: 'Review next marked section', icon: <ChevronRight size={16} />, run: () => reviewSection(sections, reviewIndex === null ? 0 : Math.min(sections.length - 1, reviewIndex + 1)) },
+      { id: 'clear-sections', group: 'Timeline', label: 'Clear section marks', icon: <X size={16} />, run: () => { setSections([]); setReviewIndex(null) } },
+    ] : []),
+    { id: 'auto-title', group: 'Clips', label: autoTitles ? 'Turn off automatic clip titles' : 'Name new clips automatically with AI', icon: <Sparkles size={16} />, keywords: 'auto title', disabled: busy, run: () => void toggleAutoTitles() },
+    ...(selectedClip ? [
+      { id: 'retitle', group: 'Clips', label: selectedClip.title ? 'Retitle selected clip with AI' : 'Title selected clip with AI', icon: <Sparkles size={16} />, disabled: busy || captionsRunning || Boolean(titleProgress), run: () => void titleClip(selectedClip) },
+      { id: 'rename', group: 'Clips', label: 'Rename selected clip', icon: <Pencil size={16} />, shortcut: 'F2', disabled: selectedLocked, run: () => setRenaming(selectedClip.id) },
+      { id: 'duplicate', group: 'Clips', label: 'Duplicate selected clip', icon: <Copy size={16} />, disabled: busy, run: () => duplicateClip(selectedClip) },
+      { id: 'update-range', group: 'Clips', label: 'Update selected clip from trim range', icon: <Check size={16} />, disabled: busy || !canSaveRange, run: () => updateClip(selectedClip) },
+      { id: 'remove', group: 'Clips', label: 'Remove selected clip', icon: <Trash2 size={16} />, disabled: selectedLocked, run: () => removeClip(selectedClip) },
+    ] : []),
+    { id: 'captions', group: 'Captions', label: 'Captions — generate, edit, style', icon: <Subtitles size={16} />, disabled: !canOpenPanels, run: () => togglePanel('captions') },
+    { id: 'caption-all', group: 'Captions', label: 'Caption all clips', icon: <Subtitles size={16} />, disabled: busy || captionsRunning || Boolean(titleProgress) || !clipsNeedingCaptions(clips).length, run: captionStack },
+    { id: 'caption-style-all', group: 'Captions', label: 'Apply caption style to all clips', icon: <Copy size={16} />, disabled: !captionStyle || busy || captionsRunning, run: () => { if (captionStyle) applyCaptionStyle(captionStyle) } },
+    { id: 'caption-auto', group: 'Captions', label: preferences.autoCaption ? 'Stop captioning new clips automatically' : 'Caption new clips automatically', icon: <Subtitles size={16} />, run: toggleAutoCaptionPreference },
+    { id: 'text', group: 'Add', label: 'Text on picture', icon: <Type size={16} />, disabled: !canOpenPanels || busy, run: () => togglePanel('text') },
+    { id: 'add-text', group: 'Add', label: 'Add a text block', icon: <Plus size={16} />, disabled: !canOpenPanels || busy, run: () => { setPanel('text'); addText() } },
+    { id: 'music', group: 'Add', label: 'Background music', icon: <Music2 size={16} />, disabled: !canOpenPanels, run: () => togglePanel('music') },
+    { id: 'bookends', group: 'Add', label: 'Intro / outro', icon: <Clapperboard size={16} />, disabled: !canOpenPanels || busy, run: () => togglePanel('bookends') },
+    { id: 'frame', group: 'Output', label: 'Frame — fill, fit and position', icon: <Crop size={16} />, disabled: !canOpenPanels, run: () => togglePanel('frame') },
+    { id: 'format', group: 'Output', label: format === 'portrait' ? 'Switch to Landscape 16:9' : 'Switch to Vertical 9:16', icon: format === 'portrait' ? <Monitor size={16} /> : <Smartphone size={16} />, disabled: selectedLocked, run: () => setFormat(format === 'portrait' ? 'landscape' : 'portrait') },
+    { id: 'framing', group: 'Output', label: framing === 'fill' ? 'Fit the whole picture' : 'Fill the frame', icon: <Crop size={16} />, disabled: selectedLocked, run: () => setFraming(framing === 'fill' ? 'fit' : 'fill') },
+    { id: 'center', group: 'Output', label: 'Center picture in frame', icon: <Move size={16} />, disabled: !canPosition, run: () => setFramePosition(CENTER) },
+    { id: 'export', group: 'Output', label: 'Export clips…', icon: <ArrowDownToLine size={16} />, shortcut: 'Ctrl E', disabled: noVideo, run: openExport },
+    { id: 'export-selected', group: 'Output', label: 'Export only the selected clip', icon: <ArrowDownToLine size={16} />, disabled: noVideo || !selectedClip || busy, run: () => { if (selectedClip) exportOnly(selectedClip) } },
+    { id: 'cancel-export', group: 'Output', label: 'Cancel export', icon: <X size={16} />, disabled: !busy || cancelingExport, run: cancelExport },
+    { id: 'export-folder', group: 'Output', label: 'Open export folder', icon: <FolderOpen size={16} />, disabled: !summary?.saved, run: () => void invoke('open_export_folder').catch(error => setNotice(message(error))) },
+    { id: 'choose-folder', group: 'Output', label: 'Change export folder…', icon: <FolderOpen size={16} />, run: () => void chooseExportFolder() },
+    { id: 'settings', group: 'App', label: 'Settings', icon: <SettingsIcon size={16} />, keywords: 'preferences models updates', run: () => setSettingsOpen(true) },
+    { id: 'shortcuts', group: 'App', label: 'Keyboard shortcuts', icon: <Keyboard size={16} />, run: () => setShortcuts(true) },
+    { id: 'updates', group: 'App', label: 'Check for updates', icon: <RotateCcw size={16} />, run: () => void updates.checkForUpdates(true) },
+  ]
+
   return (
-    <div className="app">
+    <div className="app" onContextMenu={openContextMenu}>
       <header className="topbar">
-        <div className="brand" data-tauri-drag-region><span className="brand-mark"><Scissors size={19} /></span><span>MiniVidCut</span></div>
-        <div className="titlebar-space" data-tauri-drag-region />
-        <button className="icon-button settings-trigger" aria-label="Settings" title="Settings"
-          aria-pressed={settingsOpen} onClick={() => setSettingsOpen(open => !open)}><SettingsIcon size={16} /></button>
-        <div className="export-toolbar">
-          <button id="music-trigger" className="button outline small media-trigger" aria-controls="music-menu"
-            aria-expanded={mediaDock === 'music'} onClick={() => openMediaDock('music')}>
-            <Music2 size={14} /> Background music
-          </button>
-          <button id="bookends-trigger" className="button outline small media-trigger" aria-controls="bookends-menu"
-            aria-expanded={mediaDock === 'bookends'} disabled={disabled || busy} onClick={() => openMediaDock('bookends')}>
-            <Clapperboard size={14} /> Intro / Outro
-          </button>
-          <button id="text-trigger" className="button outline small media-trigger" aria-controls="text-menu"
-            aria-expanded={mediaDock === 'text'} disabled={disabled || busy} onClick={() => openMediaDock('text')}>
-            <Type size={14} /> Text
-          </button>
-          {busy && <div className="export-ring" role="progressbar" aria-label="Export progress"
-            aria-valuenow={summary?.percent ?? 0} title={`Exporting · ${summary?.percent ?? 0}%`}>
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <circle cx="12" cy="12" r="9" />
-              <circle cx="12" cy="12" r="9" pathLength="100" strokeDasharray={`${summary?.percent ?? 0} 100`} />
-            </svg>
-          </div>}
-          <button type="button" className="button primary small" popoverTarget="export-menu"
-            aria-haspopup="dialog" disabled={disabled || busy || captionsRunning || Boolean(titleProgress) || renaming !== null || !batchCount || (!clips.length && !canSaveRange)}
-            onClick={() => setSelectedExportOnly(false)}>
-            <ArrowDownToLine size={14} /> Export <ChevronDown size={12} />
-          </button>
-          <form ref={exportMenu} id="export-menu" className="export-menu media-menu panel" popover="auto" role="dialog" aria-label="Export settings"
-            onKeyDown={event => event.stopPropagation()} onSubmit={event => {
-              event.preventDefault()
-              exportMenu.current?.hidePopover()
-              void exportVideos(selectedExportOnly ? selectedClip : undefined)
-            }}>
-            <label>Clips
-              <select aria-label="Clips" value={selectedExportOnly && selectedClip ? 'selected' : 'all'} onChange={event => setSelectedExportOnly(event.target.value === 'selected')}>
-                <option value="all">{clips.length ? `All clips (${clips.length})` : 'Current range'}</option>
-                {selectedClip && <option value="selected">Selected clip</option>}
-              </select>
-            </label>
-            <label>Export quality
-              <select aria-label="Export quality" value={draftQuality} onChange={event => setQuality(event.target.value as Quality)}>
-                <option value="compact">Compact (H.265)</option>
-                <option value="compatible">Compatible (H.264)</option>
-                <option value="lossless">Lossless (larger file)</option>
-              </select>
-            </label>
-            <button className="button primary small" type="submit"><ArrowDownToLine size={14} /> Export</button>
-          </form>
+        <div className="brand" data-tauri-drag-region><span className="brand-mark"><Scissors size={17} /></span></div>
+        <div className="project" data-tauri-drag-region>
+          <strong title={source?.name}>{source ? baseName : 'MiniVidCut'}</strong>
+          {source && <small>{stamp(duration)} · {clips.length} {clips.length === 1 ? 'clip' : 'clips'}</small>}
         </div>
-        <UpdateIndicator update={updates} />
+        <button className="icon-button" title="Open video (Ctrl O)" aria-label="Open video" disabled={busy || loading} onClick={() => void chooseVideo()}><FolderOpen size={16} /></button>
+        <div className="titlebar-space" data-tauri-drag-region />
+        <form className={`ask${momentsOpen ? ' open' : ''}`} role="search" onSubmit={event => {
+          event.preventDefault()
+          const prompt = askInput.current?.value.trim() || DEFAULT_MOMENT_QUERY
+          requestSearch(prompt)
+        }}>
+          <Sparkles size={16} aria-hidden="true" />
+          <input ref={askInput} name="prompt" maxLength={240} disabled={!hasSource || loading} aria-label="Describe the clips to find"
+            aria-expanded={momentsOpen} aria-controls="find-panel" autoComplete="off"
+            placeholder={hasSource ? 'Find clips… “surprising facts under 30 seconds”' : 'Open a video, then describe the clips you want'}
+            onPointerDown={() => setMomentsOpen(true)} onChange={() => setMomentsOpen(true)}
+            onKeyDown={event => {
+              if (event.key === 'Escape') {
+                event.stopPropagation()
+                setMomentsOpen(false)
+                event.currentTarget.blur()
+              }
+            }} />
+          {momentRunning ? <LoaderCircle size={15} className="spin" aria-label="Finding clips" /> : <kbd aria-hidden="true">/</kbd>}
+        </form>
+        <div className="titlebar-space" data-tauri-drag-region />
+        <div className="top-actions">
+          <UpdateIndicator update={updates} />
+          <button className="pill" onClick={() => setPaletteOpen(true)} title="Search every action (Ctrl K)"><Search size={14} /> All actions <kbd>Ctrl K</kbd></button>
+          <button className="icon-button pill-icon settings-trigger" aria-label="Settings" title="Settings"
+            aria-pressed={settingsOpen} onClick={() => { setMomentsOpen(false); setSettingsOpen(open => !open) }}><SettingsIcon size={16} /></button>
+          <button type="button" className="button primary export-trigger" aria-haspopup="dialog"
+            disabled={!hasSource || loading || (!clips.length && sections.length > 0 && !hasKeptEdit)} onClick={openExport}>
+            {busy ? <span className="export-ring" role="progressbar" aria-label="Export progress" aria-valuenow={summary?.percent ?? 0}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" />
+                <circle cx="12" cy="12" r="9" pathLength="100" strokeDasharray={`${summary?.percent ?? 0} 100`} /></svg>
+            </span> : <ArrowDownToLine size={15} />}
+            {busy ? `Exporting ${summary?.percent ?? 0}%` : `Export${clips.length ? ` ${clips.length}` : ''}`}
+          </button>
+        </div>
         {isTauri() && <div className="window-controls" role="group" aria-label="Window controls">
           <button aria-label="Minimize" title="Minimize" onClick={() => runWindowAction('minimize')}><Minus size={15} /></button>
           <button aria-label={maximized ? 'Restore' : 'Maximize'} title={maximized ? 'Restore' : 'Maximize'} onClick={() => runWindowAction('toggleMaximize')}>
@@ -2195,8 +2664,73 @@ export function App() {
         </div>}
       </header>
 
+      {momentsOpen && hasSource && !settingsOpen && <>
+        <div className="find-scrim" onPointerDown={() => setMomentsOpen(false)} />
+        <section className="find-panel" id="find-panel" aria-label="Find clips" onKeyDown={event => {
+          if (event.key === 'Escape') { event.stopPropagation(); setMomentsOpen(false); askInput.current?.blur() }
+        }}>
+          <div className="find-options">
+            <span>Length</span>
+            <div className="seg" role="group" aria-label="Maximum clip length">
+              {[15, 30, 60].map(seconds => <button key={seconds} type="button" aria-pressed={momentLength === seconds} onClick={() => setMomentLength(seconds)}>{seconds}s</button>)}
+              <label className="seg-custom"><input type="number" min={1} max={120} aria-label="Custom maximum seconds" value={momentLength}
+                onChange={event => { const value = event.target.valueAsNumber; if (Number.isFinite(value)) setMomentLength(Math.max(1, Math.min(120, Math.round(value)))) }} />s</label>
+            </div>
+            <span>Count</span>
+            <div className="seg" role="group" aria-label="Number of suggestions">
+              {[3, 5, 10].map(count => <button key={count} type="button" aria-pressed={momentCount === count} onClick={() => setMomentCount(count)}>{count}</button>)}
+              <label className="seg-custom"><input type="number" min={1} max={MAX_CLIPS} aria-label="Custom number of suggestions" value={momentCount}
+                onChange={event => { const value = event.target.valueAsNumber; if (Number.isFinite(value)) setMomentCount(Math.max(1, Math.min(MAX_CLIPS, Math.round(value)))) }} /></label>
+            </div>
+            <button className="button primary small" disabled={momentRunning || loading}
+              onClick={() => requestSearch(askInput.current?.value.trim() || DEFAULT_MOMENT_QUERY)}><Sparkles size={14} /> Find clips</button>
+          </div>
+          <div className="find-presets" role="group" aria-label="Quick searches">
+            {MOMENT_PRESETS.map(preset => <button key={preset.id} type="button" className="find-preset"
+              aria-pressed={momentQuery === preset.request} title={preset.request}
+              disabled={momentRunning || loading}
+              onClick={() => {
+                if (askInput.current) askInput.current.value = preset.request
+                requestSearch(preset.request)
+              }}>{PRESET_ICONS[preset.id]}{preset.label}</button>)}
+          </div>
+          {momentRunning ? <div className="find-progress">
+            <p role="status">{momentStatus}</p>
+            <button className="button outline small" onClick={stopMomentSearch} disabled={momentStopping}>{momentStopping ? 'Stopping…' : 'Stop'}</button>
+            <div className="thin-bar"><i style={{ width: `${Math.round((momentProgress ?? 0) * 100)}%` }} /></div>
+          </div> : momentStatus ? <p className="find-status" role="status">{momentStatus}</p>
+            : !moments.length && <p className="find-status">Describe what you want in plain words, like “the funniest moments” or “key takeaways”. The transcript is searched on this device.</p>}
+          {moments.length > 0 && <ol className="find-results">{moments.map((moment, index) => {
+            const key = momentKey(moment)
+            const added = clips.some(clip => clip.start === moment.start && clip.end === moment.end)
+            return <li key={key} className={momentPicks.has(key) && !added ? 'picked' : ''}>
+              <input type="checkbox" className="check" checked={added || momentPicks.has(key)} disabled={added}
+                aria-label={`Select suggestion ${index + 1}`} onChange={() => setMomentPicks(current => {
+                  const next = new Set(current)
+                  if (next.has(key)) next.delete(key)
+                  else next.add(key)
+                  return next
+                })} />
+              <span className="find-thumb" style={{ aspectRatio: activeFormat.aspect }}>{clipFrames[moment.start] && <img alt="" src={clipFrames[moment.start]} />}</span>
+              <span className="find-text"><q title={moment.text}>{moment.text}</q>
+                <small>{stamp(moment.start)} · {clipDuration(moment.end - moment.start)} · <button className="link-button" disabled={preview !== 'direct' && preview !== 'proxy'}
+                  onClick={() => previewMoment(moment)}><Play size={11} /> preview</button></small></span>
+              <span className="find-rank" title="Order the AI ranked this suggestion">{added ? <><Check size={13} /> Added</> : `#${index + 1}`}</span>
+            </li>
+          })}</ol>}
+          {moments.length > 0 && <div className="find-footer">
+            <span>{pickedCount} selected · also shown on the timeline</span>
+            <button className="button outline small" disabled={momentRunning} onClick={clearMoments}>Clear</button>
+            <button className="button primary small" disabled={busy || !pickedCount}
+              onClick={addPickedMoments}>{pickedCount ? `Add ${pickedCount} ${pickedCount === 1 ? 'clip' : 'clips'}` : 'Add clips'}</button>
+          </div>}
+        </section>
+      </>}
+
       <UpdatePrompt update={updates} />
       <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} update={updates}
+        preferences={preferences} onPreferences={setPreferences} projectName={source ? baseName : ''} projectMeta={source ? `${stamp(duration)} · ${clips.length} ${clips.length === 1 ? 'clip' : 'clips'}` : ''}
+        autoTitles={autoTitles} onToggleAutoTitles={() => void toggleAutoTitles()}
         exportFolder={exportFolder} onChooseExportFolder={() => void chooseExportFolder()} onClearExportFolder={clearExportFolder}
         onModelsChanged={(removed) => {
           if (removed) {
@@ -2206,19 +2740,28 @@ export function App() {
           }
           void refreshCaptionModel().catch(() => {})
         }} />
-      <main hidden={settingsOpen} className={`workspace ${sections.length ? 'reviewing' : ''} ${dockOpen && wideWorkspace ? 'with-moments' : ''} ${timelineZoom > 1 ? 'timeline-zoomed' : ''}`}>
-        <section className="viewer panel" aria-label="Video preview">
-          <div className="panel-heading">
-            <div className="source-line"><Film size={17} /><span title={source?.name}>{source?.name ?? 'Preview'}</span></div>
-            <div className="viewer-actions">
-              {!busy && Boolean(summary?.saved) && <button className="icon-button compact" title="Open export folder" aria-label="Open export folder"
-                onClick={() => void invoke('open_export_folder').catch(error => setNotice(message(error)))}><FolderOpen size={15} /></button>}
-              <button className="button outline small" onClick={() => void chooseVideo()} disabled={busy || loading}><FolderOpen size={15} /> Open video</button>
-            </div>
-          </div>
-          <div className={`stage ${dragging ? 'dragging' : ''}`}>
+      <main hidden={settingsOpen} className={`workspace${timelineZoom > 1 ? ' timeline-zoomed' : ''}${sections.length ? ' reviewing' : ''}${hasSource ? ' docked' : ''}`}>
+        <nav className="rail" aria-label="Tools">
+          {RAIL.map(item => <button key={item.id} id={`rail-${item.id}`} className="rail-button" aria-pressed={panel === item.id}
+            aria-controls={`${item.id}-panel`} disabled={!canOpenPanels || ((item.id === 'text' || item.id === 'bookends') && busy)}
+            onClick={() => togglePanel(item.id)}>
+            {item.busy ? <LoaderCircle size={19} className="spin" /> : item.icon}
+            <span>{item.label}</span>
+            {item.badge !== undefined && <em className="rail-badge">{item.badge}</em>}
+          </button>)}
+        </nav>
+
+        <section className="viewer" aria-label="Video preview">
+          <div className={`stage ${format} ${dragging ? 'dragging' : ''}`}>
             {hasSource ? (
               <>
+                {[previousClip, nextClip].map((clip, side) => clip && <button key={side ? 'next' : 'previous'} className={`neighbor ${side ? 'next' : 'previous'}`}
+                  title={`${side ? 'Next' : 'Previous'} clip · ${clipName(clip)}`} disabled={disabled}
+                  onClick={() => selectClip(clip)}>
+                  <span className="neighbor-frame">{clipFrames[clip.start] && <img alt="" src={clipFrames[clip.start]}
+                    style={{ objectFit: framing === 'fill' ? 'cover' : 'contain', objectPosition }} />}</span>
+                  <span className="neighbor-title">{clipName(clip)}</span>
+                </button>)}
                 <div className={`canvas ${format} ${canPosition ? 'can-pan' : ''} ${panning ? 'panning' : ''}`}
                   onPointerDown={sequenceActive ? undefined : startPan} onPointerMove={movePan} onLostPointerCapture={endPan}>
                   {preview !== 'preparing' && preview !== 'unavailable' && (
@@ -2257,7 +2800,7 @@ export function App() {
                       editable={showCaptionEditor && !editingCaptionJob} onStyle={saveCaptionStyle} />}
                   {sequence.stage}
                   {activeTexts.length > 0 && <TextOverlayPreview overlays={activeTexts} format={format}
-                    selectedId={selectedText?.id ?? null} draggable={mediaDock === 'text' && !disabled}
+                    selectedId={selectedText?.id ?? null} draggable={panel === 'text' && !disabled}
                     onPosition={(id, x, y) => {
                       const layer = activeTexts.find(text => text.id === id)
                       if (layer) saveText(moveText(layer, x, y))
@@ -2275,8 +2818,8 @@ export function App() {
             ) : (
               <div className="import">
                 <div className="import-graphic" aria-hidden="true"><div /><div /><span><Clapperboard size={31} strokeWidth={1.5} /></span></div>
-                <h1>Drop a video here</h1>
-                <p>Mark the moments you want to keep.</p>
+                <h1>Drop a long video here</h1>
+                <p>Then describe the clips you want, or mark them by hand.</p>
                 <button className="button primary browse" onClick={() => void chooseVideo()} disabled={loading}>
                   {loading ? <LoaderCircle size={17} className="spin" /> : <FolderOpen size={17} />} {loading ? 'Opening video…' : 'Browse files'}
                 </button>
@@ -2288,48 +2831,23 @@ export function App() {
                 <span className="file-types">MP4, MOV, MKV, WebM and more</span>
               </div>
             )}
-            {dragging && <div className="drop-overlay"><FolderOpen size={28} /> Drop to open video</div>}
+            {dragging && <div className="drop-overlay"><FolderOpen size={28} /> {panel === 'music' ? 'Drop to import music' : 'Drop to open video'}</div>}
           </div>
           <div className="transport">
-            <div className="transport-playback" role="group" aria-label="Playback">
-            <button className="icon-button compact" aria-label="Seek back 5 seconds" title="Back 5 seconds" disabled={disabled} onClick={() => seekPlayback(-5)}><Rewind size={15} /></button>
-            <button className="icon-button compact" aria-label="Seek back 1 second" title="Back 1 second" disabled={disabled} onClick={() => seekPlayback(-1)}><ChevronLeft size={16} /></button>
+            <div className="seg format-options" role="group" aria-label="Output format">
+              {(Object.keys(FORMATS) as Format[]).map(option => <button key={option} title={`${FORMATS[option].label} ${FORMATS[option].ratio}`}
+                aria-pressed={option === format} disabled={selectedLocked} onClick={() => setFormat(option)}>{FORMATS[option].ratio}</button>).reverse()}
+            </div>
+            <button className="icon-button compact" aria-label="Seek back 5 seconds" title="Back 5 seconds (Shift ←)" disabled={disabled} onClick={() => seekPlayback(-5)}><Rewind size={15} /></button>
+            <button className="icon-button compact" aria-label="Seek back 1 second" title="Back 1 second (←)" disabled={disabled} onClick={() => seekPlayback(-1)}><ChevronLeft size={16} /></button>
             <button className="icon-button play" aria-label={sequence.preparing ? 'Cancel clip preview' : playerPlaying ? 'Pause' : 'Play'} title="Play / pause (Space)"
               onClick={togglePlay} disabled={!source || (!sequenceKey && !canMixPreview)}>
-              {sequence.preparing ? <Square size={14} /> : playerPlaying ? <Pause size={19} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
+              {sequence.preparing ? <Square size={14} /> : playerPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={17} fill="currentColor" />}
             </button>
-            <button className="icon-button compact" aria-label="Seek forward 1 second" title="Forward 1 second" disabled={disabled} onClick={() => seekPlayback(1)}><ChevronRight size={16} /></button>
-            <button className="icon-button compact" aria-label="Seek forward 5 seconds" title="Forward 5 seconds" disabled={disabled} onClick={() => seekPlayback(5)}><FastForward size={15} /></button>
-            </div>
+            <button className="icon-button compact" aria-label="Seek forward 1 second" title="Forward 1 second (→)" disabled={disabled} onClick={() => seekPlayback(1)}><ChevronRight size={16} /></button>
+            <button className="icon-button compact" aria-label="Seek forward 5 seconds" title="Forward 5 seconds (Shift →)" disabled={disabled} onClick={() => seekPlayback(5)}><FastForward size={15} /></button>
             <ClockDisplay duration={duration} />
-          <div className="trim-bar" role="group" aria-label="Trim range">
-            <TimeField label="In" value={range.start} disabled={trimDisabled} onChange={value => editBoundary('start', value)} onMark={() => editBoundary('start', activeTime())} />
-            <TimeField label="Out" value={range.end} disabled={trimDisabled} onChange={value => editBoundary('end', value)} onMark={() => editBoundary('end', activeTime())} />
-            <button className="icon-button compact" title="Reset trim range" aria-label="Reset trim range" onClick={resetRange} disabled={trimDisabled}><RotateCcw size={15} /></button>
-            <button className="icon-button compact clip-commit" disabled={!selectedLocked && (trimDisabled || !canSaveRange || editingCaptionJob)}
-              aria-label={selectedLocked ? 'New clip' : 'Add clip'} title={selectedLocked ? 'New clip' : 'Add clip'}
-              onClick={selectedLocked ? resetRange : addClip}><Plus size={16} /></button>
-          </div>
-            <div className="transport-tools">
-            {sequence.path && <button className="icon-button compact" title="Return to source preview" aria-label="Return to source preview"
-              onClick={stopSequence}><X size={16} /></button>}
-            {canPosition && positionAxis && <>
-              <button className="icon-button compact position-trigger" aria-label="Frame position" title="Frame position" popoverTarget="frame-position"
-                aria-haspopup="dialog"><Move size={16} /></button>
-              <div id="frame-position" className="position-controls panel" popover="auto" role="dialog" aria-label="Frame position">
-              <label title="Drag the preview or use the slider to position every exported clip"><Move size={15} />
-                <span>Position</span>
-                <input aria-label={positionAxis === 'x' ? 'Horizontal frame position' : 'Vertical frame position'}
-                  type="range" min="0" max="100" value={position[positionAxis]}
-                  onChange={event => setFramePosition({ ...position, [positionAxis]: Number(event.target.value) })} />
-              </label>
-              <button className="button outline small" title="Center picture in frame" onClick={() => setFramePosition(CENTER)}>Center</button>
-            </div></>}
-            {hasSource && <button className={`icon-button compact caption-toggle${activeCaptions?.cues.length ? ' has-captions' : ''}`}
-              title="Captions" aria-label="Captions" aria-expanded={captionsOpen} aria-controls="captions-panel"
-              onClick={() => captionsOpen ? closeCaptions() : openCaptions()}>
-              {captionsRunning ? <LoaderCircle size={17} className="spin" /> : <Subtitles size={18} />}
-            </button>}
+            {sequence.path && <button className="icon-button compact" title="Return to source preview" aria-label="Return to source preview" onClick={stopSequence}><X size={16} /></button>}
             <div className="transport-audio" role="group" aria-label="Preview audio">
               <button className="icon-button compact mute" aria-label={muted ? 'Unmute' : 'Mute'} title={muted ? 'Unmute' : 'Mute'} disabled={!source} onClick={() => {
                 const next = !muted
@@ -2346,94 +2864,28 @@ export function App() {
                   if (sequence.player.current) sequence.player.current.setMuted(false)
                 }} />
             </div>
-            </div>
-          </div>
-          <div className="output-bar">
-            <div className="segmented format-options" role="group" aria-label="Output format">
-              {(Object.keys(FORMATS) as Format[]).map(option => {
-                const { icon: Icon, label, ratio } = FORMATS[option]
-                return <button key={option} title={`${label} ${ratio}`} aria-pressed={option === format} disabled={selectedLocked}
-                  onClick={() => setFormat(option)}><Icon size={14} /><span>{label}</span></button>
-              })}
-            </div>
-            <div className="segmented" role="group" aria-label="Framing">
-              <button aria-pressed={framing === 'fill'} title="Crop to fill the frame" disabled={selectedLocked} onClick={() => setFraming('fill')}>Fill</button>
-              <button aria-pressed={framing === 'fit'} title="Keep the full image with black borders" disabled={selectedLocked} onClick={() => setFraming('fit')}>Fit</button>
-            </div>
-            <span className="resolution">{activeFormat.ratio} <span>·</span> {activeFormat.size}</span>
           </div>
         </section>
 
-        <aside className="editor-sidebar panel" aria-label="Clips and captions" hidden={dockOpen && !wideWorkspace}>
-          <div className="sidebar-tabs" role="tablist" aria-label="Editor sidebar" onKeyDown={event => {
-            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
-            event.preventDefault()
-            event.stopPropagation()
-            const tabs = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'))
-            const current = tabs.indexOf(document.activeElement as HTMLButtonElement)
-            const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
-              : (current + tabs.length + (event.key === 'ArrowLeft' ? -1 : 1)) % tabs.length
-            tabs[next]?.focus()
-            tabs[next]?.click()
-          }}>
-            <button ref={clipsTab} type="button" role="tab" id="clips-tab" aria-selected={!captionsOpen} aria-controls="clips-panel"
-              tabIndex={captionsOpen ? -1 : 0} onClick={() => setCaptionsOpen(false)}>
-              <Clapperboard size={15} /> Clips <span className="count">{displayedClips.length}</span>
-            </button>
-            <button ref={captionsTab} type="button" role="tab" id="captions-tab" aria-selected={captionsOpen} aria-controls="captions-panel"
-              tabIndex={captionsOpen ? 0 : -1} onClick={() => openCaptions()}>
-              <Subtitles size={16} /> Captions {captionsRunning && <LoaderCircle size={13} className="spin" aria-label="Generating captions" />}
-            </button>
-            {!wideWorkspace && <button type="button" role="tab" aria-selected={false} tabIndex={-1}
-              disabled={!source || loading} aria-controls="moment-panel" onClick={() => { setMediaDock(null); setMomentsOpen(true) }}>Smart Split</button>}
-          </div>
-          <div className="sidebar-content" id="captions-panel" role="tabpanel" aria-labelledby="captions-tab" hidden={!captionsOpen}>
-            {showCaptionEditor ? <CaptionEditor key={captionKey} label={captionLabel} range={range} track={activeCaptions}
-          model={captionModel} progress={captionProgress} status={captionStatus?.key === captionKey || captionStatus?.key === 'batch' ? captionStatus.text : ''}
-          editing={editingCaptionJob} canGenerate={!titleProgress} styleOpen={styleDockOpen}
-          defaultStyle={sharedCaptionStyle.current ?? undefined} onOpenStyle={() => {
-            if (styleDockOpen) closeStyleDock()
-            else {
-              setMomentsOpen(false)
-              setMediaDock(null)
-              setStyleDockKey(captionKey)
-              requestAnimationFrame(() => document.getElementById('caption-style-title')?.focus())
-            }
-          }}
-          onChange={saveCaptions} onGenerate={generateCaptions} onCancel={cancelCaptions}
-          onSeek={captionSeek} getTime={captionPlayhead} /> : <div className="empty-queue">
-            <Subtitles size={21} />
-            <p>{!hasSource ? 'Open a video to add captions.' : selectedLocked ? 'This clip is locked while it exports.' : 'Select a range to add captions.'}</p>
+        {hasSource && <section className="sheet left clips-sheet" id="clips-panel" aria-labelledby="clips-title">
+          <header className="sheet-head">
+            <div><h2 id="clips-title" className="display-title">Clips</h2>
+              <p>{clips.length} {clips.length === 1 ? 'clip' : 'clips'} · {clipDuration(totalClipSeconds)} total{clips.length > 1 ? ' · drag to reorder export' : ''}</p></div>
+            <button className="button outline small" disabled={disabled} onClick={() => { setMomentsOpen(true); askInput.current?.focus() }}><Sparkles size={14} /> Find more</button>
+          </header>
+          {clips.length > 0 && <div className="bulk-actions">
+            <button className="button outline small" aria-pressed={autoTitles} disabled={disabled}
+              title="Name every clip from what is said in it" onClick={() => void toggleAutoTitles()}><Sparkles size={14} /> Auto-title all</button>
+            <button className="button outline small" disabled={disabled || captionsRunning || !clipsNeedingCaptions(clips).length}
+              onClick={captionStack}><Subtitles size={14} /> Caption all{clipsNeedingCaptions(clips).length ? ` (${clipsNeedingCaptions(clips).length} missing)` : ''}</button>
+            <button className="button outline small" disabled={!captionStyle || busy} title="Use the selected clip's caption look on every clip"
+              onClick={() => { if (captionStyle) applyCaptionStyle(captionStyle) }}><Copy size={14} /> Apply look to all</button>
           </div>}
-          </div>
-          <div className="sidebar-content queue" id="clips-panel" role="tabpanel" aria-labelledby="clips-tab" hidden={captionsOpen}>
-          {displayedClips.length > 0 && <div className="panel-heading">
-            <button className="button outline small" aria-pressed={autoTitles} disabled={disabled || busy || captionsRunning || Boolean(titleProgress)}
-              onClick={() => void toggleAutoTitles()}><Sparkles size={14} /> Auto-title</button>
-            <button className="button outline small" title="Generate captions for clips without captions" disabled={disabled || busy || captionsRunning || Boolean(titleProgress) || !clipsNeedingCaptions(clips).length}
-              onClick={captionStack}><Subtitles size={14} /> Caption all</button>
+          {(titleProgress || titleError) && <div className="sheet-status" role="status">{titleProgress || titleError}
+            {titleError && autoTitles && <button className="link-button" onClick={() => { titledClips.current.clear(); setTitleError('') }}>Retry</button>}
           </div>}
-          {(titleProgress || titleError) && <div className="export-detail title-status" role="status">{titleProgress || titleError}
-            {titleError && autoTitles && <button className="text-button" onClick={() => {
-              titledClips.current.clear()
-              setTitleError('')
-            }}>Retry</button>}
-          </div>}
-          {summary && <section className="export-summary" aria-label="Batch export">
-            <div className="export-heading">
-              <strong>{busy ? cancelingExport ? 'Canceling export' : 'Exporting clips' : summary.canceled ? 'Export canceled' : summary.failed ? 'Export finished with errors' : 'Export complete'}</strong>
-              <span>{busy ? `${summary.percent}%` : summary.bytes > 0 ? fileSize(summary.bytes) : null}</span>
-            </div>
-            <div className={`batch-meter ${summary.failed ? 'has-errors' : ''}`} role="progressbar"
-              aria-label="Overall export progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={summary.percent}>
-              <span style={{ width: `${summary.percent}%` }} />
-            </div>
-            <div className="export-detail">
-              <span>{summary.saved} of {summary.total} saved{summary.active > 0 && ` · ${summary.active} exporting`}{summary.failed > 0 && ` · ${summary.failed} failed`}</span>
-              {busy && <button className="text-button" disabled={cancelingExport} onClick={cancelExport}>Cancel export</button>}
-            </div>
-          </section>}
-          {displayedClips.length === 0 ? <div className="empty-queue"><Scissors size={20} strokeWidth={1.5} /><span>No clips added</span><p>Add a trim range or split it into clips.</p></div> :
+          {displayedClips.length === 0 ? <div className="empty-queue"><Scissors size={20} strokeWidth={1.5} /><span>No clips yet</span>
+            <p>Find clips with AI, or mark In and Out on the timeline and press Add clip.</p></div> :
             <ol className="clip-list">{displayedClips.map((clip, index) => {
               const batchIndex = batchIndices.get(clip.id)
               const state = batchIndex === undefined ? undefined : exportBatch?.states[batchIndex]
@@ -2442,7 +2894,22 @@ export function App() {
               const thumbPosition = clipOptions?.position ?? position
               const title = clip.title ?? `Clip ${String(index + 1).padStart(2, '0')}`
               const editing = renaming === clip.id
-              return <li key={clip.id} className={clip.id === selectedId ? 'selected' : ''}>
+              const texts = normalizeTexts(clip.texts ?? clip.text).some(textActive)
+              const ends = effectiveBookends(projectBookends, clip.bookends)
+              const hasMusic = Boolean(effectiveMusic(projectMusic, clip.music))
+              const realIndex = clips.indexOf(clip)
+              return <li key={clip.id} data-clip-id={clip.id} className={clip.id === selectedId ? 'selected' : ''}
+                draggable={realIndex >= 0 && !busy && !editing && clips.length > 1}
+                onDragStart={event => { dragFrom.current = realIndex; event.dataTransfer.effectAllowed = 'move' }}
+                onDragOver={event => { if (dragFrom.current !== null) event.preventDefault() }}
+                onDrop={event => {
+                  event.preventDefault()
+                  if (dragFrom.current !== null && realIndex >= 0) reorderClip(dragFrom.current, realIndex)
+                  dragFrom.current = null
+                }}
+                onDragEnd={() => { dragFrom.current = null }}>
+                {clips.length > 1 && realIndex >= 0 && <span className="grip" aria-hidden="true" title="Drag to reorder"><GripVertical size={15} /></span>}
+                <span className="clip-number">{String(index + 1).padStart(2, '0')}</span>
                 {editing ? <form className="clip-rename" aria-label="Edit clip title" onSubmit={event => {
                   event.preventDefault()
                   const value = String(new FormData(event.currentTarget).get('title') ?? '')
@@ -2454,12 +2921,11 @@ export function App() {
                   }
                 }}>
                   <input autoFocus name="title" aria-label={`Rename ${title}`} maxLength={80} defaultValue={title}
-                    onFocus={event => event.currentTarget.select()}
-                  />
+                    onFocus={event => event.currentTarget.select()} />
                   <button type="submit" className="icon-button compact save-title" title="Save title" aria-label="Save title"><Check size={15} /></button>
                   <button type="button" className="icon-button compact" title="Cancel rename" aria-label="Cancel rename" onClick={() => setRenaming(null)}><X size={14} /></button>
                 </form> : <button className="clip-select" aria-pressed={clip.id === selectedId} disabled={disabled}
-                  title={locked ? `${title} · Preview only during export` : `${title} · Double-click to rename`}
+                  title={locked ? `${title} · Preview only during export` : `${title} · Double-click to rename · Alt ↑/↓ to reorder`}
                   onClick={event => {
                     if (event.detail === 1) renameClick.current = clip.id
                     selectClip(clip)
@@ -2474,19 +2940,32 @@ export function App() {
                       event.preventDefault()
                       renameClick.current = null
                       setRenaming(clip.id)
+                    } else if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown') && realIndex >= 0) {
+                      event.preventDefault()
+                      reorderClip(realIndex, realIndex + (event.key === 'ArrowUp' ? -1 : 1))
                     }
                   }}>
                   <span className="clip-thumbnail" style={{ aspectRatio: FORMATS[clipOptions?.format ?? format].aspect }}>
                     {clipFrames[clip.start]
                       ? <img alt="" src={clipFrames[clip.start]} style={{ objectFit: (clipOptions?.framing ?? framing) === 'fill' ? 'cover' : 'contain', objectPosition: `${thumbPosition.x}% ${thumbPosition.y}%` }} />
                       : <Film size={15} />}
+                    <em>{clipDuration(clip.end - clip.start)}</em>
                   </span>
                   <span className="clip-details">
-                    <span className="clip-title-line"><strong>{title}</strong>
-                      <span className="clip-length" style={{ color: clipColor(clip.id) }}
-                        title={`Duration · ${stamp(clip.end - clip.start, true)}`}>{clipDuration(clip.end - clip.start)}</span>
+                    <strong>{title}</strong>
+                    <small>{stamp(clip.start)} – {stamp(clip.end)}</small>
+                    <span className="clip-flags">
+                      {(() => {
+                        const captioned = Boolean(clip.captions?.cues.some(cue => cue.text.trim()))
+                        const bookended = Boolean(ends.intro || ends.outro)
+                        return <>
+                          <span className={`clip-flag${captioned ? ' on' : ' warn'}`} title={captioned ? 'Has captions' : 'No captions yet'}><Subtitles size={12} /></span>
+                          <span className={`clip-flag${hasMusic ? ' on' : ''}`} title={hasMusic ? 'Has music' : 'No music'}><Music2 size={12} /></span>
+                          <span className={`clip-flag${texts ? ' on' : ''}`} title={texts ? 'Has text on picture' : 'No text'}><Type size={12} /></span>
+                          <span className={`clip-flag${bookended ? ' on' : ''}`} title={bookended ? 'Has intro or outro' : 'No intro or outro'}><Clapperboard size={12} /></span>
+                        </>
+                      })()}
                     </span>
-                    <small>{stamp(clip.start, true)} – {stamp(clip.end, true)}</small>
                   </span>
                 </button>}
                 {state && <ExportBadge state={state} />}
@@ -2494,147 +2973,133 @@ export function App() {
                   aria-expanded={clipActions === clip.id} aria-controls={clipActions === clip.id ? `clip-actions-${clip.id}` : undefined}
                   disabled={disabled} onClick={() => setClipActions(current => current === clip.id ? null : clip.id)}><Ellipsis size={17} /></button>}
                 {!locked && !editing && clipActions === clip.id && <ClipActions id={`clip-actions-${clip.id}`} label={`Actions for ${title}`} onClose={closeClipActions}>
-                  <button disabled={busy || captionsRunning || Boolean(titleProgress)} onClick={() => { setClipActions(null); captionClip(clip) }}>
-                    <Subtitles size={15} /> {clipsNeedingCaptions([clip]).length ? 'Generate captions' : 'Edit captions'}
-                  </button>
-                  <button disabled={busy || captionsRunning || Boolean(titleProgress)} onClick={() => { setClipActions(null); void titleClip(clip) }}>
+                  <button onClick={() => { setClipActions(null); previewClip(clip) }}><Play size={14} /> Preview finished clip</button>
+                  <button onClick={() => { setClipActions(null); setRenaming(clip.id) }}><Pencil size={14} /> Rename</button>
+                  <button onClick={() => { setClipActions(null); void titleClip(clip) }}>
                     <Sparkles size={15} /> {clip.title ? 'Retitle with AI' : 'Title with AI'}
                   </button>
-                  <button onClick={() => { setClipActions(null); setRenaming(clip.id) }}><Pencil size={14} /> Edit title</button>
+                  <button onClick={() => { setClipActions(null); captionClip(clip) }}>
+                    <Subtitles size={15} /> {clipsNeedingCaptions([clip]).length ? 'Generate captions' : 'Edit captions'}
+                  </button>
                   <button disabled={busy || !validRange(range, duration)} onClick={() => { setClipActions(null); updateClip(clip) }}>
-                    <Check size={14} /> Update from trim range</button>
-                  <button disabled={busy || clips.length >= MAX_CLIPS} onClick={() => {
-                    const copy = { ...clip, id: nextId.current++, title: clip.title ? `${clip.title.slice(0, 73)} (copy)` : undefined }
-                    setClips(items => items.flatMap(item => item.id === clip.id ? [item, copy] : [item]))
-                    setClipActions(null)
-                    selectClip(copy)
-                  }}><Copy size={14} /> Duplicate clip</button>
-                  <button disabled={captionJob.current?.keys.has(`clip-${clip.id}`)} onClick={() => {
-                    setClipActions(null)
-                    setClips(items => items.filter(item => item.id !== clip.id))
-                    if (selectedId === clip.id) setSelectedId(null)
-                  }}><Trash2 size={14} /> Remove clip</button>
+                    <Check size={14} /> Update from timeline range</button>
+                  <button disabled={busy || clips.length >= MAX_CLIPS} onClick={() => duplicateClip(clip)}><Copy size={14} /> Duplicate</button>
+                  <button disabled={busy} onClick={() => { setClipActions(null); exportOnly(clip) }}><ArrowDownToLine size={14} /> Export only this clip</button>
+                  <button className="danger" disabled={captionJob.current?.keys.has(`clip-${clip.id}`)} onClick={() => removeClip(clip)}><Trash2 size={14} /> Remove clip</button>
                 </ClipActions>}
                 {state?.status === 'encoding' && <div className="clip-meter" aria-hidden="true"><span style={{ width: `${state.fraction * 100}%` }} /></div>}
               </li>
             })}</ol>}
-          </div>
-        </aside>
-          <MusicMenu key={`music-${musicSourceRevision}`} project={projectMusic}
-            clip={selectedClip ? { music: selectedClip.music, title: selectedClip.title || 'Selected clip' } : null}
-            open={mediaDock === 'music'} onClose={() => closeMediaDock('music')}
-            disabled={disabled || busy} canPreview={canMixPreview && Boolean(musicPath) && validRange(range, duration)}
-            playing={playerPlaying} onPreview={playMusicMix} onChange={changeMusic} onMixChange={changeMusicMix}
-            onKainoCacheChange={refreshKainoTrack} imports={importedTracks} musicPath={musicPath}
-            dropActive={dragging} onImport={importMusic} onRemoveImport={removeImportedMusic} />
-          <BookendsMenu key={`bookends-${musicSourceRevision}`} project={projectBookends}
-            clip={selectedClip ? { bookends: selectedClip.bookends, title: selectedClip.title || 'Selected clip' } : null}
-            open={mediaDock === 'bookends'} onClose={() => closeMediaDock('bookends')}
-            aspect={activeFormat.aspect} disabled={disabled || busy} videoExtensions={EXTENSIONS} onChange={changeBookend}
-            canPreview={Boolean(sequenceKey && validRange(range, duration))} onPreview={playSequence} />
-          <TextMenu open={mediaDock === 'text'} onClose={() => closeMediaDock('text')}
-            label={selectedClip?.title || captionLabel} disabled={disabled || busy}
-            overlays={activeTexts} entries={textEntries} selectedId={selectedText?.id ?? null} format={format}
-            onSelect={setSelectedTextId} onJump={jumpToText} onAdd={addText} onChange={saveText} onRemove={removeText}
-            onApplyAll={applyTextToAll} canApplyAll={clips.length > 0} />
-          {styleDockOpen && activeCaptions && <CaptionStylePanel key={captionKey} style={activeCaptions.style}
-            format={format} editing={editingCaptionJob} canApplyStyle={!busy && !captionsRunning}
-            onStyle={saveCaptionStyle} onApplyStyle={applyCaptionStyle} onClose={closeStyleDock} />}
-          <section className="moment-panel panel" id="moment-panel" aria-label="Smart Split suggestions" hidden={!momentsOpen}>
-            {!wideWorkspace && <div className="sidebar-tabs" role="tablist" aria-label="Editor sidebar">
-              <button role="tab" aria-selected={false} aria-controls="clips-panel" onClick={() => {
-                setMomentsOpen(false)
-                setCaptionsOpen(false)
-                requestAnimationFrame(() => clipsTab.current?.focus())
-              }}>Clips</button>
-              <button role="tab" aria-selected={false} aria-controls="captions-panel" onClick={() => {
-                setMomentsOpen(false)
-                openCaptions()
-                requestAnimationFrame(() => captionsTab.current?.focus())
-              }}>Captions</button>
-              <button role="tab" aria-selected aria-controls="moment-panel" onKeyDown={event => {
-                const tabs = event.currentTarget.parentElement?.querySelectorAll('button')
-                if (event.key === 'ArrowLeft' || event.key === 'End') tabs?.[1].click()
-                else if (event.key === 'ArrowRight' || event.key === 'Home' || event.key === 'Escape') tabs?.[0].click()
-                else return
-                event.preventDefault()
-                event.stopPropagation()
-              }}>Smart Split</button>
-            </div>}
-            <header className="moment-heading">
-              <h2><Sparkles size={15} /> Smart Split</h2>
-              <div className="moment-heading-actions">
-                <button className="button outline small" type="button" title="Clear generated suggestions"
-                  aria-label="Clear generated Smart Split suggestions"
-                  disabled={momentRunning || (!moments.length && !momentStatus)}
-                  onClick={clearMoments}><Trash2 size={13} /> Clear</button>
-                {wideWorkspace && <button className="icon-button compact" type="button" aria-label="Close Smart Split" title="Close Smart Split" onClick={() => {
-                  setMomentsOpen(false)
-                  momentsTrigger.current?.focus()
-                }}><X size={16} /></button>}
-              </div>
-            </header>
-            <form className="moment-controls" onSubmit={event => {
-              event.preventDefault()
-              const fields = new FormData(event.currentTarget)
-              void searchMoments(String(fields.get('prompt') || '').trim() || DEFAULT_MOMENT_QUERY,
-                Number(fields.get('maximum')), Number(fields.get('maxResults')))
-            }}>
-              <input type="text" name="prompt" maxLength={240} aria-label="Describe the moments to find" placeholder="Most important takeaways" />
-              <div className="moment-controls-row">
-              <label><span>Max length</span><span className="moment-limit"><input type="number" name="maximum" min={1} max={120} defaultValue={30} required aria-label="Maximum seconds per clip" /> s</span></label>
-              <label><span>Max clips</span><input type="number" name="maxResults" min={1} max={MAX_CLIPS} defaultValue={5} required aria-label="Maximum suggested clips" /></label>
-              <button className="button outline small" disabled={momentRunning || captionsRunning || Boolean(titleProgress) || loading} type="submit"><Sparkles size={14} /> Find</button>
-              </div>
-            </form>
-            {momentRunning ? <div className="moment-progress">
-              <div className="moment-progress-heading">
-                <p role="status">{momentStatus}</p>
-                <button className="button outline small" type="button" onClick={stopMomentSearch} disabled={momentStopping}>{momentStopping ? 'Stopping…' : 'Stop'}</button>
-              </div>
-              <progress aria-label="Smart Split progress" max={1} value={momentProgress ?? undefined} />
-            </div> : momentStatus && <p className="moment-status" role="status">{momentStatus}</p>}
-            {moments.length > 0 && <ol className="moment-results">
-              {moments.map(moment => {
-                const added = clips.some(clip => clip.start === moment.start && clip.end === moment.end)
-                return <li key={`${moment.start}:${moment.end}`}>
-                  <button className="icon-button compact" title="Play suggestion" aria-label={`Play suggestion at ${stamp(moment.start, true)}`}
-                    disabled={preview !== 'direct' && preview !== 'proxy'} onClick={() => previewMoment(moment)}><Play size={14} /></button>
-                  <span><small>{stamp(moment.start, true)} – {stamp(moment.end, true)}</small><strong title={moment.text}>{moment.text}</strong></span>
-                  <button className="button outline small" disabled={added || busy || clips.length >= MAX_CLIPS}
-                    onClick={() => addMoment(moment)}>{added ? <Check size={14} /> : <Plus size={14} />}{added ? 'Added' : 'Add clip'}</button>
-                </li>
-              })}
-            </ol>}
-          </section>
+          <footer className="sheet-foot">
+            <span>Click a clip to play it · double-click to rename · F2</span>
+            <button className="button outline small" disabled={!hasSource || loading} onClick={openExport}>Export all {clips.length || ''} <ChevronRight size={14} /></button>
+          </footer>
+        </section>}
 
-        <section className="timeline panel" aria-label="Timeline">
-          <div className="panel-heading timeline-heading">
-            <div className="source-line"><Scissors size={17} /><span>Timeline</span></div>
-            <button className="button outline small trim-section" disabled={!canTrim}
-              title="Remove the In–Out selection — from all saved clips, or from the source if none are saved" onClick={trimSection}><ScissorsLineDashed size={15} /> Trim</button>
-            <button className="icon-button compact" title="Undo (Ctrl Z)" aria-label="Undo" disabled={!canUndo} onClick={undoEdit}><Undo2 size={15} /></button>
-            <button className="icon-button compact" title="Redo (Ctrl Shift Z)" aria-label="Redo" disabled={!canRedo} onClick={redoEdit}><Redo2 size={15} /></button>
-            <button className={`button outline small snap ${snapping ? 'active' : ''}`}
-              title="Snap trim handles and clip edges to nearby edit points (clip boundaries, In/Out marks, playhead, start and end)"
-              aria-label="Toggle snapping" aria-pressed={snapping} onClick={() => setSnapping(on => !on)}>
-              <Magnet size={14} /> Snap
-            </button>
-            <div className="timeline-zoom" role="group" aria-label="Timeline zoom">
-              <button className="icon-button compact" aria-label="Zoom out timeline" title="Zoom out"
-                disabled={disabled || timelineZoom === 1} onClick={() => zoomTimelineTo(timelineZoom / 2)}><ZoomOut size={16} /></button>
-              <button className="button outline small" aria-label="Fit entire timeline" title="Fit entire timeline"
-                disabled={disabled || timelineZoom === 1} onClick={() => zoomTimelineTo(1)}>Fit</button>
-              <button className="icon-button compact" aria-label="Zoom in timeline" title="Zoom in"
-                disabled={disabled || timelineZoom === MAX_TIMELINE_ZOOM} onClick={() => zoomTimelineTo(timelineZoom * 2)}><ZoomIn size={16} /></button>
+        {panel === 'captions' && <section className="sheet right captions-sheet" id="captions-panel" aria-labelledby="captions-title" onKeyDown={event => {
+          if (event.key === 'Escape' && !(event.target instanceof Element && event.target.closest('input, select, textarea'))) { event.stopPropagation(); closeCaptions() }
+        }}>
+          <header className="sheet-head">
+            <div><h2 id="captions-title" className="display-title">Captions</h2><p title={captionLabel}>For “{captionLabel}”</p></div>
+            <button className="icon-button compact" aria-label="Close captions" onClick={closeCaptions}><X size={16} /></button>
+          </header>
+          {showCaptionEditor ? <div className="sheet-body">
+            {captionStyle && activeCaptions && activeCaptions.cues.length > 0 && !editingCaptionJob && <>
+              <div className="field-label">Look</div>
+              <div className="looks" role="radiogroup" aria-label="Caption look">{CAPTION_LOOKS.map(look =>
+                <button key={look.id} role="radio" aria-checked={currentLook?.id === look.id} className={`look look-${look.id}`}
+                  onClick={() => saveCaptionStyle(applyLook(captionStyle, look))}>{look.label}</button>)}</div>
+              <div className="field-label">Placement</div>
+              <div className="field-row"><span>Position</span>
+                <div className="seg" role="group" aria-label="Caption position">{(['top', 'middle', 'bottom'] as const).map(place =>
+                  <button key={place} aria-pressed={!captionStyle.points?.[format] && captionStyle.position === place}
+                    onClick={() => saveCaptionStyle({ ...captionStyle, position: place, points: { ...captionStyle.points, [format]: undefined } })}>{place[0].toUpperCase() + place.slice(1)}</button>)}</div></div>
+              <label className="field-row"><span>Size</span>
+                <input type="range" min={55} max={200} value={captionScale} aria-label="Caption size"
+                  onChange={event => saveCaptionStyle({ ...captionStyle, scale: event.target.valueAsNumber / 100 })} /></label>
+              <div className="sheet-actions">
+                <button className="button primary" disabled={busy} onClick={() => applyCaptionStyle(captionStyle)}>
+                  <Copy size={14} /> Apply this look to all {clips.length > 1 ? `${clips.length} clips` : 'clips'}</button>
+                <button className="button outline" aria-expanded={styleDockOpen} id="caption-style-trigger"
+                  onClick={() => setStyleDockKey(key => key === captionKey ? null : captionKey)}><SlidersHorizontal size={14} /> {styleDockOpen ? 'Fewer options' : 'More options'}</button>
+              </div>
+              {styleDockOpen && <CaptionStylePanel key={captionKey} embedded style={captionStyle}
+                format={format} editing={editingCaptionJob} canApplyStyle={!busy && !captionsRunning}
+                onStyle={saveCaptionStyle} onApplyStyle={applyCaptionStyle} onClose={closeStyleDock} />}
+              <div className="field-label">Words</div>
+            </>}
+            <CaptionEditor key={captionKey} label={captionLabel} range={range} track={activeCaptions}
+              model={captionModel} progress={captionProgress} status={captionStatus?.key === captionKey || captionStatus?.key === 'batch' ? captionStatus.text : ''}
+              editing={editingCaptionJob} canGenerate={!titleProgress} styleOpen={styleDockOpen}
+              defaultStyle={sharedCaptionStyle.current ?? undefined} onOpenStyle={() => setStyleDockKey(key => key === captionKey ? null : captionKey)}
+              onChange={saveCaptions} onGenerate={generateCaptions} onCancel={cancelCaptions}
+              onSeek={captionSeek} getTime={captionPlayhead} />
+          </div> : <div className="empty-queue">
+            <Subtitles size={21} />
+            <p>{!hasSource ? 'Open a video to add captions.' : selectedLocked ? 'This clip is locked while it exports.' : 'Select a clip or mark a range to add captions.'}</p>
+          </div>}
+        </section>}
+
+        {panel === 'frame' && <section className="sheet right frame-sheet" id="frame-panel" aria-labelledby="frame-title" onKeyDown={event => {
+          if (event.key === 'Escape') { event.stopPropagation(); closePanel('frame') }
+        }}>
+          <header className="sheet-head">
+            <div><h2 id="frame-title" className="display-title">Frame</h2><p>Shape and framing for every exported clip</p></div>
+            <button className="icon-button compact" aria-label="Close frame" onClick={() => closePanel('frame')}><X size={16} /></button>
+          </header>
+          <div className="sheet-body">
+            <div className="field-label">Format</div>
+            <div className="seg wide" role="group" aria-label="Output format">
+              <button aria-pressed={format === 'portrait'} disabled={selectedLocked} onClick={() => setFormat('portrait')}><Smartphone size={14} /> Vertical 9:16</button>
+              <button aria-pressed={format === 'landscape'} disabled={selectedLocked} onClick={() => setFormat('landscape')}><Monitor size={14} /> Landscape 16:9</button>
             </div>
-            <button ref={momentsTrigger} className="button outline small smart-split" disabled={disabled}
-              aria-expanded={momentsOpen} aria-controls="moment-panel"
-              onClick={() => { setSplitOpen(false); setStyleDockKey(null); setMediaDock(null); setMomentsOpen(open => !open) }}><Sparkles size={14} /> Smart Split</button>
+            <div className="field-label">Framing</div>
+            <div className="choices">
+              <button className="choice" role="radio" aria-checked={framing === 'fill'} disabled={selectedLocked} onClick={() => setFraming('fill')}>
+                <b>Fill</b><small>Crop the picture to fill the whole frame</small></button>
+              <button className="choice" role="radio" aria-checked={framing === 'fit'} disabled={selectedLocked} onClick={() => setFraming('fit')}>
+                <b>Fit</b><small>Keep the whole picture, with bars around it</small></button>
+            </div>
+            <div className="field-label">Position</div>
+            {canPosition && positionAxis ? <>
+              <label className="field-row"><span>{positionAxis === 'x' ? 'Left ↔ right' : 'Top ↕ bottom'}</span>
+                <input aria-label={positionAxis === 'x' ? 'Horizontal frame position' : 'Vertical frame position'}
+                  type="range" min="0" max="100" value={position[positionAxis]}
+                  onChange={event => setFramePosition({ ...position, [positionAxis]: Number(event.target.value) })} /></label>
+              <button className="button outline small" onClick={() => setFramePosition(CENTER)}><Move size={14} /> Center picture</button>
+              <p className="sheet-note">You can also drag the picture in the preview.</p>
+            </> : <p className="sheet-note">The whole picture already fits this frame, so there is nothing to move.</p>}
+            <p className="sheet-note mono">{activeFormat.ratio} · {activeFormat.size}</p>
+          </div>
+        </section>}
+
+        <MusicMenu key={`music-${musicSourceRevision}`} project={projectMusic}
+          clip={selectedClip ? { music: selectedClip.music, title: selectedClip.title || 'Selected clip' } : null}
+          open={panel === 'music'} onClose={() => closePanel('music')}
+          disabled={disabled || busy} canPreview={canMixPreview && Boolean(musicPath) && validRange(range, duration)}
+          playing={playerPlaying} onPreview={playMusicMix} onChange={changeMusic} onMixChange={changeMusicMix}
+          onKainoCacheChange={refreshKainoTrack} imports={importedTracks} musicPath={musicPath}
+          dropActive={dragging} onImport={importMusic} onRemoveImport={removeImportedMusic} />
+        <BookendsMenu key={`bookends-${musicSourceRevision}`} project={projectBookends}
+          clip={selectedClip ? { bookends: selectedClip.bookends, title: selectedClip.title || 'Selected clip' } : null}
+          open={panel === 'bookends'} onClose={() => closePanel('bookends')}
+          aspect={activeFormat.aspect} disabled={disabled || busy} videoExtensions={EXTENSIONS} onChange={changeBookend}
+          canPreview={Boolean(sequenceKey && validRange(range, duration))} onPreview={playSequence} />
+        <TextMenu open={panel === 'text'} onClose={() => closePanel('text')}
+          label={selectedClip?.title || captionLabel} disabled={disabled || busy}
+          overlays={activeTexts} entries={textEntries} selectedId={selectedText?.id ?? null} format={format}
+          onSelect={setSelectedTextId} onJump={jumpToText} onAdd={addText} onChange={saveText} onRemove={removeText}
+          onApplyAll={applyTextToAll} canApplyAll={clips.length > 0} />
+
+        <section className="timeline" aria-label="Timeline">
+          <div className="timeline-heading">
+            <button className="icon-button compact boxed" title="Undo (Ctrl Z)" aria-label="Undo" disabled={!canUndo} onClick={undoEdit}><Undo2 size={15} /></button>
+            <button className="icon-button compact boxed" title="Redo (Ctrl Shift Z)" aria-label="Redo" disabled={!canRedo} onClick={redoEdit}><Redo2 size={15} /></button>
+            <span className="divider" />
             <div className="split">
-              <button className="button outline small" disabled={trimDisabled || !canSaveRange || editingCaptionJob} onClick={() => setSplitOpen(!splitOpen)} aria-expanded={splitOpen}><Split size={15} /> Split range <ChevronDown size={13} /></button>
+              <button className="button outline small" disabled={trimDisabled || !canSaveRange || editingCaptionJob} onClick={() => setSplitOpen(!splitOpen)} aria-expanded={splitOpen}><Split size={14} /> Split <ChevronDown size={12} /></button>
               {splitOpen && canSaveRange && !trimDisabled && <div className="split-menu">
-                <div className="segmented split-mode" role="group" aria-label="Split behavior">
+                <div className="seg split-mode" role="group" aria-label="Split behavior">
                   <button aria-pressed={splitMode === 'mark'} onClick={() => setSplitMode('mark')}>Mark only</button>
                   <button aria-pressed={splitMode === 'add'} onClick={() => setSplitMode('add')}>Split &amp; add</button>
                 </div>
@@ -2642,88 +3107,145 @@ export function App() {
                   <button key={seconds} onClick={() => splitParts(splitRange(range, seconds))}>{seconds < 60 ? `Every ${seconds}s` : `Every ${seconds / 60} min`}</button>)}
               </div>}
             </div>
+            <button className="button outline small trim-section" disabled={!canTrim}
+              title="Remove the In–Out selection from the video and close the gap" onClick={trimSection}><ScissorsLineDashed size={14} /> Delete range</button>
+            <button className={`button outline small snap ${snapping ? 'active' : ''}`}
+              title="Snap trim handles and clip edges to nearby edit points"
+              aria-label="Toggle snapping" aria-pressed={snapping} onClick={() => setSnapping(on => !on)}>
+              <Magnet size={14} /> Snap
+            </button>
+            <div className="trim-bar" role="group" aria-label="Trim range">
+              <TimeField label="In" value={range.start} disabled={trimDisabled} onChange={value => editBoundary('start', value)} onMark={() => editBoundary('start', activeTime())} />
+              <TimeField label="Out" value={range.end} disabled={trimDisabled} onChange={value => editBoundary('end', value)} onMark={() => editBoundary('end', activeTime())} />
+              <span className="range-duration">{canSaveRange ? clipDuration(range.end - range.start) : ''}</span>
+              <button className="icon-button compact" title="Reset trim range" aria-label="Reset trim range" onClick={resetRange} disabled={trimDisabled}><RotateCcw size={14} /></button>
+              <button className="button primary small" disabled={!selectedLocked && (trimDisabled || !canSaveRange || editingCaptionJob)}
+                title={selectedLocked ? 'New clip' : 'Add clip (Enter)'}
+                onClick={selectedLocked ? resetRange : addClip}><Plus size={14} /> {selectedLocked ? 'New clip' : 'Add clip'}</button>
+            </div>
+            <div className="timeline-zoom" role="group" aria-label="Timeline zoom">
+              <button className="icon-button compact" aria-label="Zoom out timeline" title="Zoom out (Ctrl -)"
+                disabled={disabled || timelineZoom === 1} onClick={() => zoomTimelineTo(timelineZoom / 2)}><ZoomOut size={15} /></button>
+              <input type="range" aria-label="Timeline zoom" min={0} max={ZOOM_STEPS.length - 1} step={1} value={zoomLevel} disabled={disabled}
+                onChange={event => zoomTimelineTo(ZOOM_STEPS[event.target.valueAsNumber])} />
+              <button className="icon-button compact" aria-label="Zoom in timeline" title="Zoom in (Ctrl +)"
+                disabled={disabled || timelineZoom === MAX_TIMELINE_ZOOM} onClick={() => zoomTimelineTo(timelineZoom * 2)}><ZoomIn size={15} /></button>
+              <button className="button outline small" aria-label="Fit entire timeline" title="Fit entire timeline (Ctrl 0)"
+                disabled={disabled || timelineZoom === 1} onClick={() => zoomTimelineTo(1)}>Fit</button>
+            </div>
           </div>
-          <div className="timeline-body" ref={timelineBody}>
-            <div className={`ruler ${hasSource ? 'seekable' : ''}`} aria-hidden="true" onPointerDown={seekFromRuler}>{[0, 1, 2, 3, 4, 5].map(step => <span key={step}>{duration
-              ? stamp(timelineTime(visibleTime.start, visibleTime.span, step / 5), visibleTime.span < 5)
-              : step === 0 ? '00:00:00' : ''}</span>)}</div>
-            <div className={`track ${hasSource ? 'loaded' : ''} ${grabbingTimeline ? 'grabbing' : ''}`} ref={track}
-              onPointerDown={startTrackDrag} onPointerMove={moveTrackDrag} onPointerUp={finishTrackDrag}
-              onLostPointerCapture={() => { timelineDrag.current = null; setGrabbingTimeline(false) }}>
-              {hasSource ? (
-                <>
-                  <div className="filmstrip" aria-hidden="true">{filmTiles.map(tile => {
-                    const overview = overviewTiles[Math.min(9, Math.floor(tile.time / duration * 10))]
-                    const frame = frames[tile.time] || frames[overview?.time]
-                    return <div className="frame-tile" key={tile.index} style={{ left: `${tile.left}%` }}>
-                      {frame && <img draggable={false} alt="" src={frame} />}
-                    </div>
-                  })}</div>
-                  {clips.flatMap(clip => clipSegments(clip).map((segment, index, all) => ({ clip, segment, index, all })))
-                    .filter(({ segment }) => pct(segment.end) > pct(segment.start))
-                    .map(({ clip, segment, index, all }) => <Fragment key={`${clip.id}-${index}`}>
-                      <div className={`clip-tint ${clip.id === selectedId ? 'selected' : ''}`}
-                        style={{ left: `${pct(segment.start)}%`, width: `${pct(segment.end) - pct(segment.start)}%`, backgroundColor: clipColor(clip.id) + '35', borderColor: clipColor(clip.id) }} />
-                      {index > 0 && inView(segment.start) && <div className="cut-notch" title="Cut point — this part is skipped on export"
-                        style={{ left: `${pct(all[index - 1].end)}%`, borderColor: clipColor(clip.id) }} />}
-                    </Fragment>)}
-                  {overlaps.map(overlap => pct(overlap.end) > pct(overlap.start) && <div key={overlap.start} className="overlap-line"
-                    title="Overlapping clips" style={{ left: `${pct(overlap.start)}%`, width: `${pct(overlap.end) - pct(overlap.start)}%` }} />)}
-                  {deletedRanges.map(gap => pct(gap.end) > pct(gap.start) && <div key={`deleted-${gap.start}`}
-                    className="deleted-range" title="Removed from the video"
-                    style={{ left: `${pct(gap.start)}%`, width: `${pct(gap.end) - pct(gap.start)}%` }} />)}
+          <div className="timeline-grid">
+            <div className="lane-labels" aria-hidden="true"><span>Time</span><span>Video</span><span>Captions</span><span>Music</span></div>
+            <div className="timeline-body" ref={timelineBody}>
+              <div className={`ruler ${hasSource ? 'seekable' : ''}`} aria-hidden="true" onPointerDown={seekFromRuler}>{[0, 1, 2, 3, 4, 5].map(step => <span key={step}>{duration
+                ? stamp(timelineTime(visibleTime.start, visibleTime.span, step / 5), visibleTime.span < 5)
+                : step === 0 ? '00:00:00' : ''}</span>)}</div>
+              <div className="clip-labels">
+                {clips.map((clip, index) => ({ clip, index, part: clipSegments(clip).find(segment => segment.end > visibleTime.start && segment.start < visibleTime.end) }))
+                  .filter(item => item.part).map(({ clip, index, part }) => <button key={clip.id} data-clip-id={clip.id} className={`clip-label${clip.id === selectedId ? ' selected' : ''}`}
+                    disabled={disabled} aria-pressed={clip.id === selectedId} title={`${clipName(clip)} · ${stamp(clip.start, true)} – ${stamp(clip.end, true)}`}
+                    style={{ left: `${pct(Math.max(part!.start, visibleTime.start))}%`, '--clip-color': clipColor(clip.id) } as CSSProperties}
+                    onClick={() => selectClip(clip)}>{String(index + 1).padStart(2, '0')} · {clipName(clip)} · {clipDuration(clip.end - clip.start)}</button>)}
+                {moments.filter(moment => moment.end > visibleTime.start && moment.start < visibleTime.end
+                  && !clips.some(clip => clip.start === moment.start && clip.end === moment.end)).map(moment =>
+                  <button key={momentKey(moment)} className="clip-label ghost" disabled={disabled}
+                    title={`Suggestion · ${moment.text}`} style={{ left: `${pct(Math.max(moment.start, visibleTime.start))}%` }}
+                    onClick={() => previewMoment(moment)}><Sparkles size={11} /> #{moments.indexOf(moment) + 1} · {moment.text}</button>)}
+              </div>
+              <div className={`track ${hasSource ? 'loaded' : ''} ${grabbingTimeline ? 'grabbing' : ''}`} ref={track}
+                onPointerDown={startTrackDrag} onPointerMove={moveTrackDrag} onPointerUp={finishTrackDrag}
+                onLostPointerCapture={() => { timelineDrag.current = null; setGrabbingTimeline(false) }}>
+                {hasSource ? (
                   <>
+                    <div className="filmstrip" aria-hidden="true">{filmTiles.map(tile => {
+                      const overview = overviewTiles[Math.min(9, Math.floor(tile.time / duration * 10))]
+                      const frame = frames[tile.time] || frames[overview?.time]
+                      return <div className="frame-tile" key={tile.index} style={{ left: `${tile.left}%` }}>
+                        {frame && <img draggable={false} alt="" src={frame} />}
+                      </div>
+                    })}</div>
+                    {clips.flatMap(clip => clipSegments(clip).map((segment, index, all) => ({ clip, segment, index, all })))
+                      .filter(({ segment }) => pct(segment.end) > pct(segment.start))
+                      .map(({ clip, segment, index, all }) => <Fragment key={`${clip.id}-${index}`}>
+                        <div className={`clip-box ${clip.id === selectedId ? 'selected' : ''}`}
+                          style={{ left: `${pct(segment.start)}%`, width: `${pct(segment.end) - pct(segment.start)}%`, '--clip-color': clipColor(clip.id) } as CSSProperties} />
+                        {index > 0 && inView(segment.start) && <div className="cut-notch" title="Cut point — this part is skipped on export"
+                          style={{ left: `${pct(all[index - 1].end)}%`, borderColor: clipColor(clip.id) }} />}
+                      </Fragment>)}
+                    {overlaps.map(overlap => pct(overlap.end) > pct(overlap.start) && <div key={overlap.start} className="overlap-line"
+                      title="Overlapping clips" style={{ left: `${pct(overlap.start)}%`, width: `${pct(overlap.end) - pct(overlap.start)}%` }} />)}
+                    {deletedRanges.map(gap => pct(gap.end) > pct(gap.start) && <div key={`deleted-${gap.start}`}
+                      className="deleted-range" title="Removed from the video"
+                      style={{ left: `${pct(gap.start)}%`, width: `${pct(gap.end) - pct(gap.start)}%` }} />)}
                     <div className="range-shade" style={{ width: `${pct(range.start)}%` }} />
                     <div className="range-shade right" style={{ width: `${100 - pct(range.end)}%` }} />
                     <div className="selection" style={{ left: `${pct(range.start)}%`, width: `${pct(range.end) - pct(range.start)}%` }} />
-                    {moments.filter(moment => pct(moment.end) > pct(moment.start)).map(moment =>
-                      <div className="moment-mark" key={`${moment.start}:${moment.end}`} aria-hidden="true"
+                    {moments.filter(moment => pct(moment.end) > pct(moment.start) && !clips.some(clip => clip.start === moment.start && clip.end === moment.end)).map(moment =>
+                      <div className="moment-mark" key={momentKey(moment)} aria-hidden="true"
                         style={{ left: `${pct(moment.start)}%`, width: `${pct(moment.end) - pct(moment.start)}%` }} />)}
                     {[...new Set(sections.flatMap(section => [section.start, section.end]))].filter(point => point > 0 && point < duration && inView(point)).map(point =>
                       <div className="section-mark" key={point} style={{ left: `${pct(point)}%` }} />)}
+                    {(['start', 'end'] as const).filter(edge => inView(range[edge])).map(edge => <button key={edge} className={`handle ${edge}`} disabled={trimDisabled}
+                      aria-label={edge === 'start' ? 'Drag trim start' : 'Drag trim end'}
+                      data-tight={pct(range.end) - pct(range.start) < 5}
+                      style={{ left: `clamp(0px, calc(${pct(range[edge])}% - ${edge === 'end' ? 11 : 0}px), calc(100% - 11px))` }}
+                      onPointerDown={event => startScrub(event, edge)}
+                      onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) scrub(event, edge) }}
+                      onLostPointerCapture={() => { trimDrag.current = null }}
+                      onKeyDown={event => {
+                        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+                        event.preventDefault()
+                        const change = (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 1 : 0.1)
+                        const value = Math.max(0, Math.min(duration, range[edge] + change))
+                        if (editBoundary(edge, value)) seek(value)
+                      }}><span /></button>)}
+                    {selectedClip && !selectedLocked && !busy && (['start', 'end'] as const)
+                      .filter(side => inView(selectedClip[side])).map(side => <button key={`clip-${side}`}
+                        className={`handle clip-edge ${side}`} aria-label={`Drag clip ${side} to trim`}
+                        title={`Drag to trim the clip's ${side}`}
+                        style={{ left: `clamp(0px, calc(${pct(selectedClip[side])}% - ${side === 'end' ? 11 : 0}px), calc(100% - 11px))` }}
+                        onPointerDown={event => startClipEdgeDrag(event, selectedClip, side)}
+                        onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) moveClipEdgeDrag(event) }}
+                        onLostPointerCapture={() => { clipEdgeDrag.current = null }}><span /></button>)}
+                    <TimelinePlayhead pct={pct} inView={inView} onDrag={startPlayheadDrag}
+                      onMove={event => {
+                        if (event.currentTarget.hasPointerCapture(event.pointerId)) scrub(event, undefined, playheadOffset.current)
+                      }} />
                   </>
-                  {(['start', 'end'] as const).filter(edge => inView(range[edge])).map(edge => <button key={edge} className={`handle ${edge}`} disabled={trimDisabled}
-                    aria-label={edge === 'start' ? 'Drag trim start' : 'Drag trim end'}
-                    data-tight={pct(range.end) - pct(range.start) < 5}
-                    style={{ left: `clamp(0px, calc(${pct(range[edge])}% - ${edge === 'end' ? 11 : 0}px), calc(100% - 11px))` }}
-                    onPointerDown={event => startScrub(event, edge)}
-                    onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) scrub(event, edge) }}
-                    onLostPointerCapture={() => { trimDrag.current = null }}
-                    onKeyDown={event => {
-                      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
-                      event.preventDefault()
-                      const change = (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 1 : 0.1)
-                      const value = Math.max(0, Math.min(duration, range[edge] + change))
-                      if (editBoundary(edge, value)) seek(value)
-                    }}><span /></button>)}
-                  {selectedClip && !selectedLocked && !busy && (['start', 'end'] as const)
-                    .filter(side => inView(selectedClip[side])).map(side => <button key={`clip-${side}`}
-                      className={`handle clip-edge ${side}`} aria-label={`Drag clip ${side} to trim`}
-                      title={`Drag to trim the clip's ${side}`}
-                      style={{ left: `clamp(0px, calc(${pct(selectedClip[side])}% - ${side === 'end' ? 11 : 0}px), calc(100% - 11px))` }}
-                      onPointerDown={event => startClipEdgeDrag(event, selectedClip, side)}
-                      onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) moveClipEdgeDrag(event) }}
-                      onLostPointerCapture={() => { clipEdgeDrag.current = null }}><span /></button>)}
-                  <TimelinePlayhead pct={pct} inView={inView} onDrag={startPlayheadDrag}
-                    onMove={event => {
-                      if (event.currentTarget.hasPointerCapture(event.pointerId)) scrub(event, undefined, playheadOffset.current)
-                    }} />
-                </>
-              ) : <span className="empty-track"><Film size={16} /> Open a video to start trimming</span>}
+                ) : <span className="empty-track"><Film size={16} /> Open a video to see its frames here</span>}
+              </div>
+              <div className="lane sound-lane" title={hasSource ? soundPeaks.length ? 'The video’s own sound' : 'This video has no sound' : undefined}>
+                {hasSource && <SoundLane peaks={soundPeaks} duration={duration} view={visibleTime} range={range}
+                  highlight={Boolean(selectedClip || reviewed || range.start > 0 || range.end < duration)} />}
+              </div>
+              <div className="lane words-lane">
+                {visibleWords.length ? visibleWords.map(cue => <button key={`${cue.start}:${cue.end}`} disabled={disabled}
+                  className={`word${cue.start < range.end && cue.end > range.start && (selectedClip || reviewed || range.start > 0 || range.end < duration) ? ' in-range' : ''}`}
+                  title={`${stamp(cue.start, true)} · ${cue.text}`}
+                  style={{ left: `${pct(cue.start)}%`, width: `${Math.max(0.2, pct(cue.end) - pct(cue.start))}%` }}
+                  onClick={() => seek(cue.start)}>{cue.text}</button>)
+                  : hasSource && (listening !== null
+                    ? <span className="lane-empty" role="status"><LoaderCircle size={13} className="spin" /> Listening to the video… {Math.round(listening * 100)}%</span>
+                    : <button className="lane-empty" disabled={disabled} onClick={() => void listenToVideo()}><AudioLines size={13} />
+                      {transcript.length ? 'No speech in this part' : 'Show captions here'}</button>)}
+              </div>
+              <div className="lane music-lane">
+                {musicMarks.length ? musicMarks.filter(mark => pct(mark.end) > pct(mark.start)).map(mark =>
+                  <button key={mark.key} data-clip-id={mark.clip.id} className={`music-mark${mark.own ? ' own' : ''}${mark.clip.id === selectedId ? ' selected' : ''}`}
+                    disabled={disabled} style={{ left: `${pct(mark.start)}%`, width: `${pct(mark.end) - pct(mark.start)}%`, '--clip-color': clipColor(mark.clip.id) } as CSSProperties}
+                    title={`${clipName(mark.clip)} · ${mark.name} · ${mark.own ? 'music for this clip' : 'music for all clips'}`}
+                    onClick={() => { selectClip(mark.clip); togglePanel('music') }}>
+                    {mark.first && <><Music2 size={11} /> {mark.name}</>}
+                  </button>)
+                : activeMusic && musicPath ? <>
+                  <Waveform className="music-lane-wave" readOnly path={musicPath} duration={0} position={0} inPoint={0} onInPoint={() => {}} />
+                  <button className="lane-tag" onClick={() => togglePanel('music')}><Music2 size={12} /> {musicTrack ? musicTrackName(musicTrack) : 'Music'} · {activeMusic.volume}%</button>
+                </> : hasSource && <button className="lane-empty" disabled={disabled} onClick={() => togglePanel('music')}><Plus size={13} /> Add music</button>}
+              </div>
+              {source && <AccessibleScrubber duration={duration} seek={seek} />}
             </div>
-            {clips.length > 0 && <div className="clip-strip" aria-label="Saved clip ranges">
-              {clips.flatMap((clip, index) => clipSegments(clip).map((segment, part) => ({ clip, index, segment, part })))
-                .filter(({ segment }) => segment.end > visibleTime.start && segment.start < visibleTime.end)
-                .map(({ clip, index, segment, part }) => <button key={`${clip.id}-${part}`} className={clip.id === selectedId ? 'selected' : ''}
-                  title={`Clip ${index + 1}${part ? ` · cut ${part + 1}` : ''} · ${stamp(segment.start, true)} – ${stamp(segment.end, true)}`}
-                  aria-label={`Select clip ${index + 1}${part ? `, part ${part + 1}` : ''} on timeline`} disabled={disabled}
-                  aria-pressed={clip.id === selectedId}
-                  style={{ left: `${pct(segment.start)}%`, width: `${pct(segment.end) - pct(segment.start)}%`, backgroundColor: clipColor(clip.id) }}
-                  onClick={() => selectClip(clip)} />)}
-            </div>}
-            {source && <AccessibleScrubber duration={duration} seek={seek} />}
           </div>
-          {timelineZoom > 1 && <div ref={timelineScroll} className="timeline-pan" tabIndex={0} aria-label="Scroll timeline"
+          {timelineZoom > 1 && <div ref={timelineScroll} className="timeline-pan" data-scrollbar="always" tabIndex={0} aria-label="Scroll timeline"
             onScroll={event => {
               const bar = event.currentTarget
               const travel = bar.scrollWidth - bar.clientWidth
@@ -2742,19 +3264,36 @@ export function App() {
             <button className="button outline small" disabled={disabled || reviewIndex === sections.length - 1} onClick={() => reviewSection(sections, reviewIndex === null ? 0 : reviewIndex + 1)}>Next</button>
             <button className="text-button" disabled={disabled} onClick={() => { setSections([]); setReviewIndex(null) }}>Clear marks</button>
           </div>}
+          <footer className="timeline-status" role="status">
+            <span aria-hidden="true" className={`status-dot ${backgroundStatus ? 'active' : notice ? 'error' : ''}`} />
+            <span className={`status-text${notice && !backgroundStatus ? ' error' : ''}`} title={status}>{backgroundStatus || notice || editStatus || hint}</span>
+            {notice && !backgroundStatus && <button className="icon-button compact" aria-label="Dismiss message" onClick={() => setNotice('')}><X size={13} /></button>}
+          </footer>
         </section>
       </main>
 
-      <footer className="statusbar">
-        <div className="status-left" role="status"><span aria-hidden="true" className={`status-dot ${backgroundStatus ? 'active' : notice ? 'error' : ''}`} />
-          <span className="status-text" title={status}>{status}</span>
-        </div>
-        <button className="text-button footer-shortcuts" onClick={() => setShortcuts(true)}><Keyboard size={15} /> Shortcuts</button>
-      </footer>
-      {shortcuts && <div className="dialog-backdrop" onClick={() => setShortcuts(false)}>
-        <section className="shortcut-dialog panel" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" onClick={event => event.stopPropagation()}>
-          <div className="section-title"><h2>Keyboard shortcuts</h2><button autoFocus className="icon-button" aria-label="Close shortcuts" onClick={() => setShortcuts(false)}><X size={18} /></button></div>
-          <dl>{[['Open video', 'Ctrl O'], ['Play / pause', 'Space'], ['Zoom in', 'Ctrl + scroll up / Ctrl +'], ['Zoom out', 'Ctrl + scroll down / Ctrl -'], ['Pan timeline', 'Shift scroll / sideways scroll'], ['Fit timeline', 'Ctrl 0'], ['Seek 1 second', '← / →'], ['Seek 5 seconds', 'Shift ← / →'], ['Mark In', 'I'], ['Mark Out', 'O'], ['Add clip', 'Enter'], ['Undo', 'Ctrl Z'], ['Redo', 'Ctrl Shift Z']].map(([label, key]) =>
+      <ContextMenu menu={contextMenu} onClose={closeContextMenu} />
+      <CommandPalette open={paletteOpen} commands={commands} onClose={() => setPaletteOpen(false)} />
+      <ExportDialog open={exportOpen} items={exportItems} checked={checkedExports} aspect={activeFormat.aspect}
+        selectedId={selectedClip?.id ?? null} format={draftFormat} quality={draftQuality} folder={exportFolder}
+        fileNameParts={preferences.fileNameParts} running={busy} canceling={cancelingExport} summary={summary ?? null}
+        onClose={() => setExportOpen(false)}
+        onToggle={id => setExportChecked(() => {
+          const next = new Set(checkedExports)
+          if (next.has(id)) next.delete(id)
+          else next.add(id)
+          return next
+        })}
+        onCheckAll={ids => setExportChecked(new Set(ids))}
+        onFormat={setFormat} onQuality={setQuality}
+        onChangeFolder={() => void chooseExportFolder()} onExport={startExport} onCancel={cancelExport}
+        onShowFolder={() => void invoke('open_export_folder').catch(error => setNotice(message(error)))}
+        onAddCaptions={addCaptionsFor} />
+      {shortcuts && <div className="modal-backdrop" onClick={() => setShortcuts(false)}>
+        <section className="shortcut-dialog" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" onClick={event => event.stopPropagation()}
+          onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); setShortcuts(false) } }}>
+          <div className="section-title"><h2 className="display-title">Keyboard shortcuts</h2><button autoFocus className="icon-button" aria-label="Close shortcuts" onClick={() => setShortcuts(false)}><X size={18} /></button></div>
+          <dl>{SHORTCUTS.map(([label, key]) =>
             <div key={label}><dt>{label}</dt><dd><Key>{key}</Key></dd></div>)}</dl>
         </section>
       </div>}

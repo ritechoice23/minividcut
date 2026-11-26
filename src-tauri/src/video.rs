@@ -7,7 +7,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::{
@@ -141,7 +141,7 @@ impl Quality {
                 "-c:v",
                 "libx265",
                 "-preset",
-                "fast",
+                "veryfast",
                 "-crf",
                 "24",
                 "-tag:v",
@@ -925,6 +925,69 @@ fn thumbnail_batch(path: &Path, times: &[f64]) -> Vec<String> {
     results
 }
 
+const PEAK_RATE: u32 = 8000;
+const MAX_PEAKS: usize = 4000;
+
+/// Folds 16-bit mono samples into `count` loudness buckets, scaled so the
+/// loudest bucket is 255. Silent audio stays flat instead of being boosted.
+fn peak_buckets(mut samples: impl Read, total: u64, count: usize) -> std::io::Result<Vec<u8>> {
+    let mut peaks = vec![0f32; count];
+    let mut chunk = [0u8; 16384];
+    let mut carry: Option<u8> = None;
+    let mut index = 0u64;
+    loop {
+        let read = samples.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        let mut bytes = chunk[..read].iter().copied();
+        while let Some(low) = carry.take().or_else(|| bytes.next()) {
+            let Some(high) = bytes.next() else {
+                carry = Some(low);
+                break;
+            };
+            let value = f32::from(i16::from_le_bytes([low, high]).unsigned_abs()) / 32768.0;
+            let bucket = ((index * count as u64) / total.max(1)).min(count as u64 - 1) as usize;
+            peaks[bucket] = peaks[bucket].max(value);
+            index += 1;
+        }
+    }
+    let loudest = peaks.iter().copied().fold(0.02, f32::max);
+    Ok(peaks
+        .into_iter()
+        .map(|peak| (peak / loudest * 255.0).round() as u8)
+        .collect())
+}
+
+/// Loudness over time for the timeline's sound lane: one byte per bucket,
+/// or nothing when the video has no audio.
+#[tauri::command]
+pub async fn audio_peaks(path: PathBuf, duration: f64, count: usize) -> Result<Vec<u8>> {
+    background(move || {
+        let path = source(&path)?;
+        if !duration.is_finite() || duration < MIN_CLIP || count == 0 || count > MAX_PEAKS {
+            return Err("Invalid waveform request.".into());
+        }
+        let mut cmd = ffmpeg();
+        input(&mut cmd, &path)
+            .args(["-vn", "-ac", "1", "-ar"])
+            .arg(PEAK_RATE.to_string())
+            .args(["-f", "s16le", "pipe:1"]);
+        let mut child = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| launch_error("ffmpeg", error))?;
+        let stdout = child.stdout.take().expect("FFmpeg stdout was piped");
+        let total = (duration * f64::from(PEAK_RATE)) as u64;
+        let peaks = peak_buckets(BufReader::new(stdout), total, count);
+        let _ = child.wait();
+        let peaks = peaks.map_err(|error| error.to_string())?;
+        Ok(if peaks.iter().all(|peak| *peak == 0) { Vec::new() } else { peaks })
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn clip_thumbnails(path: PathBuf, starts: Vec<f64>) -> Result<Vec<String>> {
     background(move || {
@@ -1207,6 +1270,17 @@ fn encode_clip(
     )
 }
 
+/// CPU threads each export job may use when several run side by side.
+#[cfg(test)]
+const DEFAULT_JOB_THREADS: usize = 2;
+
+/// Splits the machine between parallel jobs so a lone clip gets every core
+/// while a big batch still keeps each worker busy without oversubscribing.
+fn threads_per_job(cpus: usize, workers: usize) -> usize {
+    (cpus / workers.max(1)).clamp(1, 16)
+}
+
+#[cfg(test)]
 fn encode_with(
     path: &Path,
     clip: Clip,
@@ -1219,7 +1293,54 @@ fn encode_with(
     cancel: &AtomicBool,
     on_progress: impl Fn(f64),
 ) -> Result<()> {
+    encode_with_threads(
+        path,
+        clip,
+        filter,
+        encoder,
+        destination,
+        captions,
+        music,
+        assembly,
+        cancel,
+        DEFAULT_JOB_THREADS,
+        on_progress,
+    )
+}
+
+fn encode_with_threads(
+    path: &Path,
+    clip: Clip,
+    filter: &str,
+    encoder: &[&str],
+    destination: &Path,
+    captions: CaptionLayers<'_>,
+    music: Option<&MusicMix>,
+    assembly: Option<(&Assembly, Option<&str>)>,
+    cancel: &AtomicBool,
+    threads: usize,
+    on_progress: impl Fn(f64),
+) -> Result<()> {
     check_export(cancel)?;
+    let threads = threads.max(1);
+    // Decoding and filtering stop scaling past a few threads; the encoder
+    // takes whatever the job was given.
+    let side_threads = threads.min(4).to_string();
+    let encoder: Vec<String> = encoder
+        .iter()
+        .enumerate()
+        .map(|(index, arg)| {
+            if index > 0 && encoder[index - 1] == "-x265-params" {
+                if threads <= 2 {
+                    format!("pools={threads}:frame-threads=1:log-level=error")
+                } else {
+                    format!("pools={threads}:log-level=error")
+                }
+            } else {
+                (*arg).to_owned()
+            }
+        })
+        .collect();
     let mut cmd = ffmpeg();
     let duration = clip.end - clip.start;
     // Use a fixed relative filename so Windows drive letters and user paths
@@ -1254,9 +1375,9 @@ fn encode_with(
     let read_log = log.try_clone().map_err(|error| error.to_string())?;
     cmd.args([
         "-filter_threads",
-        "1",
+        &side_threads,
         "-threads:v",
-        "1",
+        &side_threads,
         "-ss",
         &format!("{:.6}", clip.start),
     ]);
@@ -1324,7 +1445,7 @@ fn encode_with(
     if !graph.is_empty() {
         cmd.args([
             "-filter_complex_threads",
-            "1",
+            &side_threads,
             "-filter_complex",
             &graph.join(";"),
         ]);
@@ -1361,12 +1482,12 @@ fn encode_with(
         "-map_chapters",
         "-1",
     ])
-    .args(encoder)
+    .args(&encoder)
     .args([
         "-threads:v",
-        "2",
+        &threads.to_string(),
         "-pix_fmt",
-        encoder_pixel_format(encoder[1]),
+        encoder_pixel_format(&encoder[1]),
         "-c:a",
         "aac",
         "-b:a",
@@ -1578,6 +1699,10 @@ fn encode_batch(
             .clone()
     };
     let mut results = vec![None; clips.len()];
+    let job_threads = threads_per_job(
+        std::thread::available_parallelism().map_or(1, usize::from),
+        workers,
+    );
     export_batch::run(
         clips.len(),
         workers,
@@ -1618,7 +1743,7 @@ fn encode_batch(
             };
             let furthest = std::cell::Cell::new(0.0_f64);
             let encoder = encode_with_fallback(&hardware, options.quality.args(), |args| {
-                encode_with(
+                encode_with_threads(
                     &main_path,
                     main_range,
                     &filter,
@@ -1628,6 +1753,7 @@ fn encode_batch(
                     media.music.as_ref(),
                     media.assembly.as_ref().map(|assembly| (assembly, None)),
                     cancel,
+                    job_threads,
                     |fraction| {
                         if fraction > furthest.get() {
                             furthest.set(fraction);
@@ -2239,6 +2365,30 @@ mod tests {
         );
         assert_eq!(export_name(Some("NUL.mp4"), "Video", 3), "_NUL");
         assert_eq!(export_name(Some("..."), "Video", 3), "Video - Clip 04");
+    }
+
+    #[test]
+    fn jobs_share_the_cpu_without_oversubscribing() {
+        assert_eq!(threads_per_job(12, 1), 12);
+        assert_eq!(threads_per_job(12, 5), 2);
+        assert_eq!(threads_per_job(4, 2), 2);
+        assert_eq!(threads_per_job(2, 5), 1);
+        assert_eq!(threads_per_job(64, 1), 16);
+    }
+
+    #[test]
+    fn peak_buckets_follow_loudness_over_time() {
+        let mut bytes = Vec::new();
+        for sample in [0i16, 0, 16384, -16384, 32767, 0, 0, 0] {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        let peaks = peak_buckets(std::io::Cursor::new(bytes), 8, 4).unwrap();
+        assert_eq!(peaks.len(), 4);
+        assert_eq!(peaks[0], 0);
+        assert_eq!(peaks[2], 255);
+        assert!(peaks[1] > 100 && peaks[1] < 160);
+        let silent = peak_buckets(std::io::Cursor::new(vec![0u8; 16]), 8, 4).unwrap();
+        assert!(silent.iter().all(|peak| *peak == 0));
     }
 
     #[test]

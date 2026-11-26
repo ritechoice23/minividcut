@@ -62,7 +62,7 @@ export function createPendingInstall(storage: KeyStorage) {
 export function updateIndicatorLabel(status: UpdateStatus): string | null {
   switch (status.phase) {
     case 'downloading': return status.percent !== null ? `Downloading ${status.percent}%` : 'Downloading…'
-    case 'ready': return 'Restart to update'
+    case 'ready': return 'Update ready'
     case 'installing': return 'Installing…'
     case 'error': return 'Update failed · Retry'
     default: return null

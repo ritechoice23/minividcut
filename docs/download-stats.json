@@ -1,8 +1,12 @@
 {
-  "installerDownloads": 28,
-  "assetDownloads": 66,
-  "installerAssets": 10,
+  "installerDownloads": 34,
+  "assetDownloads": 98,
+  "installerAssets": 11,
   "releases": [
+    {
+      "tag": "v1.9.0",
+      "installerDownloads": 6
+    },
     {
       "tag": "v1.8.0",
       "installerDownloads": 2
@@ -48,5 +52,5 @@
       "installerDownloads": 0
     }
   ],
-  "updatedAt": "2026-11-26T17:04:54.101Z"
+  "updatedAt": "2026-11-27T16:49:41.906Z"
 }

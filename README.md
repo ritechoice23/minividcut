@@ -1,45 +1,41 @@
 # MiniVidCut
 
-![MiniVidCut video editor](docs/thumbnail.png)
+![MiniVidCut editing a video: captions and clips beside the player, and the timeline below](docs/thumbnail.png)
 
 **Turn long videos into shorts with less editing.**
 
-Tell **Smart Split** what you’re looking for, like “the funniest moments under 30 seconds.” AI searches the transcript and suggests clips you can preview and trim. Add automatic captions, editable titles, and text overlays you can size and position by hand, then export your picks together in vertical or landscape format.
+Describe the clips you want, like “the funniest moments under 30 seconds,” and **Smart Split** finds them in your video’s transcript. Preview each suggestion, add captions and titles, then export vertical or landscape shorts.
 
-The AI runs on your PC after you download the models you need. Your videos stay on your device.
+[![Download for Windows x64](https://img.shields.io/badge/Download-Windows%20x64-cefa72?style=for-the-badge&labelColor=101010)](https://github.com/ritechoice23/minividcut/releases/latest)
 
-Already use Claude Code, Codex or OpenCode? Choose one in **Settings → AI** and Smart Split and clip titles use it instead of the on-device model. Click **Sign in** and finish in your browser. Only the transcript text is sent to that assistant, never your video or audio, and MiniVidCut never sees your sign-in. Usage counts toward your own plan or API key.
+Installers are currently unsigned, so Windows SmartScreen may warn on download. Choose **More info → Run anyway**. Installed copies update themselves in the background and ask before restarting.
 
-[![Total installer downloads](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fritechoice23%2Fminividcut%2Fmain%2Fdocs%2Fdownload-stats.json&query=%24.installerDownloads&label=downloads&color=blue)](https://github.com/ritechoice23/minividcut/releases)
+## What you can do
 
-[↗](https://github.com/ritechoice23/minividcut/releases/latest) **Download for Windows x64**
+- **Find clips by describing them.** Pick a quick search such as key takeaways, funny moments or tips, or type your own. Suggestions are ranked, each with a short reason, and appear on the timeline so you can preview them before adding.
+- **Add captions that look right.** Automatic captions, editable word by word, in six looks (Classic, Highlight, Boxed, Word by word, Bold, Serif) with your choice of position, size, font and outline. Apply one look to every clip.
+- **Name clips automatically.** Titles are written from what is said in each clip, and you can edit any of them.
+- **Finish each clip.** Add up to 50 text blocks, import your own music with its own volume, start point and fades, and add an intro or outro. Reframe the picture to fill or fit.
+- **Export in bulk.** Save every clip in one go as vertical 9:16 or landscape 16:9, at compact, compatible or lossless quality.
 
-Installed copies check for new releases on launch, download them in the background while you keep editing, then ask before restarting to install. [↗](docs/in-app-updates.md) **How in-app updates work**
+## A closer look
 
-Set a default export folder once under Settings → Configuration so exports save there without asking every time.
+**Find clips.** Search by what you want, set a maximum length, and review suggestions next to the player.
 
-[↗](docs/download-statistics.md) **How downloads are counted**
+![Smart Split showing three suggested moments with reasons, and their positions on the timeline](docs/screenshots/smart-split.png)
 
-Installers are currently unsigned, so Windows SmartScreen may warn on download. [↗](docs/windows-code-signing.md) **How code signing is configured**
+**Style captions.** Choose a look, then adjust placement, size and outline. The caption in the preview updates as you go.
+
+![The Style tab with looks, placement, text and outline controls beside a vertical preview](docs/screenshots/caption-style.png)
+
+**Use the AI you already have.** Clips and titles are found on your PC by default. If you already use Claude Code, Codex or OpenCode, choose it in **Settings → AI** and click **Sign in**.
+
+![Settings → AI with this device, Claude Code, Codex and OpenCode as choices](docs/screenshots/settings-ai.png)
+
+## Private by default
+
+Your videos never leave your PC. Speech recognition and the default clip finder run on your computer after a one-time model download. If you choose an assistant in Settings, only the transcript text is sent to it, never your video or audio, and MiniVidCut never sees your sign-in. Usage counts toward your own plan or API key.
+
+---
 
 Built by [↗](https://github.com/ritechoice23) **Daramola Babatunde**. [↗](LICENSE) **MIT license**
-
-## MiniVidCut in action
-
-**Find and save clips with Smart Split.** Review AI suggestions next to the player and see your saved clips on the timeline.
-
-![MiniVidCut with Smart Split suggestions, two saved clips, and a captioned player above the timeline](docs/screenshots/smart-split.png)
-
-**Edit captions in the preview.** Fine-tune the words and timing while you review suggested moments.
-
-![Smart Split and the caption editor open alongside the video preview and timeline](docs/screenshots/caption-editor.png)
-
-**Style captions for vertical video.** Highlight words as they’re spoken and apply the same style across clips.
-
-![Vertical video preview with word highlighting, caption style controls, and the timeline](docs/screenshots/portrait-captions.png)
-
-**Put text exactly where you want it.** Open the Text panel for a clip and add up to 50 separate text blocks. Each one has its own words (up to 4,000 characters), size, font, colour and position — select a block to edit it, then drag just that block on the preview or type exact X/Y percentages. See every text you have added in one list, jump to its clip, and apply a block to all clips at the same position. Only the clips you choose get text, and it is burned into the exported video in either format.
-
-**Keep your own music.** Import a local track into a personal library that still works after you move the original file, then set its volume, start point and fades for the whole project or a single clip.
-
-Demo visuals from [↗](https://svs.gsfc.nasa.gov/4619/) **NASA’s Scientific Visualization Studio**, with added narration.

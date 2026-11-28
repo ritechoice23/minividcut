@@ -63,7 +63,7 @@ function StyleNumber({ label, unit, value, min, max, presets, onChange }: {
 }
 
 const STYLE_OPTIONS = {
-  preset: { classic: 'Classic', boxed: 'Soft box', serif: 'Editorial serif' },
+  preset: { classic: 'Outline only', boxed: 'Soft box', serif: 'Serif' },
   mode: { phrase: 'Phrase', highlight: 'Highlight', word: 'Word by word' },
   case: { original: 'Original', lower: 'lowercase', upper: 'UPPERCASE', title: 'Title Case', sentence: 'Sentence case' },
 }
@@ -151,7 +151,7 @@ export const CaptionEditor = memo(function CaptionEditor({
 export function CaptionStylePanel({ style, format, editing, canApplyStyle, onStyle, onApplyStyle, onClose, embedded = false }: {
   style: CaptionStyle; format: CaptionFormat; editing: boolean; canApplyStyle: boolean
   onStyle: (style: CaptionStyle) => void; onApplyStyle: (style: CaptionStyle) => boolean; onClose: () => void
-  /** Rendered inside the Captions panel under "More options", without its own frame. */
+  /** Rendered inside the Style tab of the Captions panel, without its own frame. */
   embedded?: boolean
 }) {
   const restyle = (changes: Partial<CaptionStyle>) => onStyle({ ...style, ...changes })
@@ -167,7 +167,7 @@ export function CaptionStylePanel({ style, format, editing, canApplyStyle, onSty
           <button className="icon-button compact" aria-label="Close caption style" onClick={() => onClose()}><X size={17} /></button>
         </header>
         <fieldset className="caption-style" disabled={editing} aria-label="Caption appearance">
-        <label>Display<select value={style.mode ?? 'phrase'}
+        <label>Show words<select aria-label="How words appear" value={style.mode ?? 'phrase'}
           onChange={event => restyle({ mode: event.target.value as CaptionStyle['mode'] })}>
           {Object.entries(STYLE_OPTIONS.mode).map(([value, title]) => <option key={value} value={value}>{title}</option>)}
         </select></label>
@@ -175,13 +175,13 @@ export function CaptionStylePanel({ style, format, editing, canApplyStyle, onSty
           onChange={event => restyle({ font: event.target.value as CaptionStyle['font'] })}>
           {CAPTION_FONTS.map(font => <option key={font}>{font}</option>)}
         </select></label>
-        <label>Finish<select aria-label="Finish" value={style.preset} onChange={event => {
+        <label>Background<select aria-label="Caption background" value={style.preset} onChange={event => {
           const preset = event.target.value as CaptionStyle['preset']
           restyle({ preset, font: preset === 'serif' ? 'Georgia' : style.font })
         }}>
           {Object.entries(STYLE_OPTIONS.preset).map(([value, title]) => <option key={value} value={value}>{title}</option>)}
         </select></label>
-        <label>Case<select aria-label="Capitalization" value={style.case ?? 'original'}
+        <label>Letter case<select aria-label="Capitalization" value={style.case ?? 'original'}
           onChange={event => restyle({ case: event.target.value as CaptionStyle['case'] })}>
           {Object.entries(STYLE_OPTIONS.case).map(([value, title]) => <option key={value} value={value}>{title}</option>)}
         </select></label>
@@ -193,11 +193,11 @@ export function CaptionStylePanel({ style, format, editing, canApplyStyle, onSty
         {!embedded && <StyleNumber label="Text size" unit="%" min={55} max={200}
           value={Math.round((style.scale ?? (style.size === 'small' ? 0.81 : style.size === 'large' ? 1.25 : 1)) * 100)}
           presets={[75, 90, 100, 110, 125, 150, 175, 200]} onChange={scale => restyle({ scale: scale / 100 })} />}
-        <StyleNumber label="Stroke width" unit="%" min={0} max={30}
+        <StyleNumber label="Outline width" unit="%" min={0} max={30}
           value={captionStroke(style)} presets={[0, 2, 4, 6, 8, 11, 15, 20, 25, 30]} onChange={stroke => restyle({ stroke })} />
-        {style.mode === 'highlight' && <label>Highlight<input type="color" aria-label="Highlight color"
+        {style.mode === 'highlight' && <label>Highlight color<input type="color" aria-label="Highlight color"
           value={style.accent ?? CAPTION_ACCENT} onChange={event => restyle({ accent: event.target.value })} /></label>}
-        <label>Stroke color<input type="color" aria-label="Stroke color" value={style.strokeColor ?? CAPTION_STROKE}
+        <label>Outline color<input type="color" aria-label="Outline color" value={style.strokeColor ?? CAPTION_STROKE}
           onChange={event => restyle({ strokeColor: event.target.value })} /></label>
         </fieldset>
         <footer className="caption-style-footer" hidden={embedded}>

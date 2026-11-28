@@ -104,7 +104,7 @@ export function buildAgentPrompt({ cues, request, limit, count }: {
     '',
     `Return at most ${count} clips, best first. A clip is a run of consecutive transcript lines: "start" is the line number of its first line and "end" is the line number of its last line (inclusive).`,
     'Rules:',
-    `- From the start time of the first line to the end time of the last line, a clip must last at most ${limit} seconds. Use the time the thought needs, never more.`,
+    `- From the start time of the first line to the end time of the last line, a clip must last at most ${limit} seconds, and should use most of it: aim for ${Math.round(limit * 0.7)} to ${limit} seconds. Go shorter only when the thought is complete and nothing next to it belongs with it.`,
     '- Start and end on a complete thought, never mid-sentence. The clip must make sense on its own.',
     '- Clips must not overlap.',
     '- Skip greetings, sponsor reads, calls to subscribe, and filler.',
@@ -173,7 +173,49 @@ export function parseAgentClips(raw: string, cues: readonly CaptionCue[], limit:
       score: typeof score === 'number' && Number.isFinite(score) ? score : 0,
     })
   }
-  return pickBest(moments, count)
+  return fillMoments(pickBest(moments, count), cues, limit)
+}
+
+const SENTENCE_END = /[.!?…]["'”’)]?$/
+
+/**
+ * Grows clips that came back much shorter than the length the user chose, using
+ * the speech right beside them, so a clip lands close to the chosen duration. A
+ * clip never grows past the limit, across a long pause, or into a neighbouring
+ * clip, and prefers to end on a finished sentence.
+ */
+export function fillMoments(moments: readonly Moment[], cues: readonly CaptionCue[], limit: number): Moment[] {
+  const pause = Math.min(Math.max(2.5, limit * 0.25), 10)
+  const ordered = [...moments].sort((a, b) => a.start - b.start)
+  // In time order, so each clip respects how far its earlier neighbour really grew.
+  const grown: Moment[] = []
+  ordered.forEach((moment, index) => {
+    let first = cues.findIndex(cue => cue.start === moment.start)
+    let last = cues.findIndex(cue => cue.end === moment.end)
+    if (first < 0 || last < first) {
+      grown.push(moment)
+      return
+    }
+    const lower = index > 0 ? grown[index - 1].end : -Infinity
+    const upper = index < ordered.length - 1 ? ordered[index + 1].start : Infinity
+    const span = () => cues[last].end - cues[first].start
+    const fits = (from: number, to: number) =>
+      cues[to].end - cues[from].start <= limit + LENGTH_TOLERANCE && cues[from].start >= lower && cues[to].end <= upper
+    while (last + 1 < cues.length && fits(first, last + 1) && cues[last + 1].start - cues[last].end <= pause) {
+      if (span() >= limit * 0.85 && SENTENCE_END.test(cues[last].text.trim())) break
+      last++
+    }
+    // Prefer to stop at the end of a sentence if that keeps most of the length.
+    let end = last
+    while (end > first && !SENTENCE_END.test(cues[end].text.trim())) end--
+    if (end !== last && SENTENCE_END.test(cues[end].text.trim()) && cues[end].end - cues[first].start >= limit * 0.7) last = end
+    while (first > 0 && span() < limit * 0.6 && fits(first - 1, last) && cues[first].start - cues[first - 1].end <= pause) first--
+    const part = cues.slice(first, last + 1)
+    grown.push({ ...moment, start: part[0].start, end: part[part.length - 1].end, text: part.map(cue => cue.text.trim()).join(' '), cues: [...part] })
+  })
+  // Keep the caller's order, which is the assistant's ranking.
+  const byOriginal = new Map(ordered.map((moment, index) => [moment, grown[index]]))
+  return moments.map(moment => byOriginal.get(moment) ?? moment)
 }
 
 // ------------------------------------------------------------------ titles

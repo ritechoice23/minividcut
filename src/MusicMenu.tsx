@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { Music2, Pause, Play, Trash2, Upload, X } from 'lucide-react'
 import { Waveform } from './Waveform'
+import { PercentInput } from './PercentInput'
 import { DEFAULT_MUSIC_VOLUME, effectiveMusic } from './music'
 import type { KainoCollection, Music, MusicTrack } from './music'
 import { KainoLibrary, MusicLoading } from './KainoLibrary'
@@ -184,10 +185,9 @@ export const MusicMenu = memo(function MusicMenu({ project, clip, disabled, canP
           {!track && <button type="button" className="button outline small music-import-primary" disabled={busy}
             onClick={() => void importFile()}><Upload size={13} /> Import audio file</button>}
         </div>
-        {current && <label>
-          <span className="music-level">Music volume <output>{current.volume}%</output></span>
-          <input aria-label="Music volume" type="range" min={0} max={100} value={current.volume} disabled={busy}
-            onChange={event => onMixChange(target, { ...current, volume: event.target.valueAsNumber })} />
+        {current && <label>Music volume
+          <PercentInput label="Music volume" min={0} max={100} value={Math.round(current.volume)} disabled={busy}
+            onCommit={value => onMixChange(target, { ...current, volume: value })} />
         </label>}
         {current && <div className="music-tuning">
           <label>Start at (seconds)

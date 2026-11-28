@@ -41,13 +41,14 @@ pub(crate) const SIGNED_OUT: &str = "signed-out";
 pub(crate) const CANCELED: &str = "canceled";
 
 /// Sites the app may open on the user's behalf: sign-in and install pages.
-const LINK_HOSTS: [&str; 6] = [
+const LINK_HOSTS: [&str; 7] = [
     "claude.com",
     "claude.ai",
     "anthropic.com",
     "openai.com",
     "chatgpt.com",
     "opencode.ai",
+    "github.com",
 ];
 
 const SYSTEM: &str =
@@ -1133,6 +1134,11 @@ mod tests {
         ));
         assert!(allowed_url("https://auth.openai.com/oauth/authorize?x=1"));
         assert!(allowed_url("https://opencode.ai"));
+        assert!(allowed_url(
+            "https://github.com/ritechoice23/minividcut/releases/latest"
+        ));
+        assert!(!allowed_url("https://github.com.evil.test/x"));
+        assert!(!allowed_url("https://notgithub.com/x"));
         assert!(!allowed_url("http://claude.com/"));
         assert!(!allowed_url("https://claude.com.evil.test/"));
         assert!(!allowed_url("https://evil.test/?u=https://claude.com"));

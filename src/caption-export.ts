@@ -5,9 +5,10 @@ import type { CaptionCue, CaptionFormat, CaptionTrack } from './captions'
 import { drawText, textActive, textLayout } from './text-overlay'
 import type { TextLayout, TextOverlay } from './text-overlay'
 
-// Caption PNGs can be large for word-by-word styling. Two in flight keeps the
-// parallel speed-up while bounding peak memory to roughly two overlay budgets.
-const RENDER_CONCURRENCY = 2
+// Caption PNGs can be large for word-by-word styling. Four lanes keep the PNG
+// encoder busy while MAX_ARTWORK_BYTES (and one canvas pair per lane) bounds
+// peak memory.
+const RENDER_CONCURRENCY = 4
 const MAX_ARTWORK_BYTES = 64 * 1024 * 1024
 
 function png(canvas: HTMLCanvasElement) {
@@ -107,30 +108,46 @@ export async function prepareCaptionOverlay(
   paintText(context)
   const images: Blob[] = [await png(canvas)]
   let imageBytes = images[0].size
-  for (let offset = 0; offset < variants.length; offset += RENDER_CONCURRENCY) {
-    if (canceled()) return undefined
-    const batch = variants.slice(offset, offset + RENDER_CONCURRENCY)
-    const rendered = await Promise.all(batch.map(async state => {
-      const sprite = document.createElement('canvas')
-      const spriteInk = ink(sprite)
-      const surface = document.createElement('canvas')
-      surface.width = canvas.width
-      surface.height = canvas.height
-      const surfaceInk = ink(surface)
-      if (!spriteInk || !surfaceInk) throw new Error('Could not render caption artwork.')
-      const layout = layoutFor!(state.cue)
-      renderCaptionSprite(sprite, spriteInk, layout, state, track!.style)
-      surfaceInk.drawImage(sprite, layout.box.x - x, layout.box.y - y)
-      paintText(surfaceInk)
-      return png(surface)
-    }))
-    for (const image of rendered) {
-      imageBytes += image.size
-      if (imageBytes > MAX_ARTWORK_BYTES) throw new Error('Caption artwork is too large. Export a shorter clip.')
-      images.push(image)
+  // A fixed set of render lanes pulls variants from a shared queue. Each lane
+  // owns one pair of canvases for the whole export, so a word-by-word track
+  // with thousands of variants no longer allocates (and garbage-collects) two
+  // fresh canvases per sprite, and a slow PNG encode never idles the others.
+  // toBlob snapshots the bitmap when it is called, so reusing a canvas for the
+  // next variant while the previous blob is still encoding is safe.
+  const rendered: Blob[] = new Array(variants.length)
+  let nextVariant = 0
+  let halted = false
+  const lanes = Array.from({ length: Math.min(RENDER_CONCURRENCY, variants.length) }, async () => {
+    const sprite = document.createElement('canvas')
+    const spriteInk = ink(sprite)
+    const surface = document.createElement('canvas')
+    surface.width = canvas.width
+    surface.height = canvas.height
+    const surfaceInk = ink(surface)
+    if (!spriteInk || !surfaceInk) throw new Error('Could not render caption artwork.')
+    try {
+      while (!halted && !canceled()) {
+        const index = nextVariant++
+        if (index >= variants.length) return
+        const state = variants[index]
+        const layout = layoutFor!(state.cue)
+        renderCaptionSprite(sprite, spriteInk, layout, state, track!.style)
+        surfaceInk.clearRect(0, 0, surface.width, surface.height)
+        surfaceInk.drawImage(sprite, layout.box.x - x, layout.box.y - y)
+        paintText(surfaceInk)
+        const image = await png(surface)
+        imageBytes += image.size
+        if (imageBytes > MAX_ARTWORK_BYTES) throw new Error('Caption artwork is too large. Export a shorter clip.')
+        rendered[index] = image
+      }
+    } catch (error) {
+      halted = true
+      throw error
     }
-  }
+  })
+  await Promise.all(lanes)
   if (canceled()) return undefined
+  images.push(...rendered)
 
   const frames: { at: number; image: number }[] = []
   const durationMs = Math.max(1, Math.round(duration * 1000))

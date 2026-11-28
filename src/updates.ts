@@ -136,3 +136,34 @@ export function parseReleaseNotes(body?: string, limit = 3): string[] {
     .slice(0, limit)
     .map(line => line.length > 110 ? `${line.slice(0, 107)}…` : line)
 }
+
+/** The releases page, for installing by hand when an in-app update cannot finish. */
+export const RELEASES_URL = 'https://github.com/ritechoice23/minividcut/releases/latest'
+
+/**
+ * Turns the updater's technical error into a sentence that says what to do.
+ * `detail` is whatever the updater reported, which is also shown underneath.
+ */
+export function describeUpdateError(detail: string, stage: 'download' | 'install'): string {
+  const text = detail.toLowerCase()
+  if (/signature|verif|minisign|pubkey|public key/.test(text)) {
+    return 'The download didn’t pass its security check. The release files may have changed while this window was open. Try again, or restart MiniVidCut first.'
+  }
+  if (/timed? ?out|timeout|dns|network|connect|offline|error sending request|os error 1006|unreachable|reset by peer/.test(text)) {
+    return 'Couldn’t reach GitHub. Check your connection and try again.'
+  }
+  if (/\b(404|403|410)\b|not found|status code/.test(text)) {
+    return 'The update file isn’t available right now. It may still be uploading, so try again in a few minutes.'
+  }
+  if (/access is denied|permission|in use|being used|os error 5\b|os error 32|elevat/.test(text)) {
+    return stage === 'install'
+      ? 'Windows wouldn’t let the installer replace MiniVidCut. Close other copies of the app and try again, or install the new version by hand.'
+      : 'MiniVidCut couldn’t save the download. Check free disk space and that nothing blocks your temporary folder, then try again.'
+  }
+  if (/no space|disk full|os error 112/.test(text)) {
+    return 'There isn’t enough free disk space for the update. Free some space and try again.'
+  }
+  return stage === 'install'
+    ? 'The update could not be installed. Try again, or install the new version by hand.'
+    : 'The update could not be downloaded. Try again, or download it by hand.'
+}

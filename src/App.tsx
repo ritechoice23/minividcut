@@ -29,6 +29,7 @@ type MomentPick = { index: number | null; confident: boolean }
 import { Settings } from './Settings'
 import type { Section } from './Settings'
 import { AgentSetup } from './AgentSetup'
+import { PercentInput } from './PercentInput'
 import { AGENT_CANCELED, AGENT_SIGNED_OUT, AgentFormatError, agentMessage, agentMeta, buildAgentPrompt, buildTitlePrompt, parseAgentClips, parseAgentTitle, pickBest, windowCues, AGENT_CHUNK_SECONDS } from './agents'
 import { UpdateIndicator, UpdatePrompt } from './UpdatePrompt'
 import { useAppUpdate } from './useAppUpdate'
@@ -50,6 +51,7 @@ import type { Moment } from './moments'
 import { MusicMenu } from './MusicMenu'
 import { Waveform } from './Waveform'
 import { SoundLane } from './SoundLane'
+import { WordsLane } from './WordsLane'
 import { CommandPalette } from './CommandPalette'
 import type { PaletteCommand } from './CommandPalette'
 import { ExportDialog } from './ExportDialog'
@@ -277,7 +279,8 @@ export function App() {
   const [sections, setSections] = useState<Range[]>([])
   const [keptRanges, setKeptRanges] = useState<Range[]>([])
   const [momentsOpen, setMomentsOpen] = useState(false)
-  const [styleDockKey, setStyleDockKey] = useState<string | null>(null)
+  // The Captions panel has two tabs: the words themselves, and how they look.
+  const [captionTab, setCaptionTab] = useState<'captions' | 'style'>('captions')
   // The tools column always shows one panel, chosen from the left rail.
   // The clips list lives in its own column on the right.
   const [panel, setPanelState] = useState<Exclude<Panel, null>>('captions')
@@ -292,6 +295,30 @@ export function App() {
   const [transcriptRevision, setTranscriptRevision] = useState(0)
   const [listening, setListening] = useState<number | null>(null)
   const askInput = useRef<HTMLInputElement>(null)
+  const [findTab, setFindTab] = useState<'find' | 'time'>('find')
+  // Quick searches live in a menu opened from the search box (or by typing /).
+  const [presetMenu, setPresetMenu] = useState(false)
+  const [presetFilter, setPresetFilter] = useState('')
+  const presetMatches = useMemo(() => MOMENT_PRESETS.filter(preset =>
+    !presetFilter || `${preset.label} ${preset.request}`.toLowerCase().includes(presetFilter)), [presetFilter])
+  const choosePreset = (preset: (typeof MOMENT_PRESETS)[number]) => {
+    const input = askInput.current
+    if (input) {
+      input.value = preset.request
+      input.focus()
+      input.setSelectionRange(preset.request.length, preset.request.length)
+    }
+    setPresetMenu(false)
+    setPresetFilter('')
+  }
+  useEffect(() => {
+    if (!presetMenu) return
+    const close = (event: PointerEvent) => {
+      if (!(event.target as Element | null)?.closest?.('.find-ask-wrap')) setPresetMenu(false)
+    }
+    document.addEventListener('pointerdown', close)
+    return () => document.removeEventListener('pointerdown', close)
+  }, [presetMenu])
   useEffect(() => { if (momentsOpen) askInput.current?.focus() }, [momentsOpen])
   const [moments, setMoments] = useState<Moment[]>([])
   const [momentStatus, setMomentStatus] = useState('')
@@ -861,7 +888,6 @@ export function App() {
       setMomentStatus('')
       setMomentsOpen(false)
       setMomentPicks(new Set())
-      setStyleDockKey(null)
       setPanel(current => draft ? null : current)
       setExportOpen(false)
       setExportChecked(null)
@@ -2355,7 +2381,6 @@ export function App() {
   const captionLabel = selectedClip ? selectedClip.title || `Clip ${String(clips.indexOf(selectedClip) + 1).padStart(2, '0')}`
     : reviewed ? `Section ${(reviewIndex ?? 0) + 1}` : 'Current range'
   const showCaptionEditor = captionsOpen && !trimDisabled && canSaveRange
-  const styleDockOpen = showCaptionEditor && styleDockKey === captionKey && Boolean(activeCaptions?.cues.length)
   const togglePanel = (next: Exclude<Panel, null>) => {
     setMomentsOpen(false)
     if (next === 'captions' && panel !== 'captions') {
@@ -2367,10 +2392,6 @@ export function App() {
   // Panels stay put; closing one just returns focus to its rail button.
   const closePanel = (closed: Exclude<Panel, null>) => {
     requestAnimationFrame(() => document.getElementById(`rail-${closed}`)?.focus())
-  }
-  const closeStyleDock = () => {
-    setStyleDockKey(null)
-    requestAnimationFrame(() => document.getElementById('caption-style-trigger')?.focus())
   }
   const backgroundStatus = [
     loading ? 'Opening video…' : preview === 'preparing' ? 'Preparing video preview…' : '',
@@ -2413,17 +2434,33 @@ export function App() {
   }, [preferences.backgroundUpdates, updates])
 
   // Every transcribed word we know about, for the timeline's Words lane.
-  const transcript = useMemo(() => {
+  // The speech engine's own transcript can run to tens of thousands of cues, and
+  // it only changes when more of the video has been heard. Keep it sorted once so
+  // editing a clip (which changes `clips` on every pointer move while dragging an
+  // edge) only has to fold the small, user-edited part into it.
+  const heardCues = useMemo(() => {
     void transcriptRevision
-    const cues = new Map<string, CaptionCue>()
+    void source
+    if (momentCache.current.revision !== sourceRequest.current) return []
+    const heard = new Map<string, CaptionCue>()
+    for (const batch of momentCache.current.batches) {
+      for (const cue of batch.cues) if (cue.text.trim()) heard.set(`${cue.start}:${cue.end}`, cue)
+    }
+    return [...heard.values()].sort((a, b) => a.start - b.start)
+  }, [transcriptRevision, source])
+  const transcript = useMemo(() => {
+    const edited = new Map<string, CaptionCue>()
     const add = (items?: CaptionCue[]) => items?.forEach(cue => {
-      if (cue.text.trim()) cues.set(`${cue.start}:${cue.end}`, cue)
+      if (cue.text.trim()) edited.set(`${cue.start}:${cue.end}`, cue)
     })
-    if (momentCache.current.revision === sourceRequest.current) momentCache.current.batches.forEach(batch => add(batch.cues))
     Object.values(draftCaptions).forEach(track => add(track?.cues))
     clips.forEach(clip => add(clip.captions?.cues))
-    return [...cues.values()].sort((a, b) => a.start - b.start)
-  }, [clips, draftCaptions, transcriptRevision, source])
+    if (!edited.size) return heardCues
+    // Edited captions win over the same words heard by the engine.
+    const merged = heardCues.filter(cue => !edited.has(`${cue.start}:${cue.end}`))
+    merged.push(...edited.values())
+    return merged.sort((a, b) => a.start - b.start)
+  }, [clips, draftCaptions, heardCues])
 
   // Listen to the parts of the video without a transcript so the Words lane
   // can show what is said everywhere. Reuses the Smart Split transcript cache.
@@ -2470,6 +2507,12 @@ export function App() {
     }
   }
 
+  // A stable handle on the latest listenToVideo, so the memoized Words lane is
+  // not re-rendered just because this component rebuilt its closure.
+  const listenToVideoRef = useRef(listenToVideo)
+  listenToVideoRef.current = listenToVideo
+  const listenToVideoStable = useCallback(() => void listenToVideoRef.current(), [])
+
   const momentKey = (moment: Range) => `${moment.start}:${moment.end}`
   const addPickedMoments = () => {
     const picked = moments.filter(moment => momentPicks.has(momentKey(moment))
@@ -2485,6 +2528,12 @@ export function App() {
   // Previous and next saved clips around the selection (or the playhead), shown
   // faded beside the preview so the stack of shorts stays in view.
   const ordered = useMemo(() => [...clips].sort((a, b) => a.start - b.start || a.id - b.id), [clips])
+  // Opening Captions with nothing selected shows the first clip's captions. This runs when
+  // the panel opens or clips first appear, not on every change, so you can still deselect.
+  useEffect(() => {
+    if (panel === 'captions' && selectedId === null && !reviewed && ordered.length && !disabled) selectClip(ordered[0])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [panel, ordered.length > 0])
   const neighborAt = selectedClip ? ordered.indexOf(selectedClip) : ordered.findIndex(clip => clip.start > range.start)
   const previousClip = selectedClip ? ordered[neighborAt - 1] : neighborAt < 0 ? ordered[ordered.length - 1] : ordered[neighborAt - 1]
   const nextClip = selectedClip ? ordered[neighborAt + 1] : neighborAt < 0 ? undefined : ordered[neighborAt]
@@ -2539,7 +2588,6 @@ export function App() {
       own: clip.music !== undefined, name: musicTrackName(music.track),
     }))
   })
-  const visibleWords = transcript.filter(cue => cue.end > visibleTime.start && cue.start < visibleTime.end)
   const hint = hasSource ? 'Drag edges to trim · I / O mark in and out · Space plays · Ctrl K for every action' : 'Open a video to start'
   const canOpenPanels = hasSource && !loading
   const pickedCount = [...momentPicks].filter(key => !clips.some(clip => momentKey(clip) === key)).length
@@ -2802,84 +2850,110 @@ export function App() {
         </nav>
 
         {momentsOpen && hasSource && <section className="find-panel" id="find-panel" aria-label="Find clips" onKeyDown={event => {
-          if (event.key === 'Escape') { event.stopPropagation(); setMomentsOpen(false); askInput.current?.blur() }
+          if (event.key !== 'Escape') return
+          event.stopPropagation()
+          if (presetMenu) { setPresetMenu(false); return }
+          setMomentsOpen(false)
+          askInput.current?.blur()
         }}>
-          <form className="find-ask" role="search" onSubmit={event => {
-            event.preventDefault()
-            requestSearch(askInput.current?.value.trim() || DEFAULT_MOMENT_QUERY)
-          }}>
-            <Sparkles size={16} aria-hidden="true" />
-            <input ref={askInput} name="prompt" maxLength={240} disabled={!hasSource || loading} aria-label="Describe the clips to find"
-              autoComplete="off" defaultValue={momentQuery} placeholder="Find clips… “surprising facts under 30 seconds”" />
-            {momentRunning && <LoaderCircle size={15} className="spin" aria-label="Finding clips" />}
-          </form>
-          {preferences.aiProvider !== 'local' && <p className="find-agent"><Sparkles size={12} aria-hidden="true" /> Picked by {agentMeta(preferences.aiProvider).name}
-            <button type="button" className="link-button" onClick={openAiSettings}>Change</button></p>}
-          {agentIssue && !momentRunning && <div className="agent-fix">
-            <AgentSetup only={agentIssue} preferences={preferences} onPreferences={setPreferences}
-              onDone={() => { setAgentIssue(null); setMomentStatus('Signed in. Run your search again.') }} />
-          </div>}
-          <div className="find-options">
-            <span>Length</span>
-            <div className="seg" role="group" aria-label="Maximum clip length">
-              {[15, 30, 60].map(seconds => <button key={seconds} type="button" aria-pressed={momentLength === seconds} onClick={() => setMomentLength(seconds)}>{seconds}s</button>)}
-              <label className="seg-custom"><input type="number" min={1} max={120} aria-label="Custom maximum seconds" value={momentLength}
-                onChange={event => { const value = event.target.valueAsNumber; if (Number.isFinite(value)) setMomentLength(Math.max(1, Math.min(120, Math.round(value)))) }} />s</label>
-            </div>
-            <span>Count</span>
-            <div className="seg" role="group" aria-label="Number of suggestions">
-              {[3, 5, 10].map(count => <button key={count} type="button" aria-pressed={momentCount === count} onClick={() => setMomentCount(count)}>{count}</button>)}
-              <label className="seg-custom"><input type="number" min={1} max={MAX_CLIPS} aria-label="Custom number of suggestions" value={momentCount}
-                onChange={event => { const value = event.target.valueAsNumber; if (Number.isFinite(value)) setMomentCount(Math.max(1, Math.min(MAX_CLIPS, Math.round(value)))) }} /></label>
-            </div>
-            <button className="button primary small" disabled={momentRunning || loading}
-              onClick={() => requestSearch(askInput.current?.value.trim() || DEFAULT_MOMENT_QUERY)}><Sparkles size={14} /> Find clips</button>
+          <div className="seg wide find-tabs" role="tablist" aria-label="Smart split mode">
+            <button type="button" role="tab" aria-selected={findTab === 'find'} aria-pressed={findTab === 'find'} onClick={() => setFindTab('find')}><Sparkles size={13} /> Find clips</button>
+            <button type="button" role="tab" aria-selected={findTab === 'time'} aria-pressed={findTab === 'time'} onClick={() => setFindTab('time')}><Split size={13} /> Split by time</button>
           </div>
-          <div className="find-presets" role="group" aria-label="Quick searches">
-            {MOMENT_PRESETS.map(preset => <button key={preset.id} type="button" className="find-preset"
-              aria-pressed={momentQuery === preset.request} title={preset.request}
-              disabled={momentRunning || loading}
-              onClick={() => {
-                if (askInput.current) askInput.current.value = preset.request
-                requestSearch(preset.request)
-              }}>{PRESET_ICONS[preset.id]}{preset.label}</button>)}
-          </div>
-          {momentRunning ? <div className="find-progress">
-            <p role="status">{momentStatus}</p>
-            <button className="button outline small" onClick={stopMomentSearch} disabled={momentStopping}>{momentStopping ? 'Stopping…' : 'Stop'}</button>
-            <div className="thin-bar"><i style={{ width: `${Math.round((momentProgress ?? 0) * 100)}%` }} /></div>
-          </div> : momentStatus ? <p className="find-status" role="status">{momentStatus}</p>
-            : !moments.length && <p className="find-status">Describe what you want in plain words, like “the funniest moments” or “key takeaways”. {preferences.aiProvider === 'local'
-              ? <>The transcript is searched on this device. <button type="button" className="link-button" onClick={openAiSettings}>Use Claude Code, Codex or OpenCode instead</button></>
-              : `The transcript text is sent to ${agentMeta(preferences.aiProvider).name} to pick the clips.`}</p>}
-          {moments.length > 0 && <ol className="find-results">{moments.map((moment, index) => {
-            const key = momentKey(moment)
-            const added = clips.some(clip => clip.start === moment.start && clip.end === moment.end)
-            return <li key={key} className={momentPicks.has(key) && !added ? 'picked' : ''}>
-              <input type="checkbox" className="check" checked={added || momentPicks.has(key)} disabled={added}
-                aria-label={`Select suggestion ${index + 1}`} onChange={() => setMomentPicks(current => {
-                  const next = new Set(current)
-                  if (next.has(key)) next.delete(key)
-                  else next.add(key)
-                  return next
-                })} />
-              <span className="find-thumb" style={{ aspectRatio: activeFormat.aspect }}>{clipFrames[moment.start] && <img alt="" src={clipFrames[moment.start]} />}</span>
-              <span className="find-text"><q title={moment.text}>{moment.text}</q>
-                <small>{stamp(moment.start)} · {clipDuration(moment.end - moment.start)} · <button className="link-button" disabled={preview !== 'direct' && preview !== 'proxy'}
-                  onClick={() => previewMoment(moment)}><Play size={11} /> preview</button></small>
-                {moment.reason && <small className="find-reason">{moment.reason}</small>}</span>
-              <span className="find-rank" title="Order the AI ranked this suggestion">{added ? <><Check size={13} /> Added</> : `#${index + 1}`}</span>
-            </li>
-          })}</ol>}
-          {moments.length > 0 && <div className="find-footer">
-            <span>{pickedCount} selected · also shown on the timeline</span>
-            <button className="button outline small" disabled={momentRunning} onClick={clearMoments}>Clear</button>
-            <button className="button primary small" disabled={busy || !pickedCount}
-              onClick={addPickedMoments}>{pickedCount ? `Add ${pickedCount} ${pickedCount === 1 ? 'clip' : 'clips'}` : 'Add clips'}</button>
-          </div>}
-          <div className="find-time">
+          {findTab === 'find' && <>
+            <div className="find-ask-wrap">
+              <form className="find-ask" role="search" onSubmit={event => {
+                event.preventDefault()
+                const text = askInput.current?.value.trim() ?? ''
+                if (text.startsWith('/')) {
+                  if (presetMatches[0]) choosePreset(presetMatches[0])
+                  return
+                }
+                setPresetMenu(false)
+                requestSearch(text || DEFAULT_MOMENT_QUERY)
+              }}>
+                <button type="button" className="find-menu-button" aria-label="Quick searches" aria-haspopup="menu" aria-expanded={presetMenu}
+                  title="Quick searches (or type / in the box)" onClick={() => { setPresetFilter(''); setPresetMenu(open => !open) }}>
+                  {momentRunning ? <LoaderCircle size={15} className="spin" aria-label="Finding clips" /> : <Sparkles size={15} />}
+                </button>
+                <input ref={askInput} name="prompt" maxLength={240} disabled={!hasSource || loading} aria-label="Describe the clips to find"
+                  autoComplete="off" defaultValue={momentQuery} placeholder="Describe the clips, or type / for ideas"
+                  onChange={event => {
+                    const text = event.target.value
+                    if (text.startsWith('/')) { setPresetMenu(true); setPresetFilter(text.slice(1).trim().toLowerCase()) }
+                    else setPresetFilter('')
+                  }} />
+              </form>
+              {presetMenu && <div className="find-menu" role="menu" aria-label="Quick searches">
+                {presetMatches.length ? presetMatches.map(preset => <button key={preset.id} type="button" role="menuitem" disabled={momentRunning || loading}
+                  title={preset.request} onClick={() => choosePreset(preset)}>
+                  {PRESET_ICONS[preset.id]}<span>{preset.label}</span>
+                </button>) : <p className="find-menu-empty">No quick search matches. Press Enter to search for “{presetFilter}” instead.</p>}
+              </div>}
+            </div>
+            {preferences.aiProvider !== 'local' && <p className="find-agent"><Sparkles size={12} aria-hidden="true" /> Picked by {agentMeta(preferences.aiProvider).name}
+              <button type="button" className="link-button" onClick={openAiSettings}>Change</button></p>}
+            {agentIssue && !momentRunning && <div className="agent-fix">
+              <AgentSetup only={agentIssue} preferences={preferences} onPreferences={setPreferences}
+                onDone={() => { setAgentIssue(null); setMomentStatus('Signed in. Run your search again.') }} />
+            </div>}
+            <div className="find-options">
+              <div className="find-row">
+                <span>Length</span>
+                <div className="seg" role="group" aria-label="Maximum clip length">
+                  {[15, 30, 60].map(seconds => <button key={seconds} type="button" aria-pressed={momentLength === seconds} onClick={() => setMomentLength(seconds)}>{seconds}s</button>)}
+                  <label className="seg-custom"><input type="number" min={1} max={120} aria-label="Custom maximum seconds" value={momentLength}
+                    onChange={event => { const value = event.target.valueAsNumber; if (Number.isFinite(value)) setMomentLength(Math.max(1, Math.min(120, Math.round(value)))) }} />s</label>
+                </div>
+              </div>
+              <div className="find-row">
+                <span>Count</span>
+                <div className="seg" role="group" aria-label="Number of suggestions">
+                  {[3, 5, 10].map(count => <button key={count} type="button" aria-pressed={momentCount === count} onClick={() => setMomentCount(count)}>{count}</button>)}
+                  <label className="seg-custom"><input type="number" min={1} max={MAX_CLIPS} aria-label="Custom number of suggestions" value={momentCount}
+                    onChange={event => { const value = event.target.valueAsNumber; if (Number.isFinite(value)) setMomentCount(Math.max(1, Math.min(MAX_CLIPS, Math.round(value)))) }} /></label>
+                </div>
+                <button className="button primary small" disabled={momentRunning || loading}
+                  onClick={() => requestSearch(askInput.current?.value.trim().replace(/^\/.*$/, '') || DEFAULT_MOMENT_QUERY)}><Sparkles size={14} /> Find</button>
+              </div>
+            </div>
+            {momentRunning ? <div className="find-progress">
+              <p role="status">{momentStatus}</p>
+              <button className="button outline small" onClick={stopMomentSearch} disabled={momentStopping}>{momentStopping ? 'Stopping…' : 'Stop'}</button>
+              <div className="thin-bar"><i style={{ width: `${Math.round((momentProgress ?? 0) * 100)}%` }} /></div>
+            </div> : momentStatus ? <p className="find-status" role="status">{momentStatus}</p>
+              : !moments.length && <p className="find-status">Describe what you want in plain words, like “the funniest moments”, or type / for ideas. {preferences.aiProvider === 'local'
+                ? <>The transcript is searched on this device. <button type="button" className="link-button" onClick={openAiSettings}>Use Claude Code, Codex or OpenCode instead</button></>
+                : `The transcript text is sent to ${agentMeta(preferences.aiProvider).name} to pick the clips.`}</p>}
+            {moments.length > 0 && <ol className="find-results">{moments.map((moment, index) => {
+              const key = momentKey(moment)
+              const added = clips.some(clip => clip.start === moment.start && clip.end === moment.end)
+              return <li key={key} className={momentPicks.has(key) && !added ? 'picked' : ''}>
+                <input type="checkbox" className="check" checked={added || momentPicks.has(key)} disabled={added}
+                  aria-label={`Select suggestion ${index + 1}`} onChange={() => setMomentPicks(current => {
+                    const next = new Set(current)
+                    if (next.has(key)) next.delete(key)
+                    else next.add(key)
+                    return next
+                  })} />
+                <span className="find-thumb" style={{ aspectRatio: activeFormat.aspect }}>{clipFrames[moment.start] && <img alt="" src={clipFrames[moment.start]} />}</span>
+                <span className="find-text"><q title={moment.text}>{moment.text}</q>
+                  <small><span className="duration-chip">{clipDuration(moment.end - moment.start)}</span> {stamp(moment.start)} · <button className="link-button" disabled={preview !== 'direct' && preview !== 'proxy'}
+                    onClick={() => previewMoment(moment)}><Play size={11} /> preview</button></small>
+                  {moment.reason && <small className="find-reason">{moment.reason}</small>}</span>
+                <span className="find-rank" title="Order the AI ranked this suggestion">{added ? <><Check size={13} /> Added</> : `#${index + 1}`}</span>
+              </li>
+            })}</ol>}
+            {moments.length > 0 && <div className="find-footer">
+              <span>{pickedCount} selected</span>
+              <button className="button outline small" disabled={momentRunning} onClick={clearMoments}>Clear</button>
+              <button className="button primary small" disabled={busy || !pickedCount}
+                onClick={addPickedMoments}>{pickedCount ? `Add ${pickedCount} ${pickedCount === 1 ? 'clip' : 'clips'}` : 'Add clips'}</button>
+            </div>}
+          </>}
+          {findTab === 'time' && <div className="find-time">
             <div className="find-time-head">
-              <span>Split by time</span>
+              <span>Split the range into equal parts</span>
               <div className="seg split-mode" role="group" aria-label="Split behavior">
                 <button type="button" aria-pressed={splitMode === 'mark'} onClick={() => setSplitMode('mark')}>Mark only</button>
                 <button type="button" aria-pressed={splitMode === 'add'} onClick={() => setSplitMode('add')}>Split &amp; add</button>
@@ -2890,7 +2964,7 @@ export function App() {
               {[15, 30, 60, 120, 300].map(seconds => <button key={seconds} type="button" className="find-preset" disabled={trimDisabled || !canSaveRange || editingCaptionJob}
                 onClick={() => splitParts(splitRange(range, seconds))}><Split size={13} /> {seconds < 60 ? `Every ${seconds}s` : `Every ${seconds / 60} min`}</button>)}
             </div>
-          </div>
+          </div>}
         </section>}
 
         <section className="viewer" aria-label="Video preview">
@@ -3012,7 +3086,7 @@ export function App() {
         {hasSource && <section className="sheet left clips-sheet" id="clips-panel" aria-labelledby="clips-title">
           <header className="sheet-head">
             <div><h2 id="clips-title" className="display-title">Clips</h2>
-              <p>{clips.length} {clips.length === 1 ? 'clip' : 'clips'} · {clipDuration(totalClipSeconds)} total{clips.length > 1 ? ' · drag to reorder export' : ''}</p></div>
+              <p>{clips.length} {clips.length === 1 ? 'clip' : 'clips'} · {clipDuration(totalClipSeconds)} total</p></div>
             <button className="button outline small" disabled={disabled} onClick={() => { setMomentsOpen(true); askInput.current?.focus() }}><Sparkles size={14} /> Find more</button>
           </header>
           {clips.length > 0 && <div className="bulk-actions">
@@ -3091,11 +3165,10 @@ export function App() {
                     {clipFrames[clip.start]
                       ? <img alt="" src={clipFrames[clip.start]} style={{ objectFit: (clipOptions?.framing ?? framing) === 'fill' ? 'cover' : 'contain', objectPosition: `${thumbPosition.x}% ${thumbPosition.y}%` }} />
                       : <Film size={15} />}
-                    <em>{clipDuration(clip.end - clip.start)}</em>
                   </span>
                   <span className="clip-details">
                     <strong>{title}</strong>
-                    <small>{stamp(clip.start)} – {stamp(clip.end)}</small>
+                    <small><span className="duration-chip" style={{ '--clip-color': clipColor(clip.id) } as CSSProperties}>{clipDuration(clip.end - clip.start)}</span> {stamp(clip.start)} – {stamp(clip.end)}</small>
                     <span className="clip-flags">
                       {(() => {
                         const captioned = Boolean(clip.captions?.cues.some(cue => cue.text.trim()))
@@ -3133,7 +3206,7 @@ export function App() {
               </li>
             })}</ol>}
           <footer className="sheet-foot">
-            <span>Click a clip to play it · double-click to rename · F2</span>
+            <span>Double-click a clip to rename</span>
             <button className="button outline small" disabled={!hasSource || loading} onClick={openExport}>Export all {clips.length || ''} <ChevronRight size={14} /></button>
           </footer>
         </section>}
@@ -3145,38 +3218,43 @@ export function App() {
             <div><h2 id="captions-title" className="display-title">Captions</h2><p title={captionLabel}>For “{captionLabel}”</p></div>
             <button className="icon-button compact" aria-label="Close captions" onClick={closeCaptions}><X size={16} /></button>
           </header>
-          {showCaptionEditor ? <div className="sheet-body">
-            {captionStyle && activeCaptions && activeCaptions.cues.length > 0 && !editingCaptionJob && <>
-              <div className="field-label">Look</div>
-              <div className="looks" role="radiogroup" aria-label="Caption look">{CAPTION_LOOKS.map(look =>
-                <button key={look.id} role="radio" aria-checked={currentLook?.id === look.id} className={`look look-${look.id}`}
-                  onClick={() => saveCaptionStyle(applyLook(captionStyle, look))}>{look.label}</button>)}</div>
-              <div className="field-label">Placement</div>
-              <div className="field-row"><span>Position</span>
-                <div className="seg" role="group" aria-label="Caption position">{(['top', 'middle', 'bottom'] as const).map(place =>
-                  <button key={place} aria-pressed={!captionStyle.points?.[format] && captionStyle.position === place}
-                    onClick={() => saveCaptionStyle({ ...captionStyle, position: place, points: { ...captionStyle.points, [format]: undefined } })}>{place[0].toUpperCase() + place.slice(1)}</button>)}</div></div>
-              <label className="field-row"><span>Size</span>
-                <input type="range" min={55} max={200} value={captionScale} aria-label="Caption size"
-                  onChange={event => saveCaptionStyle({ ...captionStyle, scale: event.target.valueAsNumber / 100 })} /></label>
-              <div className="sheet-actions">
-                <button className="button primary" disabled={busy} onClick={() => applyCaptionStyle(captionStyle)}>
-                  <Copy size={14} /> Apply this look to all {clips.length > 1 ? `${clips.length} clips` : 'clips'}</button>
-                <button className="button outline" aria-expanded={styleDockOpen} id="caption-style-trigger"
-                  onClick={() => setStyleDockKey(key => key === captionKey ? null : captionKey)}><SlidersHorizontal size={14} /> {styleDockOpen ? 'Fewer options' : 'More options'}</button>
-              </div>
-              {styleDockOpen && <CaptionStylePanel key={captionKey} embedded style={captionStyle}
-                format={format} editing={editingCaptionJob} canApplyStyle={!busy && !captionsRunning}
-                onStyle={saveCaptionStyle} onApplyStyle={applyCaptionStyle} onClose={closeStyleDock} />}
-              <div className="field-label">Words</div>
-            </>}
-            <CaptionEditor key={captionKey} label={captionLabel} range={range} track={activeCaptions}
-              model={captionModel} progress={captionProgress} status={captionStatus?.key === captionKey || captionStatus?.key === 'batch' ? captionStatus.text : ''}
-              editing={editingCaptionJob} canGenerate={!titleProgress}
-              defaultStyle={sharedCaptionStyle.current ?? undefined}
-              onChange={saveCaptions} onGenerate={generateCaptions} onCancel={cancelCaptions}
-              onSeek={captionSeek} getTime={captionPlayhead} />
-          </div> : <div className="empty-queue">
+          {showCaptionEditor ? <>
+            <div className="seg wide caption-tabs" role="tablist" aria-label="Captions view">
+              <button type="button" role="tab" aria-selected={captionTab === 'captions'} aria-pressed={captionTab === 'captions'} onClick={() => setCaptionTab('captions')}><Subtitles size={13} /> Captions</button>
+              <button type="button" role="tab" aria-selected={captionTab === 'style'} aria-pressed={captionTab === 'style'} onClick={() => setCaptionTab('style')}><SlidersHorizontal size={13} /> Style</button>
+            </div>
+            <div className="sheet-body">
+              {captionTab === 'captions' && <CaptionEditor key={captionKey} label={captionLabel} range={range} track={activeCaptions}
+                model={captionModel} progress={captionProgress} status={captionStatus?.key === captionKey || captionStatus?.key === 'batch' ? captionStatus.text : ''}
+                editing={editingCaptionJob} canGenerate={!titleProgress}
+                defaultStyle={sharedCaptionStyle.current ?? undefined}
+                onChange={saveCaptions} onGenerate={generateCaptions} onCancel={cancelCaptions}
+                onSeek={captionSeek} getTime={captionPlayhead} />}
+              {captionTab === 'style' && (captionStyle && activeCaptions && activeCaptions.cues.length > 0 && !editingCaptionJob ? <>
+                <div className="field-label">Look</div>
+                <div className="looks" role="radiogroup" aria-label="Caption look">{CAPTION_LOOKS.map(look =>
+                  <button key={look.id} role="radio" aria-checked={currentLook?.id === look.id} className={`look look-${look.id}`}
+                    onClick={() => saveCaptionStyle(applyLook(captionStyle, look))}>{look.label}</button>)}</div>
+                <div className="field-label">Placement</div>
+                <div className="field-row"><span>Position</span>
+                  <div className="seg" role="group" aria-label="Caption position">{(['top', 'middle', 'bottom'] as const).map(place =>
+                    <button key={place} aria-pressed={!captionStyle.points?.[format] && captionStyle.position === place}
+                      onClick={() => saveCaptionStyle({ ...captionStyle, position: place, points: { ...captionStyle.points, [format]: undefined } })}>{place[0].toUpperCase() + place.slice(1)}</button>)}</div></div>
+                <label className="field-row"><span>Text size</span>
+                  <PercentInput min={55} max={200} step={5} value={Math.round(captionScale)} label="Caption text size"
+                    onCommit={value => saveCaptionStyle({ ...captionStyle, scale: value / 100 })} /></label>
+                <div className="field-label">Text and outline</div>
+                <CaptionStylePanel key={captionKey} embedded style={captionStyle}
+                  format={format} editing={editingCaptionJob} canApplyStyle={!busy && !captionsRunning}
+                  onStyle={saveCaptionStyle} onApplyStyle={applyCaptionStyle} onClose={() => setCaptionTab('captions')} />
+                <div className="sheet-actions">
+                  <button className="button primary" disabled={busy} onClick={() => applyCaptionStyle(captionStyle)}
+                    title={`Give all ${clips.length > 1 ? `${clips.length} clips` : 'clips'} this look, position and size`}>
+                    <Copy size={14} /> Apply to all clips</button>
+                </div>
+              </> : <p className="sheet-note">{editingCaptionJob ? 'Captions are being generated…' : <>Add captions to this clip first, then style them here. <button type="button" className="link-button" onClick={() => setCaptionTab('captions')}>Go to Captions</button></>}</p>)}
+            </div>
+          </> : <div className="empty-queue">
             <Subtitles size={21} />
             <p>{!hasSource ? 'Open a video to add captions.' : selectedLocked ? 'This clip is locked while it exports.' : 'Select a clip or mark a range to add captions.'}</p>
           </div>}
@@ -3205,9 +3283,9 @@ export function App() {
             <div className="field-label">Position</div>
             {canPosition && positionAxis ? <>
               <label className="field-row"><span>{positionAxis === 'x' ? 'Left ↔ right' : 'Top ↕ bottom'}</span>
-                <input aria-label={positionAxis === 'x' ? 'Horizontal frame position' : 'Vertical frame position'}
-                  type="range" min="0" max="100" value={position[positionAxis]}
-                  onChange={event => setFramePosition({ ...position, [positionAxis]: Number(event.target.value) })} /></label>
+                <PercentInput min={0} max={100} step={1} value={Math.round(position[positionAxis])}
+                  label={positionAxis === 'x' ? 'Horizontal frame position' : 'Vertical frame position'}
+                  onCommit={value => setFramePosition({ ...position, [positionAxis]: value })} /></label>
               <button className="button outline small" onClick={() => setFramePosition(CENTER)}><Move size={14} /> Center picture</button>
               <p className="sheet-note">You can also drag the picture in the preview.</p>
             </> : <p className="sheet-note">The whole picture already fits this frame, so there is nothing to move.</p>}
@@ -3268,15 +3346,21 @@ export function App() {
                 : step === 0 ? '00:00:00' : ''}</span>)}</div>
               <div className="clip-labels">
                 {clips.map((clip, index) => ({ clip, index, part: clipSegments(clip).find(segment => segment.end > visibleTime.start && segment.start < visibleTime.end) }))
-                  .filter(item => item.part).map(({ clip, index, part }) => <button key={clip.id} data-clip-id={clip.id} className={`clip-label${clip.id === selectedId ? ' selected' : ''}`}
-                    disabled={disabled} aria-pressed={clip.id === selectedId} title={`${clipName(clip)} · ${stamp(clip.start, true)} – ${stamp(clip.end, true)}`}
-                    style={{ left: `${pct(Math.max(part!.start, visibleTime.start))}%`, '--clip-color': clipColor(clip.id) } as CSSProperties}
-                    onClick={() => selectClip(clip)}>{String(index + 1).padStart(2, '0')} · {clipName(clip)} · {clipDuration(clip.end - clip.start)}</button>)}
+                  .filter(item => item.part).map(({ clip, index, part }) => {
+                    // The label is exactly as wide as the part of the clip on screen, so it never covers its neighbours.
+                    const left = pct(Math.max(part!.start, visibleTime.start))
+                    const width = pct(Math.min(part!.end, visibleTime.end)) - left
+                    return <button key={clip.id} data-clip-id={clip.id} className={`clip-label${clip.id === selectedId ? ' selected' : ''}`}
+                      disabled={disabled} aria-pressed={clip.id === selectedId} title={`${clipName(clip)} · ${clipDuration(clip.end - clip.start)} · ${stamp(clip.start, true)} – ${stamp(clip.end, true)}`}
+                      style={{ left: `${left}%`, width: `calc(${Math.max(0, width)}% - 2px)`, '--clip-color': clipColor(clip.id) } as CSSProperties}
+                      onClick={() => selectClip(clip)}><span className="clip-label-text">{String(index + 1).padStart(2, '0')} · {clipName(clip)} · {clipDuration(clip.end - clip.start)}</span></button>
+                  })}
                 {moments.filter(moment => moment.end > visibleTime.start && moment.start < visibleTime.end
                   && !clips.some(clip => clip.start === moment.start && clip.end === moment.end)).map(moment =>
                   <button key={momentKey(moment)} className="clip-label ghost" disabled={disabled}
-                    title={`Suggestion · ${moment.text}`} style={{ left: `${pct(Math.max(moment.start, visibleTime.start))}%` }}
-                    onClick={() => previewMoment(moment)}><Sparkles size={11} /> #{moments.indexOf(moment) + 1} · {moment.text}</button>)}
+                    title={`Suggestion · ${moment.text}`}
+                    style={{ left: `${pct(Math.max(moment.start, visibleTime.start))}%`, width: `calc(${Math.max(0, pct(Math.min(moment.end, visibleTime.end)) - pct(Math.max(moment.start, visibleTime.start)))}% - 2px)` }}
+                    onClick={() => previewMoment(moment)}><Sparkles size={11} /><span className="clip-label-text">#{moments.indexOf(moment) + 1} · {moment.text}</span></button>)}
               </div>
               <div className={`track ${hasSource ? 'loaded' : ''} ${grabbingTimeline ? 'grabbing' : ''}`} ref={track}
                 onPointerDown={startTrackDrag} onPointerMove={moveTrackDrag} onPointerUp={finishTrackDrag}
@@ -3344,17 +3428,11 @@ export function App() {
                 {hasSource && <SoundLane peaks={soundPeaks} duration={duration} view={visibleTime} range={range}
                   highlight={Boolean(selectedClip || reviewed || range.start > 0 || range.end < duration)} />}
               </div>
-              <div className="lane words-lane">
-                {visibleWords.length ? visibleWords.map(cue => <button key={`${cue.start}:${cue.end}`} disabled={disabled}
-                  className={`word${cue.start < range.end && cue.end > range.start && (selectedClip || reviewed || range.start > 0 || range.end < duration) ? ' in-range' : ''}`}
-                  title={`${stamp(cue.start, true)} · ${cue.text}`}
-                  style={{ left: `${pct(cue.start)}%`, width: `${Math.max(0.2, pct(cue.end) - pct(cue.start))}%` }}
-                  onClick={() => seek(cue.start)}>{cue.text}</button>)
-                  : hasSource && (listening !== null
-                    ? <span className="lane-empty" role="status"><LoaderCircle size={13} className="spin" /> Listening to the video… {Math.round(listening * 100)}%</span>
-                    : <button className="lane-empty" disabled={disabled} onClick={() => void listenToVideo()}><AudioLines size={13} />
-                      {transcript.length ? 'No speech in this part' : 'Show captions here'}</button>)}
-              </div>
+              <WordsLane cues={transcript} viewStart={visibleTime.start} viewEnd={visibleTime.end}
+                rangeStart={range.start} rangeEnd={range.end}
+                highlight={Boolean(selectedClip || reviewed || range.start > 0 || range.end < duration)}
+                hasSource={hasSource} disabled={disabled} listening={listening}
+                onSeek={seek} onListen={listenToVideoStable} />
               <div className="lane music-lane">
                 {musicMarks.length ? musicMarks.filter(mark => pct(mark.end) > pct(mark.start)).map(mark =>
                   <button key={mark.key} data-clip-id={mark.clip.id} className={`music-mark${mark.own ? ' own' : ''}${mark.clip.id === selectedId ? ' selected' : ''}`}

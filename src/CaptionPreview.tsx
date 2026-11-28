@@ -2,7 +2,7 @@ import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent, RefObject } from 'react'
 import { captionDimensions, captionLayouts, captionPoint, captionSequence, renderCaptionSprite } from './caption-artwork'
 import { captionAt } from './captions'
-import { usePlaybackTime } from './editor-store'
+import { playbackClock, useEditor } from './editor-store'
 import type { CaptionFormat, CaptionState, CaptionStyle, CaptionTrack } from './captions'
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value))
@@ -16,7 +16,6 @@ export function CaptionPreview({ track, format, video, editable, onStyle }: {
   track: CaptionTrack; format: CaptionFormat; video: RefObject<HTMLVideoElement | null>
   editable: boolean; onStyle: (style: CaptionStyle) => void
 }) {
-  const time = usePlaybackTime()
   const canvas = useRef<HTMLCanvasElement>(null)
   const handle = useRef<HTMLDivElement>(null)
   const painting = useRef<CanvasRenderingContext2D | null>(null)
@@ -35,11 +34,10 @@ export function CaptionPreview({ track, format, video, editable, onStyle }: {
     const context = document.createElement('canvas').getContext('2d')
     return context && captionLayouts(context, track.cues, style, format)
   }, [track.cues, style, format])
-  const clock = useRef(time)
-
-  useLayoutEffect(() => {
-    clock.current = time
-  }, [time])
+  // Playback time is read from the store instead of subscribed to as React
+  // state: while playing, frames are painted from requestVideoFrameCallback, so
+  // re-rendering this component on every time tick did nothing but cost work.
+  const clock = useRef(playbackClock.get())
 
   useLayoutEffect(() => {
     painting.current = canvas.current?.getContext('2d') ?? null
@@ -104,10 +102,14 @@ export function CaptionPreview({ track, format, video, editable, onStyle }: {
     }
   }, [states, layoutFor, dimensions, editable, style, video])
 
-  useLayoutEffect(() => {
+  // While paused, a scrub or seek moves the clock without any video frame, so
+  // repaint straight from the store when the time changes.
+  useLayoutEffect(() => useEditor.subscribe((state, previous) => {
+    if (state.time === previous.time) return
+    clock.current = state.time
     const player = video.current
-    if (player?.paused) refreshPreview.current?.(player.readyState > 0 ? player.currentTime : time)
-  }, [time, video])
+    if (player?.paused) refreshPreview.current?.(player.readyState > 0 ? player.currentTime : state.time)
+  }), [video])
 
   const start = (event: PointerEvent<HTMLElement>, direction?: readonly [number, number]) => {
     if (event.button !== 0 || !canvas.current) return

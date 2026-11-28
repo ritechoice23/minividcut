@@ -2,7 +2,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { isTauri } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { check as checkTauri, type Update as TauriUpdate } from '@tauri-apps/plugin-updater'
-import { canStartUpdate, createDownloadTracker, createPendingInstall, formatBytes, parseReleaseNotes, updateReducer,
+import { canStartUpdate, createDownloadTracker, createPendingInstall, describeUpdateError, formatBytes, parseReleaseNotes, updateReducer,
   type UpdateInfo, type UpdateStatus } from './updates'
 
 const SNOOZE_KEY = 'minividcut.update.snoozed'
@@ -41,6 +41,17 @@ export function useAppUpdate(): AppUpdate {
   const busy = useRef(false)
   const failedStage = useRef<'download' | 'install'>('download')
 
+  // A window left open can hold release information from before the release files were
+  // refreshed, so a failed download re-reads it instead of trusting what it fetched at launch.
+  const refreshUpdate = useCallback(async () => {
+    const fresh = await checkTauri({ timeout: 20_000 })
+    if (fresh) {
+      await updateRef.current?.close().catch(() => {})
+      updateRef.current = fresh
+    }
+    return fresh
+  }, [])
+
   const checkForUpdates = useCallback(async (manual = false) => {
     if (busy.current) return
     busy.current = true
@@ -73,19 +84,34 @@ export function useAppUpdate(): AppUpdate {
     failedStage.current = 'download'
     setProgressHidden(background)
     const info = infoFrom(found)
-    const tracker = createDownloadTracker()
-    dispatch({ type: 'download', info, snapshot: tracker.snapshot() })
+    let target = found
+    let lastError: unknown
     try {
       // Download only. The editor stays usable, and installing waits for the
       // user to confirm the restart prompt shown when the download finishes.
-      await found.download(event => dispatch({ type: 'progress', snapshot: tracker.apply(event) }))
-      dispatch({ type: 'ready' })
-    } catch (error) {
-      dispatch({ type: 'error', message: 'The update could not be downloaded. Please try again.', detail: detailFrom(error) })
+      // The first failure re-reads the release information and tries once more.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const tracker = createDownloadTracker()
+        dispatch({ type: 'download', info, snapshot: tracker.snapshot() })
+        try {
+          await target.download(event => dispatch({ type: 'progress', snapshot: tracker.apply(event) }))
+          dispatch({ type: 'ready' })
+          return
+        } catch (error) {
+          lastError = error
+          if (attempt === 0) {
+            const fresh = await refreshUpdate().catch(() => null)
+            if (!fresh) break
+            target = fresh
+          }
+        }
+      }
+      const detail = detailFrom(lastError)
+      dispatch({ type: 'error', message: describeUpdateError(detail, 'download'), detail })
     } finally {
       busy.current = false
     }
-  }, [])
+  }, [refreshUpdate])
 
   const install = useCallback(async () => {
     const found = updateRef.current
@@ -98,7 +124,8 @@ export function useAppUpdate(): AppUpdate {
       // relaunches MiniVidCut on the new version when it finishes.
       await found.install({ restartAfterInstall: true })
     } catch (error) {
-      dispatch({ type: 'error', message: 'The update could not be installed. Please try again.', detail: detailFrom(error) })
+      const detail = detailFrom(error)
+      dispatch({ type: 'error', message: describeUpdateError(detail, 'install'), detail })
     } finally {
       busy.current = false
     }
@@ -107,8 +134,12 @@ export function useAppUpdate(): AppUpdate {
   const retry = useCallback(async () => {
     if (!updateRef.current) await checkForUpdates(true)
     else if (failedStage.current === 'install') await install()
-    else await download()
-  }, [checkForUpdates, install, download])
+    else {
+      // Start from the current release information, not what this window fetched earlier.
+      await refreshUpdate().catch(() => null)
+      await download()
+    }
+  }, [checkForUpdates, install, download, refreshUpdate])
 
   const dismiss = useCallback(() => {
     const found = updateRef.current

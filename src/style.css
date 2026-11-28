@@ -1386,3 +1386,89 @@ button.ask kbd { color: var(--mute); }
 .find-time { display: grid; gap: 8px; margin-top: 6px; padding-top: 10px; border-top: 1px solid var(--hair); }
 .find-time-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--dim); font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; }
 .find-time-head .split-mode { margin: 0; text-transform: none; letter-spacing: 0; }
+
+/* ==== Polish: flat full-width layout, calmer sizes, no crowding ================ */
+.workspace.docked { grid-template-columns: 84px clamp(300px, 23vw, 360px) minmax(0, 1fr) clamp(300px, 23vw, 360px); }
+@media (max-width: 900px) { .workspace.docked { grid-template-columns: 72px 260px minmax(0, 1fr) 260px; } }
+/* The timeline runs edge to edge under the three columns. */
+.workspace.docked .timeline { margin: 0; border: 0; border-top: 1px solid var(--edge); border-radius: 0; }
+
+/* Timeline labels are exactly as wide as their clip, so they never cover a neighbour. */
+.clip-label { max-width: none; min-width: 0; padding: 0 6px; display: flex; }
+.clip-label-text { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clip-label svg { flex: none; }
+
+/* Duration chip: a small coloured pill in front of the time, never on the thumbnail. */
+.duration-chip { display: inline-block; margin-right: 6px; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--clip-color, var(--lime)) 20%, transparent); color: var(--clip-color, var(--lime)); font: 600 11px/16px var(--mono); vertical-align: baseline; }
+.clip-thumbnail em { display: none; }
+
+/* Smart split ---------------------------------------------------------------- */
+.workspace.docked > .find-panel { gap: 12px; }
+.find-tabs { flex: none; }
+.find-tabs button { gap: 6px; }
+.find-ask-wrap { position: relative; flex: none; }
+.find-ask { padding: 0 12px 0 5px; min-height: 38px; }
+.find-ask input { font-size: 13px; }
+.find-menu-button { flex: none; width: 28px; height: 28px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--lime); }
+.find-menu-button:hover { background: #26231f; }
+.find-menu { position: absolute; z-index: 20; top: calc(100% + 6px); left: 0; right: 0; max-height: min(340px, 50vh); overflow: auto; padding: 6px; border: 1px solid var(--edge); border-radius: 12px; background: #1b1916; box-shadow: 0 14px 34px #000b; }
+.find-menu button { width: 100%; display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--ink); font-size: 13px; text-align: left; }
+.find-menu button svg { color: var(--lime); flex: none; }
+.find-menu button:hover:not(:disabled), .find-menu button:focus-visible { background: #28251f; outline: 0; }
+.find-menu-empty { padding: 8px 10px; color: var(--mute); font-size: 12.5px; line-height: 1.5; }
+.find-options { display: grid; gap: 10px; padding: 0 2px; border: 0; }
+.find-row { display: flex; align-items: center; gap: 10px; }
+.find-row > span { width: 46px; flex: none; color: var(--mute); font-size: 12px; }
+.find-row .button { margin-left: auto; }
+.find-agent { padding: 0 2px; }
+.find-status, .find-progress { padding: 0 2px; }
+.find-results { gap: 2px; }
+.find-results li { gap: 10px; padding: 8px 6px; }
+.find-text q { font-size: 13.5px; }
+.find-footer { position: sticky; bottom: 0; margin-top: auto; padding: 10px 2px 2px; background: linear-gradient(transparent, #0f0d0b 30%); }
+.find-time { margin-top: 0; padding-top: 0; border-top: 0; }
+.find-time-head { flex-wrap: wrap; text-transform: none; letter-spacing: 0; font-size: 12.5px; font-weight: 400; color: var(--mute); }
+.find-presets { padding: 0; border: 0; }
+
+/* Sizes: headings stay in proportion with the rest of the interface. */
+.display-title { font-size: 20px; }
+.workspace.docked .sheet-head h2, .workspace.docked > .editor-media-panel > .caption-style-heading h2 { font-size: 15px; letter-spacing: -.1px; }
+.workspace.docked .sheet-head p { font-size: 12px; }
+.settings-nav .display-title { font-size: 22px; margin-bottom: 10px; }
+.settings-card h2 { font-size: 16px; }
+.settings-card .lead { font-size: 13px; }
+.settings-row-text b { font-size: 13.5px; }
+.settings-row-text small { font-size: 12px; }
+.export-main .display-title { font-size: 20px; }
+.shortcut-dialog .display-title { font-size: 18px; }
+.clip-details strong { font-size: 13px; }
+.workspace.docked .clip-details strong { font-size: 13px; }
+.agent-subhead { font-size: 14px; }
+
+/* Typed percentages replace sliders where a number is clearer. */
+.percent-input { display: inline-flex; align-items: center; gap: 6px; color: var(--mute); font-size: 12.5px; }
+.percent-input input { width: 72px; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Caption actions sit side by side. */
+.captions-sheet .sheet-actions { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); }
+.captions-sheet .sheet-actions .button { min-width: 0; white-space: nowrap; }
+
+/* Captions panel tabs */
+.captions-sheet .caption-tabs { flex: none; margin: 0 18px 10px; width: auto; }
+.captions-sheet .caption-tabs button { gap: 6px; }
+.captions-sheet .sheet-note { margin: 4px 0 0; color: var(--mute); font-size: 12.5px; line-height: 1.5; }
+/* The Style tab has its own section titles, so the embedded panel needs no heading or close button. */
+.caption-style-panel.embedded .caption-style-heading, .workspace .caption-style-panel.embedded > .caption-style-heading { display: none; }
+/* "Apply to all clips" stays in reach however long the style controls are. */
+.captions-sheet .sheet-body > .sheet-actions { position: sticky; bottom: 0; margin: auto 0 0; padding: 12px 0 4px; background: linear-gradient(transparent, var(--bg, #0e0c0a) 28%); }
+
+/* The In/Out bar is centred under the player, in line with the player controls. */
+.workspace.docked .timeline-heading { position: relative; min-height: 46px; }
+.workspace.docked .trim-bar { position: absolute; top: 0; bottom: 0; left: calc(84px + clamp(300px, 23vw, 360px)); right: clamp(300px, 23vw, 360px); justify-content: center; margin: 0; pointer-events: none; }
+.workspace.docked .trim-bar > * { pointer-events: auto; }
+@media (max-width: 1180px) {
+  .workspace.docked .trim-bar { position: static; margin: 0 auto; pointer-events: auto; }
+}
+
+/* Update failures show what the updater reported, in small type. */
+.update-detail { display: block; color: var(--mute); font: 11px/1.4 var(--mono); overflow-wrap: anywhere; }

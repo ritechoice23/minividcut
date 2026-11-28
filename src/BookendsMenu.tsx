@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { Play, X } from 'lucide-react'
 import { CENTER, frameTravel, panPosition } from './framing'
+import { PercentInput } from './PercentInput'
 import { effectiveBookends, TRANSITIONS } from './bookends'
 import type { Bookend, Bookends } from './bookends'
 
@@ -158,8 +159,8 @@ function ImagePlacement({ image, label, aspect, disabled, onChange }: {
       </select>
     </label>
     {axis && <label>{axis === 'x' ? 'Horizontal position' : 'Vertical position'}
-      <input aria-label={`${label} position`} type="range" min={0} max={100} value={position[axis]} disabled={disabled}
-        onChange={event => onChange({ ...image, position: { ...position, [axis]: event.target.valueAsNumber } })} />
+      <PercentInput label={`${label} position`} min={0} max={100} value={Math.round(position[axis])} disabled={disabled}
+        onCommit={value => onChange({ ...image, position: { ...position, [axis]: value } })} />
     </label>}
     </div>
     {error && <small role="alert">{error}</small>}

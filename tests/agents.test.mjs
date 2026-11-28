@@ -32,7 +32,7 @@ test('transcript text cannot break out of its line or the request', () => {
 })
 
 test('line numbers become real times and the clip text comes from the transcript', () => {
-  const clips = parseAgentClips('{"clips":[{"start":2,"end":3,"score":8,"reason":"Funny setup and punchline"}]}', cues, 30, 3)
+  const clips = parseAgentClips('{"clips":[{"start":2,"end":3,"score":8,"reason":"Funny setup and punchline"}]}', cues, 13, 3)
   assert.equal(clips.length, 1)
   assert.equal(clips[0].start, 9)
   assert.equal(clips[0].end, 22)
@@ -42,13 +42,14 @@ test('line numbers become real times and the clip text comes from the transcript
 })
 
 test('clips are ranked by score and capped at the requested count', () => {
+  // Far apart, so none can grow into another.
+  const spaced = [cue(0, 10, 'First idea.'), cue(30, 40, 'Second idea.'), cue(60, 70, 'Third idea.')]
   const raw = JSON.stringify({ clips: [
     { start: 0, end: 0, score: 3, reason: 'a' },
-    { start: 4, end: 4, score: 9, reason: 'b' },
+    { start: 1, end: 1, score: 9, reason: 'b' },
     { start: 2, end: 2, score: 6, reason: 'c' },
   ] })
-  // Line 4 (score 9) starts at 22s and line 2 (score 6) at 9s; line 0 (score 3) is cut by the count.
-  assert.deepEqual(parseAgentClips(raw, cues, 30, 2).map(clip => clip.start), [22, 9])
+  assert.deepEqual(parseAgentClips(raw, spaced, 10, 2).map(clip => clip.start), [30, 60])
 })
 
 test('overlapping, out-of-range and malformed clips are dropped', () => {
@@ -64,7 +65,7 @@ test('overlapping, out-of-range and malformed clips are dropped', () => {
     'text',
     { start: 0, end: 1, score: 'high', reason: 5 },
   ] })
-  const clips = parseAgentClips(raw, cues, 30, 10)
+  const clips = parseAgentClips(raw, cues, 13, 10)
   assert.deepEqual(clips.map(clip => [clip.start, clip.end]), [[9, 22], [0, 9]])
   assert.equal(clips[1].reason, undefined)
   assert.equal(clips[1].score, 0)
@@ -142,4 +143,39 @@ test('a usable title is trimmed of quotes and full stops, anything else is an er
     JSON.stringify({ titles: [{ id: 0, title: 'a '.repeat(45) }] })]) {
     assert.throws(() => parseAgentTitle(bad), AgentFormatError, bad)
   }
+})
+
+const sentences = [
+  cue(0, 5, 'One.'), cue(5.5, 10, 'Two'), cue(10.5, 15, 'three.'), cue(15.5, 20, 'Four.'), cue(20.5, 25, 'Five.'),
+]
+
+test('a clip that comes back short is grown toward the chosen length, never past it', () => {
+  const [clip] = parseAgentClips('{"clips":[{"start":1,"end":1,"score":5,"reason":"x"}]}', sentences, 20, 1)
+  assert.ok(clip.end - clip.start <= 20.25, 'never longer than the limit')
+  assert.ok(clip.end - clip.start >= 17, 'close to the limit instead of a few seconds')
+  assert.equal(clip.start, 5.5)
+  assert.equal(clip.text, 'Two three. Four. Five.')
+})
+
+test('growing prefers to stop on a finished sentence', () => {
+  const [clip] = parseAgentClips('{"clips":[{"start":0,"end":0,"score":5,"reason":"x"}]}', sentences, 17, 1)
+  assert.equal(clip.text.slice(-1), '.')
+  assert.ok(clip.end - clip.start <= 17.25)
+})
+
+test('a clip does not grow across a long pause or into a neighbouring clip', () => {
+  const far = [cue(0, 4, 'A thought.'), cue(30, 34, 'Much later.')]
+  assert.deepEqual(parseAgentClips('{"clips":[{"start":0,"end":0,"score":5,"reason":"x"}]}', far, 30, 1).map(clip => clip.end), [4])
+  const [first, second] = parseAgentClips(JSON.stringify({ clips: [
+    { start: 0, end: 0, score: 9, reason: 'a' }, { start: 3, end: 3, score: 8, reason: 'b' },
+  ] }), sentences, 20, 2)
+  assert.ok(first.end <= second.start || second.end <= first.start, 'no overlap')
+})
+
+test('growing keeps the ranking order the assistant gave', () => {
+  const spaced = [cue(0, 4, 'Early.'), cue(40, 44, 'Late.')]
+  const clips = parseAgentClips(JSON.stringify({ clips: [
+    { start: 1, end: 1, score: 9, reason: 'late wins' }, { start: 0, end: 0, score: 4, reason: 'early second' },
+  ] }), spaced, 10, 2)
+  assert.deepEqual(clips.map(clip => clip.start), [40, 0])
 })

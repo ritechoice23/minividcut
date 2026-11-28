@@ -1,9 +1,15 @@
 # Changelog
 
-## Unreleased
+## 1.11.0 — 2026-11-28
 
-- **Use Claude Code, Codex or OpenCode to find clips.** If one is installed, pick it in Settings → AI. **Sign in** opens your browser and brings you back when you are done; MiniVidCut never sees your password or token. The assistant reads the whole transcript at once and returns ranked clips with a one-line reason each. Only transcript text is sent, never video or audio. The same assistant also writes clip titles, so one choice covers all the AI work. This device stays the default.
-- **Fix a sign-in without leaving Find clips.** If an assistant's login has expired, the Find panel shows a **Sign in** button right there.
+- **Use Claude Code, Codex or OpenCode for Smart Split and titles.** Pick one in Settings → AI and click Sign in: it opens your browser and returns when you are done. MiniVidCut never sees your password or token, and only transcript text is sent. This device stays the default.
+- **Find clips works as it goes.** The video is transcribed in chunks and each finished chunk goes to your assistant while the next is still being transcribed, so suggestions show up early, Stop keeps what was found, and clips come back close to the length you chose.
+- **Transcripts are saved.** Captions, titles, Find clips and the timeline words reuse what has already been transcribed, even after restarting. Clear them in Settings → AI.
+- **A cleaner editor.** Three flat columns with a full-width timeline: tools on the left (Smart split opens there instead of floating), the player in the middle, clips on the right. Clip labels stay inside their clips, durations are a coloured chip beside the time, and typed values replace sliders where a number is clearer.
+- **Smart split is tidier.** Find clips and Split by time are tabs, and the quick searches live in a menu: click the sparkle or type / in the search box.
+- **Captions has two tabs.** Captions shows the words for the selected clip (the first clip if none is selected), and Style holds the look, placement, text and outline controls with clearer names.
+- **Update fixes.** If an update fails, the card now says why and offers Download by hand. Try again re-reads the latest release first, so a window left open while a release was refreshed no longer keeps failing. If an update fails on an older version, restart that copy and try again.
+- **Faster on long videos.** The timeline’s Words lane draws only the words in view, which stops a long talk from freezing the editor. The caption layer no longer repaints on every playback tick, hardware encoders are checked in parallel when you export, and caption artwork renders on more lanes.
 - OpenCode is marked Experimental. It runs as a locked-down agent that cannot read or write files.
 
 ## 1.10.0 — 2026-11-28

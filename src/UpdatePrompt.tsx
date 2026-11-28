@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import { ArrowDownToLine, Check, RefreshCw, X } from 'lucide-react'
-import { formatBytes, updateIndicatorLabel } from './updates'
+import { formatBytes, RELEASES_URL, updateIndicatorLabel } from './updates'
 import { progressLabel, type AppUpdate } from './useAppUpdate'
 
 const CARD_PHASES = ['available', 'ready', 'error'] as const
@@ -71,13 +72,17 @@ export function UpdatePrompt({ update }: { update: AppUpdate }) {
           : status.phase === 'error' ? 'Update failed' : `Version ${version} is available`}</strong>
         <small>{status.phase === 'ready' ? 'It installs automatically when you close MiniVidCut.'
           : status.phase === 'error' ? status.message : 'Download it in the background while you keep editing.'}</small>
+        {status.phase === 'error' && status.detail && <small className="update-detail" title="What the updater reported">{status.detail.slice(0, 160)}</small>}
         <div className="update-card-actions">
           {status.phase === 'available' && <>
             <button className="button primary small" onClick={() => void update.download(true)}><ArrowDownToLine size={13} /> Download</button>
             <button className="text-button" onClick={update.dismiss}>Not now</button>
           </>}
           {status.phase === 'ready' && <button className="button outline small" onClick={() => void update.install()}><RefreshCw size={13} /> Restart now</button>}
-          {status.phase === 'error' && <button className="button outline small" onClick={() => void update.retry()}><RefreshCw size={13} /> Try again</button>}
+          {status.phase === 'error' && <>
+            <button className="button outline small" onClick={() => void update.retry()}><RefreshCw size={13} /> Try again</button>
+            <button className="text-button" onClick={() => void invoke('open_agent_link', { url: RELEASES_URL }).catch(() => {})}>Download by hand</button>
+          </>}
         </div>
       </div>
       <button className="icon-button compact" aria-label="Hide update notice" title="Hide"

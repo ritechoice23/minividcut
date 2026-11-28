@@ -104,3 +104,17 @@ test('release notes are flattened into short lines for the prompt', () => {
   ])
   assert.equal(parseReleaseNotes('x'.repeat(200))[0], `${'x'.repeat(107)}…`)
 })
+
+test('update errors are explained in plain words with a next step', async () => {
+  const { describeUpdateError } = await import('../src/updates.ts')
+  assert.match(describeUpdateError('signature verification failed', 'download'), /security check/)
+  assert.match(describeUpdateError('Invalid encoding in minisign data', 'download'), /security check/)
+  assert.match(describeUpdateError('error sending request for url (https://github.com/x)', 'download'), /reach GitHub/)
+  assert.match(describeUpdateError('request timed out', 'download'), /reach GitHub/)
+  assert.match(describeUpdateError('Download request failed with status: 404', 'download'), /still be uploading/)
+  assert.match(describeUpdateError('Access is denied. (os error 5)', 'install'), /replace MiniVidCut/)
+  assert.match(describeUpdateError('Access is denied. (os error 5)', 'download'), /disk space/)
+  assert.match(describeUpdateError('There is not enough space on the disk. (os error 112)', 'download'), /disk space/)
+  assert.match(describeUpdateError('something odd', 'install'), /installed/)
+  assert.match(describeUpdateError('', 'download'), /downloaded/)
+})

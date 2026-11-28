@@ -32,20 +32,37 @@ variables → Actions. The key has no password, so no password secret is needed.
 
 ## Publishing an update
 
-1. Bump the version in `package.json`, `src-tauri/tauri.conf.json` and
-   `src-tauri/Cargo.toml`, and add release notes to `CHANGELOG.md`.
-2. Create the GitHub release and tag (for example `v1.3.0`).
-3. Run **Build signed Windows installer** with that tag and
-   *Replace the installer asset on that release* enabled. The workflow builds
-   the Authenticode-signed installer, signs it for the updater, generates
-   `latest.json`, and uploads the installer, its `.sig` file and the manifest
-   to that release.
-4. Make sure the tag is the **latest** release — the app reads
-   `releases/latest/download/latest.json`.
+Releases are built and uploaded from the maintainer's machine. Never replace files
+on a release that is already the latest: a copy of the app that checked just
+before the swap holds a signature for the old file and fails until restarted.
+Upload everything to a draft first, check it, then publish.
 
-If either the Authenticode certificate secrets or the updater key secret are
-missing, the workflow fails early with an explicit message rather than
-producing an installer that users cannot update from.
+1. Bump the version in `package.json`, `src-tauri/tauri.conf.json` and
+   `src-tauri/Cargo.toml`, and add the release notes to `CHANGELOG.md`. The
+   first three lines of the release notes are what the in-app update card shows.
+2. Build with the signing key (see *Building locally*).
+3. Check the artifacts:
+
+   ```powershell
+   node scripts/verify-update-artifacts.mjs `
+     --installer src-tauri/target/release/bundle/nsis/MiniVidCut_X.Y.Z_x64-setup.exe `
+     --signature src-tauri/target/release/bundle/nsis/MiniVidCut_X.Y.Z_x64-setup.exe.sig `
+     --manifest  src-tauri/target/release/bundle/nsis/latest.json --version X.Y.Z
+   ```
+
+   It fails if the installer does not match its signature for the public key in
+   `tauri.conf.json`, or if the manifest does not describe that installer.
+4. Create the release as a **draft** with the installer, the `.sig` file and
+   `latest.json` attached, then publish it. The app reads
+   `releases/latest/download/latest.json`, so the published release must be the
+   latest one.
+5. Download `latest.json` from the published release and compare the installer's
+   SHA-256 with the asset digest GitHub shows.
+
+The **Build signed Windows installer** workflow can do steps 2 to 4 in CI, but it
+needs the Authenticode certificate secrets and `TAURI_SIGNING_PRIVATE_KEY`; if
+either is missing it fails early rather than producing an installer users cannot
+update from.
 
 ## Building locally
 

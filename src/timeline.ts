@@ -57,6 +57,45 @@ export function snapTime(value: number, candidates: readonly number[], threshold
   return nearest
 }
 
+/** Most word buttons the timeline draws at once; more would be unreadable anyway. */
+export const MAX_VISIBLE_WORDS = 240
+
+/**
+ * The cues, ordered by start, that touch the visible window, thinned to at most
+ * about `limit` evenly spread entries. A long talk has tens of thousands of
+ * cues, and drawing a button for each at full zoom-out froze the editor; once
+ * the user zooms in far enough every cue is shown.
+ */
+export function visibleWords<T extends { start: number; end: number }>(
+  cues: readonly T[], viewStart: number, viewEnd: number, limit = MAX_VISIBLE_WORDS,
+): T[] {
+  let low = 0
+  let high = cues.length
+  while (low < high) {
+    const middle = (low + high) >>> 1
+    if (cues[middle].start < viewStart) low = middle + 1
+    else high = middle
+  }
+  // A cue that began before the window can still reach into it.
+  let first = low
+  while (first > 0 && cues[first - 1].end > viewStart) first--
+  const inView: T[] = []
+  for (let index = first; index < cues.length && cues[index].start < viewEnd; index++) {
+    if (cues[index].end > viewStart) inView.push(cues[index])
+  }
+  if (inView.length <= limit) return inView
+  const slot = (viewEnd - viewStart) / limit
+  const thinned: T[] = []
+  let lastSlot = Number.NEGATIVE_INFINITY
+  for (const cue of inView) {
+    const current = Math.floor((cue.start - viewStart) / slot)
+    if (current === lastSlot) continue
+    lastSlot = current
+    thinned.push(cue)
+  }
+  return thinned
+}
+
 export function timelineFrames(duration: number, zoom: number, start: number) {
   if (duration <= 0) return []
   const span = duration / zoom

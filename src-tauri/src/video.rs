@@ -252,27 +252,45 @@ fn available_hardware_encoders(quality: Quality, format: Format) -> Vec<&'static
         Format::Portrait => "testsrc2=s=1080x1920:r=30",
         Format::Landscape => "testsrc2=s=1920x1080:r=30",
     };
-    quality
-        .hardware_candidates()
+    let candidates = quality.hardware_candidates();
+    // Each candidate is a different vendor's encoder (NVENC, Quick Sync, AMF,
+    // Media Foundation), so probing them side by side opens one session per
+    // device and takes as long as the slowest probe instead of the sum of all.
+    // Results stay in the candidates' priority order.
+    let usable: Vec<bool> = std::thread::scope(|scope| {
+        let probes: Vec<_> = candidates
+            .iter()
+            .map(|args| scope.spawn(move || encoder_works(args, size)))
+            .collect();
+        probes
+            .into_iter()
+            .map(|probe| probe.join().unwrap_or(false))
+            .collect()
+    });
+    candidates
         .iter()
         .copied()
-        .filter(|args| {
-            ffmpeg()
-                .args(["-f", "lavfi", "-i", size, "-frames:v", "4"])
-                .args(*args)
-                .args([
-                    "-pix_fmt",
-                    encoder_pixel_format(args[1]),
-                    "-abort_on",
-                    "empty_output",
-                    "-f",
-                    "null",
-                    "-",
-                ])
-                .output()
-                .is_ok_and(|output| output.status.success())
-        })
+        .zip(usable)
+        .filter_map(|(args, works)| works.then_some(args))
         .collect()
+}
+
+/// Whether FFmpeg can encode a few test frames with this encoder on this PC.
+fn encoder_works(args: &[&str], size: &str) -> bool {
+    ffmpeg()
+        .args(["-f", "lavfi", "-i", size, "-frames:v", "4"])
+        .args(args)
+        .args([
+            "-pix_fmt",
+            encoder_pixel_format(args[1]),
+            "-abort_on",
+            "empty_output",
+            "-f",
+            "null",
+            "-",
+        ])
+        .output()
+        .is_ok_and(|output| output.status.success())
 }
 
 fn encode_with_fallback(
@@ -932,26 +950,48 @@ const MAX_PEAKS: usize = 4000;
 /// loudest bucket is 255. Silent audio stays flat instead of being boosted.
 fn peak_buckets(mut samples: impl Read, total: u64, count: usize) -> std::io::Result<Vec<u8>> {
     let mut peaks = vec![0f32; count];
-    let mut chunk = [0u8; 16384];
+    let mut chunk = [0u8; 65536];
     let mut carry: Option<u8> = None;
     let mut index = 0u64;
+    let total = total.max(1);
+    // Sample `index` belongs to bucket `index * count / total`. Track where the
+    // current bucket ends instead of dividing for every one of the millions of
+    // samples in a long video: bucket `b` ends before sample ceil((b+1)*total/count).
+    let end_of = |bucket: usize| (((bucket as u64 + 1) * total).div_ceil(count as u64)).max(1);
+    let mut bucket = 0usize;
+    let mut bucket_end = end_of(bucket);
+    // Peak of the bucket in progress, written back when the bucket changes.
+    let mut peak = 0f32;
+    let mut push = |low: u8, high: u8| {
+        let value = f32::from(i16::from_le_bytes([low, high]).unsigned_abs()) / 32768.0;
+        while index >= bucket_end && bucket + 1 < count {
+            peaks[bucket] = peaks[bucket].max(peak);
+            peak = 0.0;
+            bucket += 1;
+            bucket_end = end_of(bucket);
+        }
+        peak = peak.max(value);
+        index += 1;
+    };
     loop {
         let read = samples.read(&mut chunk)?;
         if read == 0 {
             break;
         }
-        let mut bytes = chunk[..read].iter().copied();
-        while let Some(low) = carry.take().or_else(|| bytes.next()) {
-            let Some(high) = bytes.next() else {
-                carry = Some(low);
-                break;
-            };
-            let value = f32::from(i16::from_le_bytes([low, high]).unsigned_abs()) / 32768.0;
-            let bucket = ((index * count as u64) / total.max(1)).min(count as u64 - 1) as usize;
-            peaks[bucket] = peaks[bucket].max(value);
-            index += 1;
+        let mut data = &chunk[..read];
+        if let Some(low) = carry.take() {
+            // A sample split across two reads: its high byte leads this one.
+            let (&high, rest) = data.split_first().expect("a non-empty read");
+            data = rest;
+            push(low, high);
+        }
+        let pairs = data.chunks_exact(2);
+        carry = pairs.remainder().first().copied();
+        for pair in pairs {
+            push(pair[0], pair[1]);
         }
     }
+    peaks[bucket] = peaks[bucket].max(peak);
     let loudest = peaks.iter().copied().fold(0.02, f32::max);
     Ok(peaks
         .into_iter()
@@ -2389,6 +2429,56 @@ mod tests {
         assert!(peaks[1] > 100 && peaks[1] < 160);
         let silent = peak_buckets(std::io::Cursor::new(vec![0u8; 16]), 8, 4).unwrap();
         assert!(silent.iter().all(|peak| *peak == 0));
+    }
+
+    /// Hands out one byte per read, so every sample is split across two reads.
+    struct OneByte(std::io::Cursor<Vec<u8>>);
+
+    impl Read for OneByte {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let end = buffer.len().min(1);
+            self.0.read(&mut buffer[..end])
+        }
+    }
+
+    #[test]
+    fn peak_buckets_match_a_plain_division_for_any_read_size_and_length() {
+        // The straightforward definition: sample i belongs to bucket i*count/total.
+        fn reference(samples: &[i16], total: u64, count: usize) -> Vec<u8> {
+            let mut peaks = vec![0f32; count];
+            for (index, sample) in samples.iter().enumerate() {
+                let bucket =
+                    ((index as u64 * count as u64) / total.max(1)).min(count as u64 - 1) as usize;
+                peaks[bucket] = peaks[bucket].max(f32::from(sample.unsigned_abs()) / 32768.0);
+            }
+            let loudest = peaks.iter().copied().fold(0.02, f32::max);
+            peaks
+                .into_iter()
+                .map(|peak| (peak / loudest * 255.0).round() as u8)
+                .collect()
+        }
+        let mut seed = 7u32;
+        let mut samples = Vec::new();
+        for _ in 0..5003 {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            samples.push((seed >> 16) as i16);
+        }
+        let bytes: Vec<u8> = samples.iter().flat_map(|sample| sample.to_le_bytes()).collect();
+        // Totals shorter than, equal to, and longer than the real sample count,
+        // and more buckets than samples.
+        for (total, count) in [(5003, 4000), (5003, 97), (4000, 61), (6000, 100), (50, 4000), (5003, 1)] {
+            let expected = reference(&samples, total, count);
+            assert_eq!(
+                peak_buckets(std::io::Cursor::new(bytes.clone()), total, count).unwrap(),
+                expected,
+                "whole reads, total {total}, count {count}"
+            );
+            assert_eq!(
+                peak_buckets(OneByte(std::io::Cursor::new(bytes.clone())), total, count).unwrap(),
+                expected,
+                "single-byte reads, total {total}, count {count}"
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { panTimeline, snapTime, timelineFrames, timelineOverlaps, timelineWindow, zoomAround, zoomTimeline, timelineTime } from '../src/timeline.ts'
+import { panTimeline, snapTime, timelineFrames, timelineOverlaps, timelineWindow, zoomAround, zoomTimeline, timelineTime, visibleWords } from '../src/timeline.ts'
 
 test('marks shared coverage without treating adjacent clips as overlapping', () => {
   assert.deepEqual(timelineOverlaps([
@@ -51,4 +51,28 @@ test('pans by the visible time span and stops at the ends', () => {
   assert.equal(panTimeline(120, 4, 45, -0.5), 30)
   assert.equal(panTimeline(120, 4, 45, -10), 0)
   assert.equal(panTimeline(120, 4, 45, 10), 90)
+})
+
+const speech = (count, length = 1) => Array.from({ length: count }, (_, index) => ({ start: index * length, end: (index + 1) * length, text: String(index) }))
+
+test('draws only the words in view, including one that began just before it', () => {
+  const cues = speech(1000)
+  const shown = visibleWords(cues, 100.5, 104)
+  assert.deepEqual(shown.map(cue => cue.start), [100, 101, 102, 103])
+  assert.deepEqual(visibleWords(cues, 5000, 6000), [])
+  assert.deepEqual(visibleWords([], 0, 10), [])
+  // Touching the edge is not in view.
+  assert.deepEqual(visibleWords(cues, 10, 12).map(cue => cue.start), [10, 11])
+})
+
+test('thins a very long transcript to evenly spread words instead of thousands of buttons', () => {
+  const cues = speech(20_000)
+  const shown = visibleWords(cues, 0, 20_000, 240)
+  assert.ok(shown.length <= 241, String(shown.length))
+  assert.ok(shown.length >= 200, String(shown.length))
+  assert.ok(shown.every((cue, index) => index === 0 || cue.start > shown[index - 1].start))
+  const gaps = shown.slice(1).map((cue, index) => cue.start - shown[index].start)
+  assert.ok(Math.max(...gaps) <= 2 * (20_000 / 240), 'no big hole in the lane')
+  // Zoomed in far enough, every word comes back.
+  assert.equal(visibleWords(cues, 1000, 1100, 240).length, 100)
 })

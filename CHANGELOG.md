@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.10.0 — 2026-11-28
+
+- **Easier to read.** Secondary text, labels and hints are brighter, so they stay legible with the screen brightness turned right down.
+- **More compact.** Smaller type and tighter panels, clip rows, export window, settings and top bar, so more of the editor fits on screen.
+- **Snap removed.** The Snap toggle, its shortcut-palette entry and its setting are gone; trim handles now move freely.
+- **Captions → More options works.** It now opens the Display, Font, Finish, Case, Stroke and Highlight settings instead of showing nothing. Controls that duplicated the panel above (a second Position, Text size and caption-style button) are gone.
+
 ## 1.9.0 — 2026-11-26
 
 - **New editor layout.** Tools on the left, your clips always on the right, the preview in the middle. Compact spacing, slim scrollbars and right-click menus everywhere.

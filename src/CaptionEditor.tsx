@@ -1,5 +1,5 @@
 import { memo, useId, useState } from 'react'
-import { Clock3, Copy, Plus, SlidersHorizontal, Subtitles, Trash2, X } from 'lucide-react'
+import { Clock3, Copy, Plus, Subtitles, Trash2, X } from 'lucide-react'
 import { parseTime, stamp } from './clip'
 import type { Range } from './clip'
 import { CAPTION_ACCENT, CAPTION_FONTS, CAPTION_STROKE, DEFAULT_CAPTION_STYLE, captionStroke, fitCaptionTiming } from './captions'
@@ -69,13 +69,13 @@ const STYLE_OPTIONS = {
 }
 
 export const CaptionEditor = memo(function CaptionEditor({
-  label, range, track, model, progress, status, editing, canGenerate, defaultStyle, styleOpen,
-  onChange, onOpenStyle, onGenerate, onCancel, onSeek, getTime,
+  label, range, track, model, progress, status, editing, canGenerate, defaultStyle,
+  onChange, onGenerate, onCancel, onSeek, getTime,
 }: {
   label: string; range: Range; track?: CaptionTrack; model: CaptionModel | null; progress: CaptionProgress | null
   status: string; editing: boolean; onChange: (track: CaptionTrack) => void
-  canGenerate: boolean; defaultStyle?: CaptionStyle; styleOpen: boolean
-  onOpenStyle: () => void; onGenerate: () => void; onCancel: () => void
+  canGenerate: boolean; defaultStyle?: CaptionStyle
+  onGenerate: () => void; onCancel: () => void
   onSeek: (time: number) => void; getTime: () => number
 }) {
   const [feedback, setFeedback] = useState('')
@@ -110,8 +110,6 @@ export const CaptionEditor = memo(function CaptionEditor({
             : model ? `Download & generate · ${Math.round(model.bytes / 1_000_000)} MB` : 'Generate captions'}
         </button>
         <div className="caption-tools">
-          {cues.length > 0 && <button id="caption-style-trigger" className="icon-button compact" title="Caption style" aria-label="Caption style"
-            aria-expanded={styleOpen} aria-controls="caption-style-panel" disabled={editing} onClick={onOpenStyle}><SlidersHorizontal size={16} /></button>}
         <button className="icon-button compact" title="Add caption at playhead" aria-label="Add caption at playhead" onClick={add}><Plus size={16} /></button>
         </div>
     </div>
@@ -187,14 +185,14 @@ export function CaptionStylePanel({ style, format, editing, canApplyStyle, onSty
           onChange={event => restyle({ case: event.target.value as CaptionStyle['case'] })}>
           {Object.entries(STYLE_OPTIONS.case).map(([value, title]) => <option key={value} value={value}>{title}</option>)}
         </select></label>
-        <label>Position<select aria-label="Position" value={style.points?.[format] ? 'custom' : style.position}
+        {!embedded && <label>Position<select aria-label="Position" value={style.points?.[format] ? 'custom' : style.position}
           onChange={event => restyle({ position: event.target.value as CaptionStyle['position'], points: { ...style.points, [format]: undefined } })}>
           {style.points?.[format] && <option value="custom" disabled>Custom</option>}
           <option value="top">Top</option><option value="middle">Middle</option><option value="bottom">Bottom</option>
-        </select></label>
-        <StyleNumber label="Text size" unit="%" min={55} max={200}
+        </select></label>}
+        {!embedded && <StyleNumber label="Text size" unit="%" min={55} max={200}
           value={Math.round((style.scale ?? (style.size === 'small' ? 0.81 : style.size === 'large' ? 1.25 : 1)) * 100)}
-          presets={[75, 90, 100, 110, 125, 150, 175, 200]} onChange={scale => restyle({ scale: scale / 100 })} />
+          presets={[75, 90, 100, 110, 125, 150, 175, 200]} onChange={scale => restyle({ scale: scale / 100 })} />}
         <StyleNumber label="Stroke width" unit="%" min={0} max={30}
           value={captionStroke(style)} presets={[0, 2, 4, 6, 8, 11, 15, 20, 25, 30]} onChange={stroke => restyle({ stroke })} />
         {style.mode === 'highlight' && <label>Highlight<input type="color" aria-label="Highlight color"

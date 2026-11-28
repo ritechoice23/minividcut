@@ -5,8 +5,8 @@ import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { confirm, open } from '@tauri-apps/plugin-dialog'
 import {
-  ArrowDownToLine, AudioLines, Check, ChevronDown, ChevronLeft, ChevronRight, Clapperboard, Copy, Crop, Ellipsis, FastForward, Film, FolderOpen,
-  GripVertical, Keyboard, LoaderCircle, Magnet, Minus, Monitor, Move, Music2, Pause, Pencil, Play, Plus, Redo2, Rewind, RotateCcw,
+  ArrowDownToLine, AudioLines, Check, ChevronLeft, ChevronRight, Clapperboard, Copy, Crop, Ellipsis, FastForward, Film, FolderOpen,
+  GripVertical, Keyboard, LoaderCircle, Minus, Monitor, Move, Music2, Pause, Pencil, Play, Plus, Redo2, Rewind, RotateCcw,
   Scissors, ScissorsLineDashed, Search, Settings as SettingsIcon, SlidersHorizontal, Smartphone, Sparkles, Split, Square, Subtitles, Trash2, Type,
   Undo2, Volume2, VolumeX, X, ZoomIn, ZoomOut,
   BookOpen, Flame, Heart, Laugh, Lightbulb, ListChecks, Quote, Rocket, Sun, Zap,
@@ -17,7 +17,7 @@ import {
   trimClips, validRange, withSegments,
 } from './clip'
 import type { Clip, ExportUnit, Range } from './clip'
-import { MAX_TIMELINE_ZOOM, panTimeline, snapTime, timelineFrames, timelineOverlaps, timelineTime, timelineWindow, ZOOM_STEPS, zoomAround, zoomTimeline } from './timeline'
+import { MAX_TIMELINE_ZOOM, panTimeline, timelineFrames, timelineOverlaps, timelineTime, timelineWindow, ZOOM_STEPS, zoomAround, zoomTimeline } from './timeline'
 import { CENTER, frameTravel, panPosition } from './framing'
 import type { FramePosition, Framing } from './framing'
 import { fileSize, groupExportStates, summarizeExport } from './export-progress'
@@ -246,7 +246,6 @@ export function App() {
     writePreferences(localStorage, next)
   }, [])
   const [draftFormat, setFormat] = useState<Format>(preferences.defaultFormat)
-  const [snapping, setSnapping] = useState(preferences.snapDefault)
   const [draftQuality, setQuality] = useState<Quality>(preferences.defaultQuality)
   const [draftFraming, setFraming] = useState<Framing>('fill')
   const [positions, setPositions] = useState({ landscape: CENTER, portrait: CENTER })
@@ -267,7 +266,6 @@ export function App() {
   const [exportBatch, setExportBatch] = useState<ExportBatch | null>(null)
   const [exportFolder, setExportFolder] = useState(() => localStorage.getItem(EXPORT_FOLDER_KEY) ?? '')
   const [shortcuts, setShortcuts] = useState(false)
-  const [splitOpen, setSplitOpen] = useState(false)
   const [splitMode, setSplitMode] = useState<'mark' | 'add'>('mark')
   const [sections, setSections] = useState<Range[]>([])
   const [keptRanges, setKeptRanges] = useState<Range[]>([])
@@ -287,6 +285,7 @@ export function App() {
   const [transcriptRevision, setTranscriptRevision] = useState(0)
   const [listening, setListening] = useState<number | null>(null)
   const askInput = useRef<HTMLInputElement>(null)
+  useEffect(() => { if (momentsOpen) askInput.current?.focus() }, [momentsOpen])
   const [moments, setMoments] = useState<Moment[]>([])
   const [momentStatus, setMomentStatus] = useState('')
   const [momentRunning, setMomentRunning] = useState(false)
@@ -419,13 +418,6 @@ export function App() {
     if (Math.abs(bar.scrollLeft - left) > 1) bar.scrollLeft = left
   }, [visibleTime.start, visibleTime.maxStart, timelineZoom])
   const inView = (value: number) => value >= visibleTime.start - 0.000001 && value <= visibleTime.end + 0.000001
-  const snap = (value: number) => {
-    if (!snapping) return value
-    const points = [0, duration, playbackClock.get(),
-      ...clips.flatMap(clip => clipSegments(clip).flatMap(segment => [segment.start, segment.end])),
-      ...sections.flatMap(section => [section.start, section.end])]
-    return snapTime(value, points, visibleTime.span * 0.01)
-  }
   const setPlaybackTime = useCallback((value: number) => {
     playbackClock.set(value)
     if (timelinePanned.current) return
@@ -919,7 +911,6 @@ export function App() {
       framesRef.current = {}
       framesInFlight.current.clear()
       setExportBatch(null)
-      setSplitOpen(false)
     } catch (error) {
       setNotice(message(error))
     } finally {
@@ -1729,7 +1720,7 @@ export function App() {
 
   const splitParts = (parts: Range[] | null, selectLast = false) => {
     if (selectedLocked) return
-    setSplitOpen(false)
+    setMomentsOpen(false)
     if (captionJob.current?.keys.has(captionKey)) return
     if (!parts || parts.length < 2) {
       setNotice(parts ? 'Choose an interval shorter than the trim range.' : 'Choose a longer interval to create at most 100 sections.')
@@ -1766,7 +1757,7 @@ export function App() {
   }
 
   const splitAtPlayhead = () => {
-    setSplitOpen(false)
+    setMomentsOpen(false)
     const at = activeTime()
     const first = { start: range.start, end: at }
     const second = { start: at, end: range.end }
@@ -1866,7 +1857,7 @@ export function App() {
     const rect = track.current.getBoundingClientRect()
     const axis = timelineTime(visibleTime.start, visibleTime.span, (event.clientX - rect.left) / rect.width)
     const raw = drag.value + axis - drag.axisPointer
-    const value = Math.max(0, Math.min(duration, snap(raw)))
+    const value = Math.max(0, Math.min(duration, raw))
     const next = resizeClipEdge(drag.clip, drag.side, value, duration)
     if (!next) return
     if (!drag.recorded) {
@@ -2061,7 +2052,6 @@ export function App() {
       if (event.key === 'Escape') {
         if (state.captionsOpen && target?.closest('#caption-editor') && !target.closest('input, select, textarea')) state.closeCaptions()
         setShortcuts(false)
-        setSplitOpen(false)
         setMomentsOpen(false)
         if (!target?.closest('input, select, textarea')) setPanel(null)
         return
@@ -2150,7 +2140,7 @@ export function App() {
     const pointer = timelineTime(visibleTime.start, visibleTime.span, (event.clientX - rect.left - offset) / rect.width)
     const drag = edge ? trimDrag.current : null
     const raw = pointer - (drag?.offset ?? 0)
-    const time = Math.max(0, Math.min(duration, edge ? snap(raw) : raw))
+    const time = Math.max(0, Math.min(duration, raw))
     if (edge && drag) editBoundary(edge, time, drag.range)
     seek(time)
   }
@@ -2573,7 +2563,6 @@ export function App() {
     { id: 'delete-range', group: 'Edit', label: 'Delete range from the video (ripple)', icon: <ScissorsLineDashed size={16} />, keywords: 'trim remove cut', disabled: !canTrim, run: trimSection },
     { id: 'undo', group: 'Edit', label: 'Undo', icon: <Undo2 size={16} />, shortcut: 'Ctrl Z', disabled: !canUndo, run: undoEdit },
     { id: 'redo', group: 'Edit', label: 'Redo', icon: <Redo2 size={16} />, shortcut: 'Ctrl Shift Z', disabled: !canRedo, run: redoEdit },
-    { id: 'snap', group: 'Timeline', label: snapping ? 'Turn snapping off' : 'Turn snapping on', icon: <Magnet size={16} />, run: () => setSnapping(on => !on) },
     { id: 'zoom-in', group: 'Timeline', label: 'Zoom in', icon: <ZoomIn size={16} />, shortcut: 'Ctrl +', disabled: noVideo, run: () => zoomTimelineTo(timelineZoom * 2) },
     { id: 'zoom-out', group: 'Timeline', label: 'Zoom out', icon: <ZoomOut size={16} />, shortcut: 'Ctrl -', disabled: noVideo, run: () => zoomTimelineTo(timelineZoom / 2) },
     { id: 'zoom-fit', group: 'Timeline', label: 'Fit entire timeline', icon: <Minus size={16} />, shortcut: 'Ctrl 0', disabled: noVideo, run: () => zoomTimelineTo(1) },
@@ -2621,29 +2610,14 @@ export function App() {
         </div>
         <button className="icon-button" title="Open video (Ctrl O)" aria-label="Open video" disabled={busy || loading} onClick={() => void chooseVideo()}><FolderOpen size={16} /></button>
         <div className="titlebar-space" data-tauri-drag-region />
-        <form className={`ask${momentsOpen ? ' open' : ''}`} role="search" onSubmit={event => {
-          event.preventDefault()
-          const prompt = askInput.current?.value.trim() || DEFAULT_MOMENT_QUERY
-          requestSearch(prompt)
-        }}>
-          <Sparkles size={16} aria-hidden="true" />
-          <input ref={askInput} name="prompt" maxLength={240} disabled={!hasSource || loading} aria-label="Describe the clips to find"
-            aria-expanded={momentsOpen} aria-controls="find-panel" autoComplete="off"
-            placeholder={hasSource ? 'Find clips… “surprising facts under 30 seconds”' : 'Open a video, then describe the clips you want'}
-            onPointerDown={() => setMomentsOpen(true)} onChange={() => setMomentsOpen(true)}
-            onKeyDown={event => {
-              if (event.key === 'Escape') {
-                event.stopPropagation()
-                setMomentsOpen(false)
-                event.currentTarget.blur()
-              }
-            }} />
-          {momentRunning ? <LoaderCircle size={15} className="spin" aria-label="Finding clips" /> : <kbd aria-hidden="true">/</kbd>}
-        </form>
+        <button type="button" className="ask" onClick={() => setPaletteOpen(true)} aria-haspopup="dialog" title="Search every action (Ctrl K)">
+          <Search size={16} aria-hidden="true" />
+          <span>Search actions, tools and settings…</span>
+          <kbd aria-hidden="true">Ctrl K</kbd>
+        </button>
         <div className="titlebar-space" data-tauri-drag-region />
         <div className="top-actions">
           <UpdateIndicator update={updates} />
-          <button className="pill" onClick={() => setPaletteOpen(true)} title="Search every action (Ctrl K)"><Search size={14} /> All actions <kbd>Ctrl K</kbd></button>
           <button className="icon-button pill-icon settings-trigger" aria-label="Settings" title="Settings"
             aria-pressed={settingsOpen} onClick={() => { setMomentsOpen(false); setSettingsOpen(open => !open) }}><SettingsIcon size={16} /></button>
           <button type="button" className="button primary export-trigger" aria-haspopup="dialog"
@@ -2669,6 +2643,15 @@ export function App() {
         <section className="find-panel" id="find-panel" aria-label="Find clips" onKeyDown={event => {
           if (event.key === 'Escape') { event.stopPropagation(); setMomentsOpen(false); askInput.current?.blur() }
         }}>
+          <form className="find-ask" role="search" onSubmit={event => {
+            event.preventDefault()
+            requestSearch(askInput.current?.value.trim() || DEFAULT_MOMENT_QUERY)
+          }}>
+            <Sparkles size={16} aria-hidden="true" />
+            <input ref={askInput} name="prompt" maxLength={240} disabled={!hasSource || loading} aria-label="Describe the clips to find"
+              autoComplete="off" defaultValue={momentQuery} placeholder="Find clips… “surprising facts under 30 seconds”" />
+            {momentRunning && <LoaderCircle size={15} className="spin" aria-label="Finding clips" />}
+          </form>
           <div className="find-options">
             <span>Length</span>
             <div className="seg" role="group" aria-label="Maximum clip length">
@@ -2724,6 +2707,20 @@ export function App() {
             <button className="button primary small" disabled={busy || !pickedCount}
               onClick={addPickedMoments}>{pickedCount ? `Add ${pickedCount} ${pickedCount === 1 ? 'clip' : 'clips'}` : 'Add clips'}</button>
           </div>}
+          <div className="find-time">
+            <div className="find-time-head">
+              <span>Split by time</span>
+              <div className="seg split-mode" role="group" aria-label="Split behavior">
+                <button type="button" aria-pressed={splitMode === 'mark'} onClick={() => setSplitMode('mark')}>Mark only</button>
+                <button type="button" aria-pressed={splitMode === 'add'} onClick={() => setSplitMode('add')}>Split &amp; add</button>
+              </div>
+            </div>
+            <div className="find-presets" role="group" aria-label="Split the trim range">
+              <button type="button" className="find-preset" disabled={trimDisabled || !canSaveRange || editingCaptionJob} onClick={splitAtPlayhead}><Split size={13} /> At playhead</button>
+              {[15, 30, 60, 120, 300].map(seconds => <button key={seconds} type="button" className="find-preset" disabled={trimDisabled || !canSaveRange || editingCaptionJob}
+                onClick={() => splitParts(splitRange(range, seconds))}><Split size={13} /> {seconds < 60 ? `Every ${seconds}s` : `Every ${seconds / 60} min`}</button>)}
+            </div>
+          </div>
         </section>
       </>}
 
@@ -2749,6 +2746,12 @@ export function App() {
             <span>{item.label}</span>
             {item.badge !== undefined && <em className="rail-badge">{item.badge}</em>}
           </button>)}
+          <button id="rail-smart-split" className="rail-button" aria-pressed={momentsOpen} aria-controls="find-panel" aria-expanded={momentsOpen}
+            disabled={!hasSource || loading} title="Smart split: find clips with AI or split by time (/)"
+            onClick={() => setMomentsOpen(open => !open)}>
+            {momentRunning ? <LoaderCircle size={19} className="spin" /> : <Sparkles size={19} />}
+            <span>Smart split</span>
+          </button>
         </nav>
 
         <section className="viewer" aria-label="Video preview">
@@ -3030,8 +3033,8 @@ export function App() {
             </>}
             <CaptionEditor key={captionKey} label={captionLabel} range={range} track={activeCaptions}
               model={captionModel} progress={captionProgress} status={captionStatus?.key === captionKey || captionStatus?.key === 'batch' ? captionStatus.text : ''}
-              editing={editingCaptionJob} canGenerate={!titleProgress} styleOpen={styleDockOpen}
-              defaultStyle={sharedCaptionStyle.current ?? undefined} onOpenStyle={() => setStyleDockKey(key => key === captionKey ? null : captionKey)}
+              editing={editingCaptionJob} canGenerate={!titleProgress}
+              defaultStyle={sharedCaptionStyle.current ?? undefined}
               onChange={saveCaptions} onGenerate={generateCaptions} onCancel={cancelCaptions}
               onSeek={captionSeek} getTime={captionPlayhead} />
           </div> : <div className="empty-queue">
@@ -3096,24 +3099,8 @@ export function App() {
             <button className="icon-button compact boxed" title="Undo (Ctrl Z)" aria-label="Undo" disabled={!canUndo} onClick={undoEdit}><Undo2 size={15} /></button>
             <button className="icon-button compact boxed" title="Redo (Ctrl Shift Z)" aria-label="Redo" disabled={!canRedo} onClick={redoEdit}><Redo2 size={15} /></button>
             <span className="divider" />
-            <div className="split">
-              <button className="button outline small" disabled={trimDisabled || !canSaveRange || editingCaptionJob} onClick={() => setSplitOpen(!splitOpen)} aria-expanded={splitOpen}><Split size={14} /> Split <ChevronDown size={12} /></button>
-              {splitOpen && canSaveRange && !trimDisabled && <div className="split-menu">
-                <div className="seg split-mode" role="group" aria-label="Split behavior">
-                  <button aria-pressed={splitMode === 'mark'} onClick={() => setSplitMode('mark')}>Mark only</button>
-                  <button aria-pressed={splitMode === 'add'} onClick={() => setSplitMode('add')}>Split &amp; add</button>
-                </div>
-                <button onClick={splitAtPlayhead}>At playhead</button>{[15, 30, 60, 120, 300].map(seconds =>
-                  <button key={seconds} onClick={() => splitParts(splitRange(range, seconds))}>{seconds < 60 ? `Every ${seconds}s` : `Every ${seconds / 60} min`}</button>)}
-              </div>}
-            </div>
             <button className="button outline small trim-section" disabled={!canTrim}
               title="Remove the In–Out selection from the video and close the gap" onClick={trimSection}><ScissorsLineDashed size={14} /> Delete range</button>
-            <button className={`button outline small snap ${snapping ? 'active' : ''}`}
-              title="Snap trim handles and clip edges to nearby edit points"
-              aria-label="Toggle snapping" aria-pressed={snapping} onClick={() => setSnapping(on => !on)}>
-              <Magnet size={14} /> Snap
-            </button>
             <div className="trim-bar" role="group" aria-label="Trim range">
               <TimeField label="In" value={range.start} disabled={trimDisabled} onChange={value => editBoundary('start', value)} onMark={() => editBoundary('start', activeTime())} />
               <TimeField label="Out" value={range.end} disabled={trimDisabled} onChange={value => editBoundary('end', value)} onMark={() => editBoundary('end', activeTime())} />

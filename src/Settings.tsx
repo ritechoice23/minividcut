@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import { Channel, invoke } from '@tauri-apps/api/core'
 import { getVersion } from '@tauri-apps/api/app'
 import { confirm } from '@tauri-apps/plugin-dialog'
-import { ArrowDownToLine, ArrowLeft, AudioLines, Info, Keyboard, LoaderCircle, Monitor, RefreshCw, Scissors, Search, SlidersHorizontal, Smartphone, Sparkles } from 'lucide-react'
+import { ArrowDownToLine, ArrowLeft, AudioLines, Info, Keyboard, LoaderCircle, Monitor, RefreshCw, Scissors, Search, Smartphone, Sparkles } from 'lucide-react'
 import type { AppUpdate } from './useAppUpdate'
 import { fileNameExample, QUALITY_OPTIONS } from './preferences'
 import type { FileNameParts, Preferences } from './preferences'
@@ -14,11 +14,10 @@ const MODEL_INFO = {
   language: { name: 'Language · LFM2.5 350M', description: 'Find clips (Smart Split) and AI titles', icon: Sparkles },
 }
 type LocalModel = { id: keyof typeof MODEL_INFO; bytes: number; installed: boolean }
-type Section = 'exporting' | 'ai' | 'editing' | 'shortcuts' | 'updates' | 'about'
+type Section = 'exporting' | 'ai' | 'shortcuts' | 'updates' | 'about'
 const SECTIONS: { id: Section; label: string; icon: ReactNode }[] = [
   { id: 'exporting', label: 'Exporting', icon: <ArrowDownToLine size={16} /> },
   { id: 'ai', label: 'AI on this device', icon: <Sparkles size={16} /> },
-  { id: 'editing', label: 'Editing defaults', icon: <SlidersHorizontal size={16} /> },
   { id: 'shortcuts', label: 'Shortcuts', icon: <Keyboard size={16} /> },
   { id: 'updates', label: 'Updates', icon: <RefreshCw size={16} /> },
   { id: 'about', label: 'About', icon: <Info size={16} /> },
@@ -147,7 +146,6 @@ export function Settings({
     models: match('ai models speech language download remove parakeet lfm captions find titles storage'),
     autoTitles: match('auto title new clips ai name'),
     autoCaption: match('caption new clips automatically'),
-    snap: match('snap edit points timeline editing'),
     shortcuts: match('shortcuts keyboard keys', ...SHORTCUTS.flat()),
     updates: match('updates check version'),
     background: match('download updates background'),
@@ -156,7 +154,6 @@ export function Settings({
   const visible = {
     exporting: show.folder || show.format || show.quality || show.names || show.openFolder,
     ai: show.models || show.autoTitles || show.autoCaption,
-    editing: show.snap,
     shortcuts: show.shortcuts,
     updates: show.updates || show.background,
     about: show.about,
@@ -205,12 +202,6 @@ export function Settings({
             </Row>
             <Row hidden={!show.openFolder} title="Open folder when export finishes">
               <Switch label="Open folder when export finishes" checked={preferences.openFolderAfterExport} onChange={() => set('openFolderAfterExport', !preferences.openFolderAfterExport)} />
-            </Row>
-          </section>}
-          {shown.editing && <section className="settings-card" id="settings-editing">
-            <h2>Editing defaults</h2>
-            <Row title="Snap to edit points" detail="Trim handles and clip edges stick to nearby clips, marks and the playhead">
-              <Switch label="Snap to edit points by default" checked={preferences.snapDefault} onChange={() => set('snapDefault', !preferences.snapDefault)} />
             </Row>
           </section>}
           {shown.updates && <section className="settings-card" id="settings-updates">

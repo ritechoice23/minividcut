@@ -27,10 +27,13 @@ import { ContextMenu } from './ContextMenu'
 import type { MenuItem, MenuState } from './ContextMenu'
 type MomentPick = { index: number | null; confident: boolean }
 import { Settings } from './Settings'
+import type { Section } from './Settings'
+import { AgentSetup } from './AgentSetup'
+import { AGENT_CANCELED, AGENT_SIGNED_OUT, AgentFormatError, agentMessage, agentMeta, buildAgentPrompt, parseAgentClips, pickBest, windowCues, AGENT_CHUNK_SECONDS } from './agents'
 import { UpdateIndicator, UpdatePrompt } from './UpdatePrompt'
 import { useAppUpdate } from './useAppUpdate'
 import { exportFileName, readPreferences, writePreferences } from './preferences'
-import type { Format, Preferences, Quality } from './preferences'
+import type { AgentId, Format, Preferences, Quality } from './preferences'
 import { CaptionEditor, CaptionStylePanel, progressLabel } from './CaptionEditor'
 import { CaptionPreview } from './CaptionPreview'
 import { prepareCaptionOverlay } from './caption-export'
@@ -199,6 +202,10 @@ function TimeField({ label, value, onChange, onMark, disabled }: {
 export function App() {
   const updates = useAppUpdate()
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsSection, setSettingsSection] = useState<Section | undefined>()
+  /** The assistant whose sign-in stopped working during the last search. */
+  const [agentIssue, setAgentIssue] = useState<AgentId | null>(null)
+  const openAiSettings = () => { setSettingsSection('ai'); setSettingsOpen(true) }
   const [recovery, setRecovery] = useState(readDraft)
   const [cancelingExport, setCancelingExport] = useState(false)
   const cancelRequested = useRef(false)
@@ -291,7 +298,7 @@ export function App() {
   const [momentRunning, setMomentRunning] = useState(false)
   const [momentProgress, setMomentProgress] = useState<number | null>(null)
   const [momentStopping, setMomentStopping] = useState(false)
-  const momentJob = useRef<{ canceled: boolean; transcribing: boolean } | null>(null)
+  const momentJob = useRef<{ canceled: boolean; transcribing: boolean; agent: boolean; stop: () => void } | null>(null)
   const momentCache = useRef<{
     revision: number
     batches: { range: Range; cues: CaptionCue[] }[]
@@ -1063,6 +1070,16 @@ export function App() {
     return accepted
   }
 
+  // An installed assistant picks the clips, so only the speech model is needed.
+  const confirmSpeechDownload = async (hasTranscript: boolean) => {
+    const model = await refreshCaptionModel()
+    if (model.installed || hasTranscript) return true
+    return confirm(
+      `Searching needs the ${Math.round(model.bytes / 1_000_000)} MB speech model to listen to your video. It downloads once and runs on this PC.`,
+      { title: 'Download the speech model?', okLabel: 'Download' },
+    )
+  }
+
   const toggleAutoTitles = async () => {
     if (autoTitles) {
       setAutoTitles(false)
@@ -1424,6 +1441,9 @@ export function App() {
     setMomentStopping(true)
     setMomentStatus('Stopping Smart Split…')
     if (job.transcribing) cancelSpeech('moments')
+    if (job.agent) void invoke('cancel_agent_job').catch(() => {})
+    // Wake any step still waiting in line for the speech engine.
+    job.stop()
   }
 
   const clearMoments = () => {
@@ -1442,6 +1462,10 @@ export function App() {
     if (!source || momentJob.current || importLock.current) return
     const limit = momentLimit(request, maximum)
     const topic = momentRequest(request)
+    // An assistant is used only after the user agreed to send it transcript text.
+    const agentId = preferences.aiProvider !== 'local' && preferences.aiConsent[preferences.aiProvider] ? preferences.aiProvider : null
+    const agentName = agentId ? agentMeta(agentId).name : ''
+    setAgentIssue(null)
     setMomentQuery(request)
     if (!Number.isFinite(limit) || limit < 0.05 || limit > 120 ||
       !Number.isInteger(maxResults) || maxResults < 1 || maxResults > MAX_CLIPS) {
@@ -1449,7 +1473,9 @@ export function App() {
       return
     }
     const revision = sourceRequest.current
-    const job = { canceled: false, transcribing: false }
+    let stopNow = () => {}
+    const stopped = new Promise<void>(resolve => { stopNow = resolve })
+    const job = { canceled: false, transcribing: false, agent: false, stop: stopNow }
     momentJob.current = job
     setMomentRunning(true)
     setMomentProgress(null)
@@ -1502,6 +1528,71 @@ export function App() {
         publish()
       }
     }
+    // With an installed assistant, the video is transcribed in chunks and each
+    // finished chunk is handed to the assistant in the background while the next
+    // one is still being transcribed. Picks merge into the list as they arrive.
+    let agentError: unknown = null
+    let thinking = false
+    let pending: CaptionCue[] = []
+    let chunkStart = 0
+    let fresh = false
+    let chain: Promise<void> = Promise.resolve()
+    const picked: Moment[] = []
+    const agentLine = (where: string) =>
+      `${where} · ${Math.min(maxResults, found.length)} of ${maxResults} found${thinking ? ` · ${agentName} is picking` : ''}`
+    const askChunk = async (id: AgentId, cues: CaptionCue[]) => {
+      if (!active() || agentError !== null) return
+      thinking = true
+      job.agent = true
+      try {
+        for (const part of windowCues(cues)) {
+          if (!active()) return
+          const prompt = buildAgentPrompt({ cues: part, request: topic, limit, count: maxResults })
+          let clips: Moment[] | undefined
+          // An assistant that answers in the wrong shape gets one more try.
+          for (let attempt = 0; attempt < 2 && !clips; attempt++) {
+            const raw = await invoke<string>('run_agent_search', {
+              provider: id, quality: preferences.aiQuality, model: id === 'opencode' ? preferences.aiModel || null : null, prompt,
+            })
+            if (!active()) return
+            try {
+              clips = parseAgentClips(raw, part, limit, maxResults)
+            } catch (error) {
+              if (!(error instanceof AgentFormatError) || attempt) throw error
+            }
+          }
+          picked.push(...(clips ?? []))
+        }
+        if (!active()) return
+        found.length = 0
+        found.push(...pickBest(picked, maxResults))
+        publish()
+      } catch (error) {
+        agentError ??= error
+      } finally {
+        thinking = false
+        job.agent = false
+      }
+    }
+    // Calls take turns, so the assistant works on one chunk at a time.
+    const dispatchChunk = (id: AgentId, until: number) => {
+      const cues = pending
+      // Keep the last minute so a thought on the boundary is seen whole next time.
+      pending = pending.filter(cue => cue.start >= until - 60)
+      chunkStart = until
+      fresh = false
+      chain = chain.then(() => askChunk(id, cues))
+    }
+    const reportAgentError = (error: unknown) => {
+      const text = typeof error === 'string' ? error : ''
+      if (text === AGENT_CANCELED) return
+      if (text === AGENT_SIGNED_OUT && agentId) {
+        setAgentIssue(agentId)
+        setMomentStatus(`${agentName} needs you to sign in again.`)
+      } else {
+        setMomentStatus(`${agentName} couldn’t finish. ${agentMessage(error, agentName)} Try again, or switch to This device in Settings.`)
+      }
+    }
     const publish = () => {
       const shown = [...found, ...likely].slice(0, maxResults)
       setMoments(shown)
@@ -1510,13 +1601,15 @@ export function App() {
     try {
       if (!active()) return
       const missing = missingTranscriptRanges(videoRange, [...known, ...cache].map(batch => batch.range))
-      if (!await confirmTitleDownload(false, !missing.length, true)) return
+      if (agentId ? !await confirmSpeechDownload(!missing.length) : !await confirmTitleDownload(false, !missing.length, true)) return
       if (!active()) return
       setMoments([])
       setMomentPicks(new Set())
-      for (let start = 0; start < source.duration && active() && !enough(); start += MOMENT_BATCH_SECONDS) {
+      for (let start = 0; start < source.duration && active() && agentError === null && (agentId ? true : !enough()); start += MOMENT_BATCH_SECONDS) {
         const batch = { start, end: Math.min(start + MOMENT_BATCH_SECONDS, source.duration) }
-        const status = () => `Searching ${stamp(batch.start)}–${stamp(batch.end)} · ${Math.min(maxResults, found.length + likely.length)} of ${maxResults} found`
+        const status = () => agentId
+          ? agentLine(`Reading ${stamp(batch.start)}–${stamp(batch.end)} of ${stamp(source.duration)}`)
+          : `Searching ${stamp(batch.start)}–${stamp(batch.end)} · ${Math.min(maxResults, found.length + likely.length)} of ${maxResults} found`
         setMomentStatus(status())
         setMomentProgress(start / source.duration)
         const cues = known.filter(item => item.range.start >= batch.start && item.range.start < batch.end).flatMap(item => item.cues)
@@ -1533,23 +1626,26 @@ export function App() {
         for (const gap of gaps) {
           if (!active()) break
           job.transcribing = true
-          setMomentStatus('Listening for moments in this part of the video…')
+          setMomentStatus(agentId ? agentLine(`Listening ${stamp(gap.start)}–${stamp(gap.end)}`) : 'Listening for moments in this part of the video…')
           try {
             const progress = new Channel<CaptionProgress>()
             progress.onmessage = update => {
               if (!active()) return
               if (update.stage === 'downloading') setMomentStatus(`Downloading speech tools · ${Math.round(update.fraction * 100)}%`)
               else if (update.stage === 'transcribing') {
-                setMomentStatus('Listening for moments in this part of the video…')
+                setMomentStatus(agentId ? agentLine(`Listening ${stamp(gap.start)}–${stamp(gap.end)}`) : 'Listening for moments in this part of the video…')
                 const scanned = gap.start - batch.start + (gap.end - gap.start) * update.fraction
-                setMomentProgress(previous => Math.max(previous ?? 0, (batch.start + scanned * 0.8) / source.duration))
+                setMomentProgress(previous => Math.max(previous ?? 0, (batch.start + scanned * (agentId ? 1 : 0.8)) / source.duration))
               }
             }
-            const result = await withSpeech('moments', () => active()
-              ? invoke<CaptionCue[]>('generate_captions', {
-                request: { path: source.path, range: gap, duration: source.duration, allowDownload: true }, progress,
-              })
-              : Promise.resolve([] as CaptionCue[]))
+            const result = await Promise.race([
+              withSpeech('moments', () => active()
+                ? invoke<CaptionCue[]>('generate_captions', {
+                  request: { path: source.path, range: gap, duration: source.duration, allowDownload: true }, progress,
+                })
+                : Promise.resolve([] as CaptionCue[])),
+              stopped.then(() => [] as CaptionCue[]),
+            ])
             if (!active()) break
             const generated = result.map(cue => offsetCaption(cue, gap.start))
             cache.push({ range: gap, cues: generated })
@@ -1562,6 +1658,11 @@ export function App() {
         if (!active()) break
         setMomentStatus(status())
         const unique = [...new Map(cues.map(cue => [`${cue.start}:${cue.end}`, cue])).values()].sort((a, b) => a.start - b.start)
+        if (agentId) {
+          if (unique.length) { pending.push(...unique); fresh = true }
+          if (fresh && (batch.end - chunkStart >= AGENT_CHUNK_SECONDS || batch.end >= source.duration)) dispatchChunk(agentId, batch.end)
+          continue
+        }
         const candidates = momentCandidates(unique, { ...batch, end: Math.min(source.duration, batch.end + limit) }, limit)
           .filter(candidate => momentWorthy(candidate.text))
         for (let index = 0; index < candidates.length && active() && found.length < maxResults; index += 4) {
@@ -1574,10 +1675,16 @@ export function App() {
         }
         scanned++
       }
+      if (agentId) {
+        if (fresh && active() && agentError === null) dispatchChunk(agentId, source.duration)
+        setMomentProgress(1)
+        setMomentStatus(agentLine('Finishing'))
+        await chain
+      }
       // The model picks one excerpt per group of four, so a short video can
       // run out of groups before reaching the requested count. Ask again about
       // the candidates it passed over until the count is met or none are left.
-      for (let pass = 0; pass < 3 && active() && found.length + likely.length < maxResults; pass++) {
+      for (let pass = 0; pass < 3 && !agentId && active() && found.length + likely.length < maxResults; pass++) {
         const remaining = leftovers.filter(item => ![...found, ...likely].some(chosen => rangesOverlap(chosen, item)))
         leftovers.length = 0
         if (remaining.length < 2) break
@@ -1587,7 +1694,8 @@ export function App() {
         }
       }
       const total = Math.min(maxResults, found.length + likely.length)
-      if (active()) setMomentStatus(total ? `Review ${total} suggested ${total === 1 ? 'moment' : 'moments'}.` : 'No matching moments found. Try another quick search or a shorter description.')
+      if (agentError !== null) { if (active()) reportAgentError(agentError) }
+      else if (active()) setMomentStatus(total ? `Review ${total} suggested ${total === 1 ? 'moment' : 'moments'}.` : 'No matching moments found. Try another quick search or a shorter description.')
     } catch (error) {
       if (active()) setMomentStatus(message(error) === 'This video has no audio track to caption.'
         ? 'This video has no audio to search.' : 'Smart Split couldn’t finish. You can retry or review the suggestions already found.')
@@ -2638,9 +2746,38 @@ export function App() {
         </div>}
       </header>
 
-      {momentsOpen && hasSource && !settingsOpen && <>
-        <div className="find-scrim" onPointerDown={() => setMomentsOpen(false)} />
-        <section className="find-panel" id="find-panel" aria-label="Find clips" onKeyDown={event => {
+
+      <UpdatePrompt update={updates} />
+      <Settings open={settingsOpen} onClose={() => { setSettingsOpen(false); setSettingsSection(undefined) }} section={settingsSection} update={updates}
+        preferences={preferences} onPreferences={setPreferences} projectName={source ? baseName : ''} projectMeta={source ? `${stamp(duration)} · ${clips.length} ${clips.length === 1 ? 'clip' : 'clips'}` : ''}
+        autoTitles={autoTitles} onToggleAutoTitles={() => void toggleAutoTitles()}
+        exportFolder={exportFolder} onChooseExportFolder={() => void chooseExportFolder()} onClearExportFolder={clearExportFolder}
+        onModelsChanged={(removed) => {
+          if (removed) {
+            localStorage.removeItem(TITLE_DOWNLOAD_KEY)
+            localStorage.removeItem(AUTO_TITLES_KEY)
+            setAutoTitles(false)
+          }
+          void refreshCaptionModel().catch(() => {})
+        }} />
+      <main hidden={settingsOpen} className={`workspace${timelineZoom > 1 ? ' timeline-zoomed' : ''}${sections.length ? ' reviewing' : ''}${hasSource ? ' docked' : ''}${momentsOpen && hasSource ? ' finding' : ''}`}>
+        <nav className="rail" aria-label="Tools">
+          {RAIL.map(item => <button key={item.id} id={`rail-${item.id}`} className="rail-button" aria-pressed={panel === item.id}
+            aria-controls={`${item.id}-panel`} disabled={!canOpenPanels || ((item.id === 'text' || item.id === 'bookends') && busy)}
+            onClick={() => togglePanel(item.id)}>
+            {item.busy ? <LoaderCircle size={19} className="spin" /> : item.icon}
+            <span>{item.label}</span>
+            {item.badge !== undefined && <em className="rail-badge">{item.badge}</em>}
+          </button>)}
+          <button id="rail-smart-split" className="rail-button" aria-pressed={momentsOpen} aria-controls="find-panel" aria-expanded={momentsOpen}
+            disabled={!hasSource || loading} title="Smart split: find clips with AI or split by time (/)"
+            onClick={() => setMomentsOpen(open => !open)}>
+            {momentRunning ? <LoaderCircle size={19} className="spin" /> : <Sparkles size={19} />}
+            <span>Smart split</span>
+          </button>
+        </nav>
+
+        {momentsOpen && hasSource && <section className="find-panel" id="find-panel" aria-label="Find clips" onKeyDown={event => {
           if (event.key === 'Escape') { event.stopPropagation(); setMomentsOpen(false); askInput.current?.blur() }
         }}>
           <form className="find-ask" role="search" onSubmit={event => {
@@ -2652,6 +2789,12 @@ export function App() {
               autoComplete="off" defaultValue={momentQuery} placeholder="Find clips… “surprising facts under 30 seconds”" />
             {momentRunning && <LoaderCircle size={15} className="spin" aria-label="Finding clips" />}
           </form>
+          {preferences.aiProvider !== 'local' && <p className="find-agent"><Sparkles size={12} aria-hidden="true" /> Picked by {agentMeta(preferences.aiProvider).name}
+            <button type="button" className="link-button" onClick={openAiSettings}>Change</button></p>}
+          {agentIssue && !momentRunning && <div className="agent-fix">
+            <AgentSetup only={agentIssue} preferences={preferences} onPreferences={setPreferences}
+              onDone={() => { setAgentIssue(null); setMomentStatus('Signed in. Run your search again.') }} />
+          </div>}
           <div className="find-options">
             <span>Length</span>
             <div className="seg" role="group" aria-label="Maximum clip length">
@@ -2682,7 +2825,9 @@ export function App() {
             <button className="button outline small" onClick={stopMomentSearch} disabled={momentStopping}>{momentStopping ? 'Stopping…' : 'Stop'}</button>
             <div className="thin-bar"><i style={{ width: `${Math.round((momentProgress ?? 0) * 100)}%` }} /></div>
           </div> : momentStatus ? <p className="find-status" role="status">{momentStatus}</p>
-            : !moments.length && <p className="find-status">Describe what you want in plain words, like “the funniest moments” or “key takeaways”. The transcript is searched on this device.</p>}
+            : !moments.length && <p className="find-status">Describe what you want in plain words, like “the funniest moments” or “key takeaways”. {preferences.aiProvider === 'local'
+              ? <>The transcript is searched on this device. <button type="button" className="link-button" onClick={openAiSettings}>Use Claude Code, Codex or OpenCode instead</button></>
+              : `The transcript text is sent to ${agentMeta(preferences.aiProvider).name} to pick the clips.`}</p>}
           {moments.length > 0 && <ol className="find-results">{moments.map((moment, index) => {
             const key = momentKey(moment)
             const added = clips.some(clip => clip.start === moment.start && clip.end === moment.end)
@@ -2697,7 +2842,8 @@ export function App() {
               <span className="find-thumb" style={{ aspectRatio: activeFormat.aspect }}>{clipFrames[moment.start] && <img alt="" src={clipFrames[moment.start]} />}</span>
               <span className="find-text"><q title={moment.text}>{moment.text}</q>
                 <small>{stamp(moment.start)} · {clipDuration(moment.end - moment.start)} · <button className="link-button" disabled={preview !== 'direct' && preview !== 'proxy'}
-                  onClick={() => previewMoment(moment)}><Play size={11} /> preview</button></small></span>
+                  onClick={() => previewMoment(moment)}><Play size={11} /> preview</button></small>
+                {moment.reason && <small className="find-reason">{moment.reason}</small>}</span>
               <span className="find-rank" title="Order the AI ranked this suggestion">{added ? <><Check size={13} /> Added</> : `#${index + 1}`}</span>
             </li>
           })}</ol>}
@@ -2721,38 +2867,7 @@ export function App() {
                 onClick={() => splitParts(splitRange(range, seconds))}><Split size={13} /> {seconds < 60 ? `Every ${seconds}s` : `Every ${seconds / 60} min`}</button>)}
             </div>
           </div>
-        </section>
-      </>}
-
-      <UpdatePrompt update={updates} />
-      <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} update={updates}
-        preferences={preferences} onPreferences={setPreferences} projectName={source ? baseName : ''} projectMeta={source ? `${stamp(duration)} · ${clips.length} ${clips.length === 1 ? 'clip' : 'clips'}` : ''}
-        autoTitles={autoTitles} onToggleAutoTitles={() => void toggleAutoTitles()}
-        exportFolder={exportFolder} onChooseExportFolder={() => void chooseExportFolder()} onClearExportFolder={clearExportFolder}
-        onModelsChanged={(removed) => {
-          if (removed) {
-            localStorage.removeItem(TITLE_DOWNLOAD_KEY)
-            localStorage.removeItem(AUTO_TITLES_KEY)
-            setAutoTitles(false)
-          }
-          void refreshCaptionModel().catch(() => {})
-        }} />
-      <main hidden={settingsOpen} className={`workspace${timelineZoom > 1 ? ' timeline-zoomed' : ''}${sections.length ? ' reviewing' : ''}${hasSource ? ' docked' : ''}`}>
-        <nav className="rail" aria-label="Tools">
-          {RAIL.map(item => <button key={item.id} id={`rail-${item.id}`} className="rail-button" aria-pressed={panel === item.id}
-            aria-controls={`${item.id}-panel`} disabled={!canOpenPanels || ((item.id === 'text' || item.id === 'bookends') && busy)}
-            onClick={() => togglePanel(item.id)}>
-            {item.busy ? <LoaderCircle size={19} className="spin" /> : item.icon}
-            <span>{item.label}</span>
-            {item.badge !== undefined && <em className="rail-badge">{item.badge}</em>}
-          </button>)}
-          <button id="rail-smart-split" className="rail-button" aria-pressed={momentsOpen} aria-controls="find-panel" aria-expanded={momentsOpen}
-            disabled={!hasSource || loading} title="Smart split: find clips with AI or split by time (/)"
-            onClick={() => setMomentsOpen(open => !open)}>
-            {momentRunning ? <LoaderCircle size={19} className="spin" /> : <Sparkles size={19} />}
-            <span>Smart split</span>
-          </button>
-        </nav>
+        </section>}
 
         <section className="viewer" aria-label="Video preview">
           <div className={`stage ${format} ${dragging ? 'dragging' : ''}`}>

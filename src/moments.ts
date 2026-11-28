@@ -3,7 +3,8 @@ import type { Range } from './clip'
 
 export const MOMENT_BATCH_SECONDS = 90
 export const DEFAULT_MOMENT_QUERY = 'The most important takeaway or memorable moment'
-export type Moment = Range & { text: string; cues: CaptionCue[] }
+/** `reason` and `score` are only set when an installed assistant picked the clip. */
+export type Moment = Range & { text: string; cues: CaptionCue[]; reason?: string; score?: number }
 
 /**
  * One-click searches. Each request is short and concrete because the

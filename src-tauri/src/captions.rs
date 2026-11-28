@@ -418,6 +418,46 @@ fn align_to_audio(words: Vec<Word>, audible: &[(i64, i64)]) -> Vec<Word> {
         .collect()
 }
 
+/// Transcribes one stretch of the video. Cue times start at zero for the stretch.
+/// Returns the cues and how much audio there really was.
+fn transcribe_stretch(
+    engine: &CaptionEngine,
+    model: &Path,
+    source: &Path,
+    video_duration: f64,
+    range: Clip,
+    cancel: &CancelToken,
+    report: &impl Fn(CaptionProgress),
+) -> Result<(Vec<Cue>, f64)> {
+    report(CaptionProgress::Preparing);
+    let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let pcm = directory.path().join("audio.pcm");
+    let duration = caption_audio(source, range, video_duration, &pcm)?;
+    check_cancel(cancel)?;
+    let pcm = File::open(pcm).map_err(|error| error.to_string())?;
+    if pcm.metadata().map_err(|error| error.to_string())?.len() == 0 {
+        return Ok((Vec::new(), duration));
+    }
+    if !installed(model) {
+        tauri::async_runtime::block_on(download_model(model, cancel, report))?;
+    }
+    let mut session = lock(&engine.session)?;
+    if session.is_none() {
+        report(CaptionProgress::Loading);
+        *session = Some(load_session(model)?);
+    }
+    let session = session.as_mut().unwrap();
+    report(CaptionProgress::Transcribing { fraction: 0.0 });
+    let result = transcribe_audio(session, pcm, duration, cancel, report);
+    session.clear_cancel_token();
+    check_cancel(cancel)?;
+    result.map(|cues| (cues, duration))
+}
+
+/// Captions, titles, Find clips and the timeline all come through here. What
+/// has been transcribed before is read from the saved transcript for this
+/// video; only the stretches not heard yet go to the speech model, and each is
+/// saved as soon as it finishes so stopping never loses finished work.
 #[tauri::command]
 pub async fn generate_captions(
     app: AppHandle,
@@ -425,6 +465,7 @@ pub async fn generate_captions(
     progress: Channel<CaptionProgress>,
 ) -> Result<Vec<Cue>> {
     let path = model_path(&app)?;
+    let cache_dir = crate::transcripts::directory(&app)?;
     background(move || {
         let engine = app.state::<CaptionEngine>();
         let job = engine.begin()?;
@@ -438,29 +479,47 @@ pub async fn generate_captions(
         if !request.duration.is_finite() || request.duration <= 0.0 {
             return Err("Invalid video duration.".into());
         }
-        report(CaptionProgress::Preparing);
-        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let pcm = directory.path().join("audio.pcm");
-        let duration = caption_audio(&request.path, request.range, request.duration, &pcm)?;
-        check_cancel(cancel)?;
-        let pcm = File::open(pcm).map_err(|error| error.to_string())?;
-        if pcm.metadata().map_err(|error| error.to_string())?.len() == 0 {
-            return Ok(Vec::new());
+        let from = request.range.start.max(0.0);
+        let to = request.range.end.min(request.duration);
+        let key = crate::transcripts::key(&request.path, request.duration, MODEL_FILE)
+            .filter(|_| from.is_finite() && to.is_finite() && to > from);
+        let Some(key) = key else {
+            // Nothing to key the saved transcript on, so just transcribe the range.
+            let (cues, _) = transcribe_stretch(
+                &engine, &path, &request.path, request.duration, request.range, cancel, &report,
+            )?;
+            return Ok(cues);
+        };
+        let mut transcript = crate::transcripts::load(&cache_dir, &key);
+        let gaps = transcript.missing(from, to);
+        let total: f64 = gaps.iter().map(|(start, end)| end - start).sum::<f64>().max(0.001);
+        let mut done = 0.0;
+        if gaps.is_empty() {
+            report(CaptionProgress::Transcribing { fraction: 0.99 });
         }
-        if !installed(&path) {
-            tauri::async_runtime::block_on(download_model(&path, cancel, &report))?;
+        for (start, end) in gaps {
+            check_cancel(cancel)?;
+            let length = end - start;
+            let before = done;
+            let report_stretch = |stage: CaptionProgress| match stage {
+                CaptionProgress::Transcribing { fraction } => report(CaptionProgress::Transcribing {
+                    fraction: ((before + fraction * length) / total).min(0.99),
+                }),
+                other => report(other),
+            };
+            let (cues, heard) = transcribe_stretch(
+                &engine, &path, &request.path, request.duration, Clip { start, end }, cancel, &report_stretch,
+            )?;
+            transcript.add(crate::transcripts::Span {
+                start,
+                end: start + heard.min(length).max(0.0),
+                cues: crate::transcripts::shifted(cues, start),
+            });
+            // A failed save only means this stretch is heard again next time.
+            let _ = crate::transcripts::save(&cache_dir, &key, &transcript);
+            done += length;
         }
-        let mut session = lock(&engine.session)?;
-        if session.is_none() {
-            report(CaptionProgress::Loading);
-            *session = Some(load_session(&path)?);
-        }
-        let session = session.as_mut().unwrap();
-        report(CaptionProgress::Transcribing { fraction: 0.0 });
-        let result = transcribe_audio(session, pcm, duration, cancel, &report);
-        session.clear_cancel_token();
-        check_cancel(cancel)?;
-        result
+        Ok(transcript.cues_in(from, to))
     })
     .await
 }

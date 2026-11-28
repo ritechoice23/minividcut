@@ -1,3 +1,4 @@
+mod agents;
 mod bookends;
 mod caption_overlay;
 mod caption_render;
@@ -7,6 +8,7 @@ mod kaino;
 mod models;
 mod music_library;
 mod titles;
+mod transcripts;
 mod video;
 
 pub fn run() {
@@ -18,14 +20,25 @@ pub fn run() {
         .manage(video::Exports::default())
         .manage(captions::CaptionEngine::default())
         .manage(titles::TitleEngine::default())
+        .manage(agents::AgentEngine::default())
         .manage(caption_overlay::CaptionOverlays::default())
         .manage(kaino::DownloadCancels::default())
         .invoke_handler(tauri::generate_handler![
             captions::caption_model,
             captions::generate_captions,
             captions::cancel_captions,
+            transcripts::transcript_cache_bytes,
+            transcripts::clear_transcript_cache,
             titles::generate_title,
             titles::select_moment,
+            agents::detect_agents,
+            agents::agent_signin_state,
+            agents::agent_login,
+            agents::test_agent,
+            agents::run_agent_search,
+            agents::cancel_agent_job,
+            agents::open_agent_link,
+            agents::opencode_models,
             models::local_models,
             models::manage_local_model,
             models::cancel_model_download,

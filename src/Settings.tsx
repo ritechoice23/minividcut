@@ -8,22 +8,25 @@ import type { AppUpdate } from './useAppUpdate'
 import { fileNameExample, QUALITY_OPTIONS } from './preferences'
 import type { FileNameParts, Preferences } from './preferences'
 import { SHORTCUTS } from './shortcuts'
+import { AgentSetup } from './AgentSetup'
+import { agentMeta } from './agents'
 
 const MODEL_INFO = {
   speech: { name: 'Speech · Parakeet TDT 0.6B', description: 'Transcript, captions and the timeline Words lane', icon: AudioLines },
   language: { name: 'Language · LFM2.5 350M', description: 'Find clips (Smart Split) and AI titles', icon: Sparkles },
 }
 type LocalModel = { id: keyof typeof MODEL_INFO; bytes: number; installed: boolean }
-type Section = 'exporting' | 'ai' | 'shortcuts' | 'updates' | 'about'
+export type Section = 'exporting' | 'ai' | 'shortcuts' | 'updates' | 'about'
 const SECTIONS: { id: Section; label: string; icon: ReactNode }[] = [
   { id: 'exporting', label: 'Exporting', icon: <ArrowDownToLine size={16} /> },
-  { id: 'ai', label: 'AI on this device', icon: <Sparkles size={16} /> },
+  { id: 'ai', label: 'AI', icon: <Sparkles size={16} /> },
   { id: 'shortcuts', label: 'Shortcuts', icon: <Keyboard size={16} /> },
   { id: 'updates', label: 'Updates', icon: <RefreshCw size={16} /> },
   { id: 'about', label: 'About', icon: <Info size={16} /> },
 ]
 const NAME_PARTS: [keyof FileNameParts, string][] = [['video', 'Original video name'], ['number', 'Clip number'], ['title', 'Clip title']]
 const megabytes = (bytes: number) => `${Math.round(bytes / 1_000_000)} MB`
+const kilobytes = (bytes: number) => bytes >= 1_000_000 ? `${(bytes / 1_000_000).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1000))} KB`
 
 function updateSummary(status: AppUpdate['status']): string {
   switch (status.phase) {
@@ -48,10 +51,12 @@ function Row({ title, detail, children, hidden }: { title: ReactNode; detail?: R
 }
 
 export function Settings({
-  open, onClose, onModelsChanged, update, preferences, onPreferences, projectName, projectMeta,
+  open, onClose, onModelsChanged, update, preferences, onPreferences, projectName, projectMeta, section,
   autoTitles, onToggleAutoTitles, exportFolder, onChooseExportFolder, onClearExportFolder,
 }: {
   open: boolean; onClose: () => void; onModelsChanged: (removed: boolean) => void; update: AppUpdate
+  /** Opens on this section when set, for example from a link in the Find panel. */
+  section?: Section
   preferences: Preferences; onPreferences: (preferences: Preferences) => void
   projectName: string; projectMeta: string
   autoTitles: boolean; onToggleAutoTitles: () => void
@@ -64,6 +69,8 @@ export function Settings({
   const [pending, setPending] = useState<{ id: LocalModel['id']; install: boolean } | null>(null)
   const [progress, setProgress] = useState<number | null>(null)
   const [status, setStatus] = useState('')
+  /** Size of the saved transcripts that spare the speech model from listening twice. */
+  const [savedBytes, setSavedBytes] = useState(0)
   const toggleNamePart = (key: keyof FileNameParts) => {
     const next = { ...preferences.fileNameParts, [key]: !preferences.fileNameParts[key] }
     if (next.video || next.number || next.title) onPreferences({ ...preferences, fileNameParts: next })
@@ -73,6 +80,7 @@ export function Settings({
   useEffect(() => {
     if (!open || pending) return
     let active = true
+    void invoke<number>('transcript_cache_bytes').then(bytes => { if (active) setSavedBytes(bytes) }).catch(() => {})
     void invoke<LocalModel[]>('local_models').then(result => {
       if (active) setModels(result)
     }).catch(() => {
@@ -80,6 +88,7 @@ export function Settings({
     })
     return () => { active = false }
   }, [open, pending])
+  useEffect(() => { if (open && section) setActive(section) }, [open, section])
   useEffect(() => { if (open && !version) void getVersion().then(setVersion).catch(() => {}) }, [open, version])
   useEffect(() => {
     if (!open) return
@@ -143,7 +152,7 @@ export function Settings({
     quality: match('default quality compact compatible lossless'),
     names: match('file names title number'),
     openFolder: match('open folder when export finishes'),
-    models: match('ai models speech language download remove parakeet lfm captions find titles storage'),
+    models: match('ai assistant claude code codex opencode sign in connect models speech language download remove parakeet lfm captions find titles storage'),
     autoTitles: match('auto title new clips ai name'),
     autoCaption: match('caption new clips automatically'),
     shortcuts: match('shortcuts keyboard keys', ...SHORTCUTS.flat()),
@@ -173,7 +182,7 @@ export function Settings({
           aria-current={shown[section.id] && (!query || active === section.id) ? 'page' : undefined}
           onClick={() => { setQuery(''); setActive(section.id) }}>
           {section.icon} {section.label}</button>)}
-        <p className="settings-version">MiniVidCut {version}<br />Your videos never leave this PC.</p>
+        <p className="settings-version">MiniVidCut {version}<br />Your videos never leave this PC.{preferences.aiProvider !== 'local' && <><br />Transcript text goes to {agentMeta(preferences.aiProvider).name}.</>}</p>
       </nav>
       <div className="settings-content">
           {shown.exporting && <section className="settings-card" id="settings-exporting">
@@ -212,7 +221,10 @@ export function Settings({
             </Row>
           </section>}
           {shown.ai && <section className="settings-card" id="settings-ai">
-            <h2>AI on this device</h2><p className="lead">Download once. Everything runs offline on your PC.</p>
+            <h2>AI</h2><p className="lead">Choose what finds your clips. Use an assistant you already have, or run everything on this PC.</p>
+            {show.models && <AgentSetup visible={open} preferences={preferences} onPreferences={onPreferences} localReady={models.some(model => model.id === 'language' && model.installed)} />}
+            {show.models && <h3 className="agent-subhead">On this device</h3>}
+            {show.models && <p className="lead">Download once. These run offline on your PC.</p>}
             {show.models && models.map(model => {
               const { name, description, icon: Icon } = MODEL_INFO[model.id]
               const busy = pending?.id === model.id
@@ -235,6 +247,12 @@ export function Settings({
               </div>
             })}
             {show.models && status && !pending && <p className="settings-status" role="status">{status}</p>}
+            <Row hidden={!show.models} title="Saved transcripts"
+              detail={`${savedBytes ? kilobytes(savedBytes) : 'Nothing saved yet'} · videos are only listened to once, so searches, captions and titles reuse them`}>
+              <button className="button ghost small" disabled={!savedBytes} onClick={() => {
+                void invoke('clear_transcript_cache').then(() => setSavedBytes(0)).catch(() => setStatus('Couldn’t clear the saved transcripts.'))
+              }}>Clear</button>
+            </Row>
             <Row hidden={!show.autoTitles} title="Auto-title new clips" detail="Name each clip from what is said in it">
               <Switch label="Auto-title new clips" checked={autoTitles} onChange={onToggleAutoTitles} />
             </Row>

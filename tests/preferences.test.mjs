@@ -40,6 +40,23 @@ test('preferences round-trip through storage and survive unavailable storage', (
   assert.equal(writePreferences(broken, next), false)
 })
 
+test('clips are found on this device until an assistant is chosen and agreed to', () => {
+  assert.equal(DEFAULT_PREFERENCES.aiProvider, 'local')
+  assert.deepEqual(DEFAULT_PREFERENCES.aiConsent, { claude: false, codex: false, opencode: false })
+  const agreed = parsePreferences(JSON.stringify({ aiProvider: 'codex', aiConsent: { codex: true }, aiQuality: 'best', aiModel: ' openai/gpt-5#high ' }))
+  assert.equal(agreed.aiProvider, 'codex')
+  assert.equal(agreed.aiQuality, 'best')
+  assert.equal(agreed.aiModel, 'openai/gpt-5#high')
+  // Without saved consent an assistant is never used, even if it was selected.
+  assert.equal(parsePreferences(JSON.stringify({ aiProvider: 'claude' })).aiProvider, 'local')
+  assert.equal(parsePreferences(JSON.stringify({ aiProvider: 'claude', aiConsent: { claude: 'yes' } })).aiProvider, 'local')
+  assert.equal(parsePreferences(JSON.stringify({ aiProvider: 'gpt', aiConsent: 5, aiQuality: 'max', aiModel: '--auto now' })).aiProvider, 'local')
+  const invalid = parsePreferences(JSON.stringify({ aiQuality: 'max', aiModel: '--auto now', aiConsent: 5 }))
+  assert.equal(invalid.aiQuality, 'fast')
+  assert.equal(invalid.aiModel, '')
+  assert.deepEqual(invalid.aiConsent, DEFAULT_PREFERENCES.aiConsent)
+})
+
 test('file names combine the chosen parts in a fixed order', () => {
   const clip = { title: ' Moon facts ', number: 3, video: 'Moon Tour' }
   assert.equal(exportFileName({ video: false, number: false, title: true }, clip), 'Moon facts')

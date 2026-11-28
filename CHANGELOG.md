@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Use Claude Code, Codex or OpenCode to find clips.** If one is installed, pick it in Settings → AI. **Sign in** opens your browser and brings you back when you are done; MiniVidCut never sees your password or token. The assistant reads the whole transcript at once and returns ranked clips with a one-line reason each. Only transcript text is sent, never video or audio. This device stays the default.
+- **Fix a sign-in without leaving Find clips.** If an assistant's login has expired, the Find panel shows a **Sign in** button right there.
+- OpenCode is marked Experimental. It runs as a locked-down agent that cannot read or write files.
+
 ## 1.10.0 — 2026-11-28
 
 - **Easier to read.** Secondary text, labels and hints are brighter, so they stay legible with the screen brightness turned right down.

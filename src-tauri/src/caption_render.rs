@@ -4,7 +4,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 
-#[derive(Deserialize, Serialize)]
+// Cues are saved in the transcript cache, so they must be cloneable and comparable.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct Cue {
     pub start: f64,
     pub end: f64,
@@ -13,7 +14,7 @@ pub struct Cue {
     pub words: Vec<TimedWord>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct TimedWord {
     pub start: f64,
     pub end: f64,

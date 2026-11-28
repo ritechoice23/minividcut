@@ -127,8 +127,7 @@ input[type="range"] { accent-color: var(--lime); }
   .pill:not(.pill-icon):not(.settings-back) svg { width: 16px; height: 16px; }
 }
 
-/* Find clips dropdown ------------------------------------------------------ */
-.find-scrim { position: fixed; inset: 48px 0 0; z-index: 35; background: #0d0c0b80; }
+/* Find clips: docked in the left column of the workspace ------------------- */
 .find-panel { position: fixed; z-index: 40; top: 56px; left: 108px; width: min(560px, calc(100vw - 124px)); max-height: calc(100dvh - 64px); display: flex; flex-direction: column; gap: 6px; padding: 12px; overflow: auto; border: 1px solid var(--edge); border-radius: 18px; background: #151310f5; box-shadow: 0 30px 80px #000c; backdrop-filter: blur(8px); }
 .find-options { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 2px 4px 10px; border-bottom: 1px solid var(--hair); color: var(--mute); font-size: 13px; }
 .find-options .button { margin-left: auto; }
@@ -482,6 +481,24 @@ button.lane-empty:hover:not(:disabled) { color: var(--lime); border-color: #cefa
 .model-icon { width: 44px; height: 44px; flex-shrink: 0; display: grid; place-items: center; border-radius: 12px; background: #22201b; color: var(--lime); }
 .ok-chip { padding: 2px 9px; border: 1px solid #cefa7255; border-radius: 999px; color: var(--lime); font-size: 12px; white-space: nowrap; }
 .settings-status { margin-top: 10px; color: var(--mute); font-size: 13px; }
+.agent-list { display: grid; gap: 8px; margin-top: 12px; }
+.agent-row { display: flex; align-items: center; gap: 14px; padding: 12px 14px; border: 1px solid var(--hair); border-radius: 14px; background: #171511; }
+.agent-row[data-selected="true"] { border-color: #cefa7266; }
+.agent-row .model-icon { width: 36px; height: 36px; border-radius: 10px; }
+.agent-radio { flex: none; width: 18px; height: 18px; padding: 0; border: 2px solid var(--edge); border-radius: 50%; background: transparent; }
+.agent-radio:hover:not(:disabled) { border-color: var(--mute); }
+.agent-radio[aria-checked="true"] { border-color: var(--lime); background: var(--lime); box-shadow: inset 0 0 0 3px #171511; }
+.agent-radio:disabled { opacity: .35; }
+.agent-tag { margin-left: 8px; padding: 1px 7px; border: 1px solid var(--edge); border-radius: 999px; color: var(--mute); font-size: 11px; font-weight: 500; }
+.agent-hint { color: var(--mute); font-size: 12px; white-space: nowrap; }
+.agent-problem { color: var(--danger) !important; }
+.agent-note { margin-top: 10px; color: var(--mute); font-size: 12.5px; line-height: 1.5; }
+.agent-model { width: 220px; max-width: 100%; padding: 6px 10px; border: 1px solid var(--hair); border-radius: 8px; background: transparent; color: var(--ink); font: 12.5px var(--mono); }
+.agent-subhead { margin: 22px 0 0; font-size: 15px; font-weight: 700; }
+.agent-fix { padding: 4px 6px 2px; }
+.find-agent { display: flex; align-items: center; gap: 8px; padding: 2px 6px; color: var(--mute); font-size: 12.5px; }
+.find-reason { display: block; margin-top: 2px; color: var(--mute); font-size: 12px; line-height: 1.4; }
+
 .settings-foot { margin-top: 14px; color: var(--dim); font-size: 13px; }
 .settings-product { display: inline-flex; align-items: center; gap: 10px; }
 .settings-product .brand-mark { width: 24px; height: 24px; border-radius: 6px; }
@@ -943,10 +960,15 @@ button.lane-empty:hover:not(:disabled) { color: var(--lime); border-color: #cefa
 
 /* Docked layout: tools on the left, clips on the right, preview in the middle. */
 .workspace:not(.docked) .sheet, .workspace:not(.docked) > .editor-media-panel { display: none; }
-.workspace.docked { grid-template-columns: 96px clamp(300px, 26vw, 400px) minmax(0, 1fr) clamp(264px, 24vw, 380px); }
+/* Three flat columns: tools (with Find clips) on the left, the player in the
+   middle, clips on the right. Full-height lines divide them and stop at the timeline. */
+.workspace.docked { grid-template-columns: 84px clamp(300px, 23vw, 360px) minmax(0, 1fr) clamp(260px, 21vw, 340px); }
+.workspace.docked > .rail { align-self: stretch; justify-self: stretch; align-items: center; max-height: none; margin: 0; padding: 12px 0; border: 0; border-radius: 0; background: transparent; }
 .workspace.docked .viewer { grid-column: 3; padding: 10px 14px 4px; }
-.workspace.docked .sheet, .workspace.docked > .editor-media-panel { grid-column: 2; justify-self: stretch; width: auto; margin: 10px 0; z-index: 1; border-radius: 18px; background: #13110f; box-shadow: none; backdrop-filter: none; }
-.workspace.docked .sheet.left { grid-column: 4; margin-right: 24px; }
+.workspace.docked .sheet, .workspace.docked > .editor-media-panel, .workspace.docked > .find-panel { grid-column: 2; grid-row: 1; justify-self: stretch; align-self: stretch; width: auto; max-height: none; margin: 0; z-index: 1; border: 0; border-right: 1px solid var(--edge); border-radius: 0; background: transparent; box-shadow: none; backdrop-filter: none; }
+.workspace.docked .sheet.left { grid-column: 4; border-right: 0; border-left: 1px solid var(--edge); }
+.workspace.docked > .find-panel { position: static; top: auto; left: auto; padding: 16px 16px 12px; overflow: auto; }
+.workspace.docked.finding > .sheet.right, .workspace.docked.finding > .editor-media-panel { display: none; }
 .workspace.docked > .editor-media-panel[hidden] { display: none; }
 .workspace.docked .sheet-head, .workspace.docked > .editor-media-panel > .caption-style-heading { padding: 18px 18px 10px; }
 .workspace.docked .sheet-head h2, .workspace.docked > .editor-media-panel > .caption-style-heading h2 { font-size: 22px; }
@@ -964,7 +986,7 @@ button.lane-empty:hover:not(:disabled) { color: var(--lime); border-color: #cefa
 /* The panels are permanent, so they have no close button. */
 .workspace.docked [aria-label="Close captions"], .workspace.docked [aria-label="Close frame"], .workspace.docked [aria-label="Close intro and outro"],
 .workspace.docked [aria-label="Close background music"], .workspace.docked [aria-label="Close text menu"] { display: none; }
-@media (max-width: 900px) { .workspace.docked { grid-template-columns: 84px 280px minmax(0, 1fr) 240px; } }
+@media (max-width: 900px) { .workspace.docked { grid-template-columns: 72px 260px minmax(0, 1fr) 220px; } }
 
 /* Tool panels (Text, Music, Intro/Outro) share the look of Frame and Captions:
    warm cards, 13px text, uppercase field labels and rounded controls. */
@@ -1193,7 +1215,6 @@ h2 { font-size: 13px; }
 .top-actions { gap: 8px; }
 .export-trigger { padding: 0 14px; }
 .window-controls button { width: 44px; }
-.find-scrim { inset: 44px 0 0; }
 .find-panel { top: 44px; padding: 10px; border-radius: 14px; width: min(640px, calc(100vw - 24px)); }
 .find-options, .find-status, .find-progress, .find-footer, .find-queued { font-size: 12px; }
 .find-results li { padding: 6px 8px; gap: 10px; }

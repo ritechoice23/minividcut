@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.11.1 — 2026-11-28
+
+- **Smoother with many clips.** The clip list no longer redraws every clip on each edit, so trimming, typing captions and panning the timeline stay responsive with dozens of clips (about three times less work per change with 60 clips).
+- **Faster on long videos.** Editing a clip no longer re-sorts the whole transcript, so dragging a clip edge stays smooth after the video has been transcribed.
+- **Quicker first export.** Graphics-card encoders are now checked side by side instead of one after another.
+
 ## 1.11.0 — 2026-11-28
 
 - **Use Claude Code, Codex or OpenCode for Smart Split and titles.** Pick one in Settings → AI and click Sign in: it opens your browser and returns when you are done. MiniVidCut never sees your password or token, and only transcript text is sent. This device stays the default.

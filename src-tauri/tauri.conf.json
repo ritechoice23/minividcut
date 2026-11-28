@@ -1,6 +1,6 @@
 {
   "productName": "MiniVidCut",
-  "version": "1.11.0",
+  "version": "1.11.1",
   "identifier": "com.minividcut.editor",
   "build": {
     "beforeDevCommand": "npm run dev",

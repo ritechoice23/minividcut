@@ -32,6 +32,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(240);
 const TEST_TIMEOUT: Duration = Duration::from_secs(90);
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
+const BUSY_WAIT: Duration = Duration::from_secs(300);
 const MAX_PROMPT: usize = 2_000_000;
 const MAX_CAPTURE: usize = 4_000_000;
 
@@ -57,6 +58,9 @@ const PING: &str =
 /// Clips are given as transcript line numbers, never as timestamps, so a
 /// model cannot invent a boundary that is not in the transcript.
 const SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["clips"],"properties":{"clips":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["start","end","score","reason"],"properties":{"start":{"type":"integer"},"end":{"type":"integer"},"score":{"type":"number"},"reason":{"type":"string"}}}}}}"#;
+
+/// Clip titles come back as a list too, so one call can title several clips.
+const TITLE_SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["titles"],"properties":{"titles":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","title"],"properties":{"id":{"type":"integer"},"title":{"type":"string"}}}}}}"#;
 
 /// OpenCode cannot enforce a schema or disable tools by flag, so each call
 /// runs as an agent that denies every permission. An unlocked OpenCode agent
@@ -102,6 +106,23 @@ impl Provider {
         match self {
             Provider::Claude | Provider::Opencode => &["auth", "login"],
             Provider::Codex => &["login"],
+        }
+    }
+}
+
+/// What the assistant is asked to do. It decides the shape of the answer.
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum Task {
+    Clips,
+    Titles,
+}
+
+impl Task {
+    fn schema(self) -> &'static str {
+        match self {
+            Task::Clips => SCHEMA,
+            Task::Titles => TITLE_SCHEMA,
         }
     }
 }
@@ -260,10 +281,18 @@ async fn exclusive<T: Send + 'static>(
 ) -> Result<T> {
     background(move || {
         let engine = app.state::<AgentEngine>();
-        let _job = engine
-            .0
-            .try_lock()
-            .map_err(|_| "Another assistant task is still running.".to_string())?;
+        // Titles and Find clips can overlap, so wait a while for the assistant
+        // to be free rather than failing the second one.
+        let deadline = Instant::now() + BUSY_WAIT;
+        let _job = loop {
+            match engine.0.try_lock() {
+                Ok(guard) => break guard,
+                Err(std::sync::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Err(_) => return Err("Another assistant task is still running.".to_string()),
+            }
+        };
         CANCEL.store(false, Ordering::SeqCst);
         work()
     })
@@ -741,6 +770,7 @@ fn ask(
     quality: Quality,
     model: Option<&str>,
     prompt: &str,
+    shape: &str,
     limit: Duration,
 ) -> std::result::Result<String, Failure> {
     let path = find_program(provider)
@@ -768,7 +798,7 @@ fn ask(
                     "--output-format",
                     "json",
                     "--json-schema",
-                    SCHEMA,
+                    shape,
                     "--tools",
                     "",
                     "--no-session-persistence",
@@ -791,7 +821,7 @@ fn ask(
             let schema = dir.join("schema.json");
             let answer = dir.join("answer.txt");
             // Written without a byte-order mark, which Codex rejects.
-            fs::write(&schema, SCHEMA).map_err(failed)?;
+            fs::write(&schema, shape).map_err(failed)?;
             command
                 .args([
                     "exec",
@@ -871,13 +901,22 @@ pub async fn run_agent_search(
     quality: Quality,
     model: Option<String>,
     prompt: String,
+    task: Task,
 ) -> Result<String> {
     if prompt.trim().is_empty() || prompt.len() > MAX_PROMPT {
         return Err("The transcript is empty or too long to send.".into());
     }
     let model = clean_model(model)?;
     exclusive(app, move || {
-        ask(provider, quality, model.as_deref(), &prompt, SEARCH_TIMEOUT).map_err(Failure::message)
+        ask(
+            provider,
+            quality,
+            model.as_deref(),
+            &prompt,
+            task.schema(),
+            SEARCH_TIMEOUT,
+        )
+        .map_err(Failure::message)
     })
     .await
 }
@@ -928,6 +967,7 @@ pub async fn test_agent(
             quality,
             model.as_deref(),
             PING,
+            SCHEMA,
             TEST_TIMEOUT,
         )))
     })
@@ -1151,6 +1191,21 @@ mod tests {
     }
 
     #[test]
+    fn each_task_asks_for_its_own_shape_of_answer() {
+        let titles: Value = serde_json::from_str(Task::Titles.schema()).unwrap();
+        assert_eq!(titles["required"][0], "titles");
+        assert_eq!(
+            titles["properties"]["titles"]["items"]["required"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        let clips: Value = serde_json::from_str(Task::Clips.schema()).unwrap();
+        assert_eq!(clips["required"][0], "clips");
+    }
+
+    #[test]
     fn built_in_configuration_is_valid_json_and_denies_everything() {
         let schema: Value = serde_json::from_str(SCHEMA).unwrap();
         assert_eq!(
@@ -1226,8 +1281,37 @@ mod tests {
 
     fn live(provider: Provider) {
         let quality = Quality::Fast;
-        let result = ping_result(ask(provider, quality, None, PING, Duration::from_secs(150)));
+        let result = ping_result(ask(
+            provider,
+            quality,
+            None,
+            PING,
+            SCHEMA,
+            Duration::from_secs(150),
+        ));
         assert_eq!(result.health, Health::Ready, "{:?}", result.message);
+    }
+
+    #[test]
+    #[ignore = "requires Claude Code signed in; sends one tiny request"]
+    fn live_claude_writes_a_title() {
+        let prompt = "Write one title for the clip below: 3 to 8 words, Title Case. Respond with JSON only, in this shape: {\"titles\":[{\"id\":0,\"title\":\"\"}]}
+
+Transcript:
+If your bread keeps coming out dense you are probably not letting it rise long enough. Give it a warm spot and double the time.";
+        let raw = ask(
+            Provider::Claude,
+            Quality::Fast,
+            None,
+            prompt,
+            Task::Titles.schema(),
+            Duration::from_secs(150),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        let title = value["titles"][0]["title"].as_str().unwrap();
+        eprintln!("TITLE: {title}");
+        assert!(title.split_whitespace().count() >= 2);
     }
 
     #[test]
@@ -1251,6 +1335,7 @@ mod tests {
             Quality::Fast,
             model.as_deref(),
             PING,
+            SCHEMA,
             Duration::from_secs(150),
         ));
         assert_eq!(result.health, Health::Ready, "{:?}", result.message);

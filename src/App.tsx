@@ -29,7 +29,7 @@ type MomentPick = { index: number | null; confident: boolean }
 import { Settings } from './Settings'
 import type { Section } from './Settings'
 import { AgentSetup } from './AgentSetup'
-import { AGENT_CANCELED, AGENT_SIGNED_OUT, AgentFormatError, agentMessage, agentMeta, buildAgentPrompt, parseAgentClips, pickBest, windowCues, AGENT_CHUNK_SECONDS } from './agents'
+import { AGENT_CANCELED, AGENT_SIGNED_OUT, AgentFormatError, agentMessage, agentMeta, buildAgentPrompt, buildTitlePrompt, parseAgentClips, parseAgentTitle, pickBest, windowCues, AGENT_CHUNK_SECONDS } from './agents'
 import { UpdateIndicator, UpdatePrompt } from './UpdatePrompt'
 import { useAppUpdate } from './useAppUpdate'
 import { exportFileName, readPreferences, writePreferences } from './preferences'
@@ -1056,7 +1056,12 @@ export function App() {
     return info
   }, [])
 
+  // The assistant chosen in Settings → AI also writes titles, so one choice covers all AI work.
+  const titleAgent = preferences.aiProvider !== 'local' && preferences.aiConsent[preferences.aiProvider] ? preferences.aiProvider : null
+
   const confirmTitleDownload = async (automatic: boolean, hasTranscript = false, searching = false) => {
+    // With an assistant there is no language model to download, only the speech model.
+    if (titleAgent && !searching) return confirmSpeechDownload(hasTranscript)
     const model = await refreshCaptionModel()
     const allowed = localStorage.getItem(TITLE_DOWNLOAD_KEY) === 'yes' || autoTitles
     if (allowed && (model.installed || hasTranscript)) return true
@@ -1145,17 +1150,36 @@ export function App() {
         if (requestedTitle) setNotice('No speech detected in this clip.')
         return
       }
-      const progress = new Channel<string>()
-      progress.onmessage = status => { if (!stale()) setTitleProgress(status) }
-      const title = await invoke<string>('generate_title', { transcript, progress })
-      if (stale()) return
+      let title: string | undefined
+      if (titleAgent) {
+        setTitleProgress(`Asking ${agentMeta(titleAgent).name} for a title…`)
+        // An answer in the wrong shape gets one more try.
+        for (let attempt = 0; attempt < 2 && !title; attempt++) {
+          const raw = await invoke<string>('run_agent_search', {
+            provider: titleAgent, quality: preferences.aiQuality, task: 'titles', prompt: buildTitlePrompt(transcript),
+            model: titleAgent === 'opencode' ? preferences.aiModel || null : null,
+          })
+          if (stale()) return
+          try {
+            title = parseAgentTitle(raw)
+          } catch (error) {
+            if (!(error instanceof AgentFormatError) || attempt) throw error
+          }
+        }
+      } else {
+        const progress = new Channel<string>()
+        progress.onmessage = status => { if (!stale()) setTitleProgress(status) }
+        title = await invoke<string>('generate_title', { transcript, progress })
+      }
+      if (stale() || !title) return
+      const finalTitle = title
       setClips(items => items.map(item =>
         item.id === clip.id && item.start === clip.start && item.end === clip.end &&
         item.title === clip.title && item.titleManuallyEdited === clip.titleManuallyEdited
-        ? { ...item, title, titleManuallyEdited: undefined } : item))
+        ? { ...item, title: finalTitle, titleManuallyEdited: undefined } : item))
     }
     void generate().catch(error => {
-      const text = message(error)
+      const text = titleAgent ? agentMessage(error, agentMeta(titleAgent).name) : message(error)
       if (stale()) return
       if (requestedTitle) {
         setNotice(text)
@@ -1167,7 +1191,7 @@ export function App() {
       setTitleProgress('')
       if (!stale()) void refreshCaptionModel().catch(() => {})
     })
-  }, [autoTitles, busy, captionsRunning, clips, loading, momentRunning, renaming, requestedTitle, settingsOpen, source, titleError, titleProgress, refreshCaptionModel])
+  }, [autoTitles, busy, captionsRunning, clips, loading, momentRunning, renaming, requestedTitle, settingsOpen, source, titleError, titleProgress, refreshCaptionModel, titleAgent, preferences.aiQuality, preferences.aiModel])
 
   const openCaptions = (key = captionKey) => {
     setRenaming(null)
@@ -1552,7 +1576,7 @@ export function App() {
           // An assistant that answers in the wrong shape gets one more try.
           for (let attempt = 0; attempt < 2 && !clips; attempt++) {
             const raw = await invoke<string>('run_agent_search', {
-              provider: id, quality: preferences.aiQuality, model: id === 'opencode' ? preferences.aiModel || null : null, prompt,
+              provider: id, quality: preferences.aiQuality, model: id === 'opencode' ? preferences.aiModel || null : null, prompt, task: 'clips',
             })
             if (!active()) return
             try {

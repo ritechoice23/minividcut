@@ -221,7 +221,7 @@ export function Settings({
             </Row>
           </section>}
           {shown.ai && <section className="settings-card" id="settings-ai">
-            <h2>AI</h2><p className="lead">Choose what finds your clips. Use an assistant you already have, or run everything on this PC.</p>
+            <h2>AI</h2><p className="lead">Choose what finds your clips and writes their titles. Use an assistant you already have, or run everything on this PC.</p>
             {show.models && <AgentSetup visible={open} preferences={preferences} onPreferences={onPreferences} localReady={models.some(model => model.id === 'language' && model.installed)} />}
             {show.models && <h3 className="agent-subhead">On this device</h3>}
             {show.models && <p className="lead">Download once. These run offline on your PC.</p>}

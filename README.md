@@ -8,7 +8,7 @@ Tell **Smart Split** what you’re looking for, like “the funniest moments und
 
 The AI runs on your PC after you download the models you need. Your videos stay on your device.
 
-Already use Claude Code, Codex or OpenCode? Choose one in **Settings → AI** and Smart Split uses it instead of the on-device model. Click **Sign in** and finish in your browser. Only the transcript text is sent to that assistant, never your video or audio, and MiniVidCut never sees your sign-in. Usage counts toward your own plan or API key.
+Already use Claude Code, Codex or OpenCode? Choose one in **Settings → AI** and Smart Split and clip titles use it instead of the on-device model. Click **Sign in** and finish in your browser. Only the transcript text is sent to that assistant, never your video or audio, and MiniVidCut never sees your sign-in. Usage counts toward your own plan or API key.
 
 [![Total installer downloads](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fritechoice23%2Fminividcut%2Fmain%2Fdocs%2Fdownload-stats.json&query=%24.installerDownloads&label=downloads&color=blue)](https://github.com/ritechoice23/minividcut/releases)
 

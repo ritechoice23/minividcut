@@ -5,8 +5,8 @@ import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { confirm, open } from '@tauri-apps/plugin-dialog'
 import {
-  ArrowDownToLine, AudioLines, Check, ChevronLeft, ChevronRight, Clapperboard, Copy, Crop, Ellipsis, FastForward, Film, FolderOpen,
-  GripVertical, Keyboard, LoaderCircle, Minus, Monitor, Move, Music2, Pause, Pencil, Play, Plus, Redo2, Rewind, RotateCcw,
+  ArrowDownToLine, AudioLines, Check, ChevronLeft, ChevronRight, Clapperboard, Copy, Crop, FastForward, Film, FolderOpen,
+  Keyboard, LoaderCircle, Minus, Monitor, Move, Music2, Pause, Pencil, Play, Plus, Redo2, Rewind, RotateCcw,
   Scissors, ScissorsLineDashed, Search, Settings as SettingsIcon, SlidersHorizontal, Smartphone, Sparkles, Split, Square, Subtitles, Trash2, Type,
   Undo2, Volume2, VolumeX, X, ZoomIn, ZoomOut,
   BookOpen, Flame, Heart, Laugh, Lightbulb, ListChecks, Quote, Rocket, Sun, Zap,
@@ -20,9 +20,10 @@ import type { Clip, ExportUnit, Range } from './clip'
 import { MAX_TIMELINE_ZOOM, panTimeline, timelineFrames, timelineOverlaps, timelineTime, timelineWindow, ZOOM_STEPS, zoomAround, zoomTimeline } from './timeline'
 import { CENTER, frameTravel, panPosition } from './framing'
 import type { FramePosition, Framing } from './framing'
-import { fileSize, groupExportStates, summarizeExport } from './export-progress'
+import { groupExportStates, summarizeExport } from './export-progress'
 import type { ExportProgress, ExportState } from './export-progress'
-import { ClipActions } from './ClipActions'
+import { ClipRow, clipColor } from './ClipRow'
+import type { ClipRowActions } from './ClipRow'
 import { ContextMenu } from './ContextMenu'
 import type { MenuItem, MenuState } from './ContextMenu'
 type MomentPick = { index: number | null; confident: boolean }
@@ -156,23 +157,6 @@ function AccessibleScrubber({ duration, seek }: { duration: number; seek: (time:
   return <input className="accessible-scrubber" aria-label="Playhead time" type="range"
     min={0} max={duration} step="any" value={time} onChange={event => seek(Number(event.target.value))} />
 }
-
-function ExportBadge({ state }: { state: ExportState }) {
-  const device = state.status === 'saved'
-    ? (state.encoder.startsWith('lib') ? 'CPU' : 'GPU')
-    : undefined
-  const label = state.status === 'saved' ? `${fileSize(state.bytes)} · ${device}`
-    : state.status === 'encoding' ? `${Math.floor(state.fraction * 100)}%`
-    : state.status === 'failed' ? 'Failed' : state.status === 'canceled' ? 'Canceled' : 'Queued'
-  const title = state.status === 'failed' ? state.error
-    : state.status === 'saved' ? `Encoded on ${device} (${state.encoder})` : undefined
-  return <span className={`export-badge ${state.status}`} title={title}>
-    {state.status === 'saved' && <Check size={12} />} {label}
-  </span>
-}
-
-const CLIP_COLORS = ['#78bfff', '#d4a0ff', '#f5bb70', '#7fe0b6', '#ff9db4', '#a6c9ff', '#e8d982', '#9bdfec', '#efad87', '#c3e887', '#e7a4e9', '#a5a8ff']
-const clipColor = (id: number) => CLIP_COLORS[Math.max(0, id - 1) % CLIP_COLORS.length]
 
 function TimeField({ label, value, onChange, onMark, disabled }: {
   label: string; value: number; onChange: (time: number) => boolean; onMark: () => void; disabled: boolean
@@ -2634,6 +2618,67 @@ export function App() {
     captionClip(clip)
   }
 
+  // Clip rows are memoized so a trim drag, a caption keystroke or a wheel pan no
+  // longer re-renders every row. They get one never-changing actions object
+  // whose methods forward to the handlers of the latest render.
+  const rowHandlers: ClipRowActions = {
+    select: (clip, clicks) => {
+      if (clicks === 1) renameClick.current = clip.id
+      selectClip(clip)
+    },
+    doubleClick: (clip, locked) => {
+      if (locked || renameClick.current !== clip.id) return
+      renameClick.current = null
+      setRenaming(clip.id)
+    },
+    startRename: id => { renameClick.current = null; setRenaming(id) },
+    cancelRename: () => setRenaming(null),
+    rename: renameClip,
+    reorder: reorderClip,
+    dragStart: index => { dragFrom.current = index },
+    isDragging: () => dragFrom.current !== null,
+    drop: index => {
+      if (dragFrom.current !== null && index >= 0) reorderClip(dragFrom.current, index)
+      dragFrom.current = null
+    },
+    dragEnd: () => { dragFrom.current = null },
+    toggleMenu: id => setClipActions(current => current === id ? null : id),
+    closeMenu: closeClipActions,
+    preview: previewClip,
+    retitle: clip => void titleClip(clip),
+    captions: captionClip,
+    update: updateClip,
+    duplicate: duplicateClip,
+    exportOnly,
+    remove: removeClip,
+  }
+  const rowHandlersRef = useRef(rowHandlers)
+  rowHandlersRef.current = rowHandlers
+  const rowActions = useMemo<ClipRowActions>(() => {
+    const latest = () => rowHandlersRef.current
+    return {
+      select: (clip, clicks) => latest().select(clip, clicks),
+      doubleClick: (clip, locked) => latest().doubleClick(clip, locked),
+      startRename: id => latest().startRename(id),
+      cancelRename: () => latest().cancelRename(),
+      rename: (id, title) => latest().rename(id, title),
+      reorder: (from, to) => latest().reorder(from, to),
+      dragStart: index => latest().dragStart(index),
+      isDragging: () => latest().isDragging(),
+      drop: index => latest().drop(index),
+      dragEnd: () => latest().dragEnd(),
+      toggleMenu: id => latest().toggleMenu(id),
+      closeMenu: () => latest().closeMenu(),
+      preview: clip => latest().preview(clip),
+      retitle: clip => latest().retitle(clip),
+      captions: clip => latest().captions(clip),
+      update: clip => latest().update(clip),
+      duplicate: clip => latest().duplicate(clip),
+      exportOnly: clip => latest().exportOnly(clip),
+      remove: clip => latest().remove(clip),
+    }
+  }, [])
+
   const clipMenuItems = (clip: Clip): MenuItem[] => {
     const locked = clipLocked(clip.id)
     return [
@@ -3104,106 +3149,28 @@ export function App() {
             <p>Find clips with AI, or mark In and Out on the timeline and press Add clip.</p></div> :
             <ol className="clip-list">{displayedClips.map((clip, index) => {
               const batchIndex = batchIndices.get(clip.id)
-              const state = batchIndex === undefined ? undefined : exportBatch?.states[batchIndex]
               const locked = clipLocked(clip.id)
               const clipOptions = locked ? exportBatch?.options : undefined
               const thumbPosition = clipOptions?.position ?? position
-              const title = clip.title ?? `Clip ${String(index + 1).padStart(2, '0')}`
-              const editing = renaming === clip.id
-              const texts = normalizeTexts(clip.texts ?? clip.text).some(textActive)
               const ends = effectiveBookends(projectBookends, clip.bookends)
-              const hasMusic = Boolean(effectiveMusic(projectMusic, clip.music))
-              const realIndex = clips.indexOf(clip)
-              return <li key={clip.id} data-clip-id={clip.id} className={clip.id === selectedId ? 'selected' : ''}
-                draggable={realIndex >= 0 && !busy && !editing && clips.length > 1}
-                onDragStart={event => { dragFrom.current = realIndex; event.dataTransfer.effectAllowed = 'move' }}
-                onDragOver={event => { if (dragFrom.current !== null) event.preventDefault() }}
-                onDrop={event => {
-                  event.preventDefault()
-                  if (dragFrom.current !== null && realIndex >= 0) reorderClip(dragFrom.current, realIndex)
-                  dragFrom.current = null
-                }}
-                onDragEnd={() => { dragFrom.current = null }}>
-                {clips.length > 1 && realIndex >= 0 && <span className="grip" aria-hidden="true" title="Drag to reorder"><GripVertical size={15} /></span>}
-                <span className="clip-number">{String(index + 1).padStart(2, '0')}</span>
-                {editing ? <form className="clip-rename" aria-label="Edit clip title" onSubmit={event => {
-                  event.preventDefault()
-                  const value = String(new FormData(event.currentTarget).get('title') ?? '')
-                  renameClip(clip.id, value === title && !clip.title ? '' : value)
-                }} onKeyDown={event => {
-                  if (event.key === 'Escape') {
-                    event.stopPropagation()
-                    setRenaming(null)
-                  }
-                }}>
-                  <input autoFocus name="title" aria-label={`Rename ${title}`} maxLength={80} defaultValue={title}
-                    onFocus={event => event.currentTarget.select()} />
-                  <button type="submit" className="icon-button compact save-title" title="Save title" aria-label="Save title"><Check size={15} /></button>
-                  <button type="button" className="icon-button compact" title="Cancel rename" aria-label="Cancel rename" onClick={() => setRenaming(null)}><X size={14} /></button>
-                </form> : <button className="clip-select" aria-pressed={clip.id === selectedId} disabled={disabled}
-                  title={locked ? `${title} · Preview only during export` : `${title} · Double-click to rename · Alt ↑/↓ to reorder`}
-                  onClick={event => {
-                    if (event.detail === 1) renameClick.current = clip.id
-                    selectClip(clip)
-                  }}
-                  onDoubleClick={() => {
-                    if (locked || renameClick.current !== clip.id) return
-                    renameClick.current = null
-                    setRenaming(clip.id)
-                  }}
-                  onKeyDown={event => {
-                    if (event.key === 'F2' && !locked) {
-                      event.preventDefault()
-                      renameClick.current = null
-                      setRenaming(clip.id)
-                    } else if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown') && realIndex >= 0) {
-                      event.preventDefault()
-                      reorderClip(realIndex, realIndex + (event.key === 'ArrowUp' ? -1 : 1))
-                    }
-                  }}>
-                  <span className="clip-thumbnail" style={{ aspectRatio: FORMATS[clipOptions?.format ?? format].aspect }}>
-                    {clipFrames[clip.start]
-                      ? <img alt="" src={clipFrames[clip.start]} style={{ objectFit: (clipOptions?.framing ?? framing) === 'fill' ? 'cover' : 'contain', objectPosition: `${thumbPosition.x}% ${thumbPosition.y}%` }} />
-                      : <Film size={15} />}
-                  </span>
-                  <span className="clip-details">
-                    <strong>{title}</strong>
-                    <small><span className="duration-chip" style={{ '--clip-color': clipColor(clip.id) } as CSSProperties}>{clipDuration(clip.end - clip.start)}</span> {stamp(clip.start)} – {stamp(clip.end)}</small>
-                    <span className="clip-flags">
-                      {(() => {
-                        const captioned = Boolean(clip.captions?.cues.some(cue => cue.text.trim()))
-                        const bookended = Boolean(ends.intro || ends.outro)
-                        return <>
-                          <span className={`clip-flag${captioned ? ' on' : ' warn'}`} title={captioned ? 'Has captions' : 'No captions yet'}><Subtitles size={12} /></span>
-                          <span className={`clip-flag${hasMusic ? ' on' : ''}`} title={hasMusic ? 'Has music' : 'No music'}><Music2 size={12} /></span>
-                          <span className={`clip-flag${texts ? ' on' : ''}`} title={texts ? 'Has text on picture' : 'No text'}><Type size={12} /></span>
-                          <span className={`clip-flag${bookended ? ' on' : ''}`} title={bookended ? 'Has intro or outro' : 'No intro or outro'}><Clapperboard size={12} /></span>
-                        </>
-                      })()}
-                    </span>
-                  </span>
-                </button>}
-                {state && <ExportBadge state={state} />}
-                {!locked && !editing && <button className="icon-button compact clip-more" aria-label={`Actions for ${title}`} title="Clip actions"
-                  aria-expanded={clipActions === clip.id} aria-controls={clipActions === clip.id ? `clip-actions-${clip.id}` : undefined}
-                  disabled={disabled} onClick={() => setClipActions(current => current === clip.id ? null : clip.id)}><Ellipsis size={17} /></button>}
-                {!locked && !editing && clipActions === clip.id && <ClipActions id={`clip-actions-${clip.id}`} label={`Actions for ${title}`} onClose={closeClipActions}>
-                  <button onClick={() => { setClipActions(null); previewClip(clip) }}><Play size={14} /> Preview finished clip</button>
-                  <button onClick={() => { setClipActions(null); setRenaming(clip.id) }}><Pencil size={14} /> Rename</button>
-                  <button onClick={() => { setClipActions(null); void titleClip(clip) }}>
-                    <Sparkles size={15} /> {clip.title ? 'Retitle with AI' : 'Title with AI'}
-                  </button>
-                  <button onClick={() => { setClipActions(null); captionClip(clip) }}>
-                    <Subtitles size={15} /> {clipsNeedingCaptions([clip]).length ? 'Generate captions' : 'Edit captions'}
-                  </button>
-                  <button disabled={busy || !validRange(range, duration)} onClick={() => { setClipActions(null); updateClip(clip) }}>
-                    <Check size={14} /> Update from timeline range</button>
-                  <button disabled={busy || clips.length >= MAX_CLIPS} onClick={() => duplicateClip(clip)}><Copy size={14} /> Duplicate</button>
-                  <button disabled={busy} onClick={() => { setClipActions(null); exportOnly(clip) }}><ArrowDownToLine size={14} /> Export only this clip</button>
-                  <button className="danger" disabled={captionJob.current?.keys.has(`clip-${clip.id}`)} onClick={() => removeClip(clip)}><Trash2 size={14} /> Remove clip</button>
-                </ClipActions>}
-                {state?.status === 'encoding' && <div className="clip-meter" aria-hidden="true"><span style={{ width: `${state.fraction * 100}%` }} /></div>}
-              </li>
+              return <ClipRow key={clip.id} clip={clip} position={index} savedIndex={clips.indexOf(clip)}
+                title={clip.title ?? `Clip ${String(index + 1).padStart(2, '0')}`}
+                selected={clip.id === selectedId} locked={locked} editing={renaming === clip.id}
+                disabled={disabled} busy={busy} reorderable={clips.length > 1}
+                aspect={FORMATS[clipOptions?.format ?? format].aspect}
+                fit={(clipOptions?.framing ?? framing) === 'fill' ? 'cover' : 'contain'}
+                objectPosition={`${thumbPosition.x}% ${thumbPosition.y}%`}
+                thumbnail={clipFrames[clip.start]}
+                hasMusic={Boolean(effectiveMusic(projectMusic, clip.music))}
+                hasText={normalizeTexts(clip.texts ?? clip.text).some(textActive)}
+                hasBookends={Boolean(ends.intro || ends.outro)}
+                needsCaptions={!clip.captions?.cues.some(cue => cue.text.trim())}
+                state={batchIndex === undefined ? undefined : exportBatch?.states[batchIndex]}
+                menuOpen={clipActions === clip.id}
+                canUpdate={!busy && validRange(range, duration)}
+                canDuplicate={!busy && clips.length < MAX_CLIPS}
+                canRemove={!captionJob.current?.keys.has(`clip-${clip.id}`)}
+                actions={rowActions} />
             })}</ol>}
           <footer className="sheet-foot">
             <span>Double-click a clip to rename</span>
